@@ -31,7 +31,24 @@ export async function dispatchTool(env: Env, name: ToolName, input: unknown, gra
   const data = validated.data as Record<string, unknown>;
   if (name === "device_list") {
     const records = await registry(env);
-    return { devices: records, onlineStatus: "last-known (KV eventual consistency)" };
+    // Check live DO WebSocket state only on Agent demand, never by polling.
+    // Limit concurrent DO calls to keep list operations bounded.
+    const updated: DeviceRecord[] = [];
+    for (let offset = 0; offset < records.length; offset += 8) {
+      const batch = records.slice(offset, offset + 8);
+      updated.push(...await Promise.all(batch.map(async record => {
+        try {
+          const stub = env.DEVICE_SESSIONS.get(env.DEVICE_SESSIONS.idFromName(record.deviceId));
+          const response = await stub.fetch("https://device.internal/status");
+          if (!response.ok) return { ...record, state: "unknown" as const };
+          const state = await response.json() as { online?: boolean };
+          return { ...record, state: state.online ? "online" as const : "offline" as const };
+        } catch {
+          return { ...record, state: "unknown" as const };
+        }
+      })));
+    }
+    return { devices: updated, onlineStatus: "checked on request" };
   }
   const deviceId = data.deviceId as string;
   const stub = env.DEVICE_SESSIONS.get(env.DEVICE_SESSIONS.idFromName(deviceId));
