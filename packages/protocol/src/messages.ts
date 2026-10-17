@@ -26,7 +26,7 @@ export const ProtocolMessageSchema = z.discriminatedUnion('type', [
   z.object({ ...Base, type: z.literal('device.hello'), payload: z.object({ deviceName: z.string().min(1).max(128), platform: z.string().min(1).max(64), clientVersion: z.string().min(1).max(64), protocolVersion: z.number().int().positive() }).strict() }).strict(),
   z.object({ ...Base, type: z.literal('device.capabilities'), payload: z.object({ capabilities: z.array(z.string().min(1).max(128)).max(256) }).strict() }).strict(),
   z.object({ ...Base, type: z.literal('device.ready'), payload: z.object({ ready: z.literal(true) }).strict() }).strict(),
-  z.object({ ...OperationBase, type: z.literal('operation.dispatch'), grantId: Id, expiresAt: IsoDate, requestHash: z.string().regex(/^[a-f0-9]{64}$/), toolName: z.string().min(1).max(64), input: z.record(z.string(), JsonValue) }).strict(),
+  z.object({ ...OperationBase, type: z.literal('operation.dispatch'), grantId: Id, actorName: z.string().max(80).optional(), expiresAt: IsoDate, requestHash: z.string().regex(/^[a-f0-9]{64}$/), toolName: z.string().min(1).max(64), input: z.record(z.string(), JsonValue) }).strict(),
   z.object({ ...OperationBase, type: z.literal('operation.accepted'), payload: z.object({ acceptedAt: IsoDate }).strict() }).strict(),
   z.object({ ...OperationBase, type: z.literal('operation.started'), payload: z.object({ startedAt: IsoDate }).strict() }).strict(),
   z.object({ ...OperationBase, type: z.literal('operation.result.begin'), payload: z.object({ stdoutBytes: z.number().int().nonnegative().max(LIMITS.operationOutputBytes), stderrBytes: z.number().int().nonnegative().max(LIMITS.operationOutputBytes) }).strict() }).strict(),

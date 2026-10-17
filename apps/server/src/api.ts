@@ -24,7 +24,7 @@ function secureError(code: string, message: string, operationId?: string): Recor
   return { isError: true, code, message, ...(operationId ? { operationId } : {}) };
 }
 
-export async function dispatchTool(env: Env, name: ToolName, input: unknown, grantId: string) {
+export async function dispatchTool(env: Env, name: ToolName, input: unknown, grantId: string, actorName?: string) {
   const schema = toolInputSchemas[name];
   const validated = schema.safeParse(input);
   if (!validated.success) return secureError("INVALID_INPUT", validated.error.message.slice(0, 1500));
@@ -54,13 +54,13 @@ export async function dispatchTool(env: Env, name: ToolName, input: unknown, gra
   const stub = env.DEVICE_SESSIONS.get(env.DEVICE_SESSIONS.idFromName(deviceId));
   const result = await stub.fetch("https://device.internal/rpc", {
     method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ name, input: data, grantId, operationId: crypto.randomUUID() }),
+    body: JSON.stringify({ name, input: data, grantId, actorName, operationId: crypto.randomUUID() }),
   });
   const body = await result.json() as Record<string, unknown>;
   return body;
 }
 
-export function makeMcpServer(env: Env, grantId: string): McpServer {
+export function makeMcpServer(env: Env, grantId: string, actorName?: string): McpServer {
   const server = new McpServer({ name: "deskbeacon", version: "0.1.0" });
   for (const name of TOOL_NAMES) {
     const schema = toolInputSchemas[name];
@@ -68,7 +68,7 @@ export function makeMcpServer(env: Env, grantId: string): McpServer {
       description: descriptions[name] ?? name.replaceAll("_", " "),
       inputSchema: schema as any,
     }, async (input: any) => {
-      const result = await dispatchTool(env, name, input, grantId);
+      const result = await dispatchTool(env, name, input, grantId, actorName);
       const error = result.isError === true;
       const content: any[] = [];
       if (!error && name === "screen_capture" && typeof result.data === "object" && result.data &&
@@ -104,7 +104,7 @@ export async function handleApiRequest(request: Request, env: Env, ctx: ApiCtx):
   if (pathname === "/mcp") {
     if (props?.kind !== "agent" || !scopes.includes(scopeAgent)) return Response.json({ error: "FORBIDDEN" }, { status: 403 });
     const grantId = props.grantId;
-    const handler = createMcpHandler(() => makeMcpServer(env, grantId), { legacy: "stateless" });
+    const handler = createMcpHandler(() => makeMcpServer(env, grantId, props.actorName), { legacy: "stateless" });
     return handler.fetch(request);
   }
   if (pathname === "/device/connect") {

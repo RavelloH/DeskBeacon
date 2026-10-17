@@ -108,7 +108,7 @@ export async function handleAuthorize(request: Request, env: Env): Promise<Respo
 		const client = await oauth.lookupClient(approved.request.clientId);
 		const props: GrantProps = scope === DEVICE_SCOPE
 		  ? { kind: "device", ownerId: "owner", deviceId: approved.request.clientId, deviceName: client?.clientName ?? "DeskBeacon device" }
-		  : { kind: "agent", ownerId: "owner", grantId: crypto.randomUUID() };
+		  : { kind: "agent", ownerId: "owner", grantId: crypto.randomUUID(), actorName: client?.clientName?.slice(0,80) ?? "Agent" };
 		const { redirectTo } = await oauth.completeAuthorization({
 			request: approved.request,
 			userId: "owner",

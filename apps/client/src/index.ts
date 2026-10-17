@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { createServer } from 'node:http';
 import { createInterface } from 'node:readline/promises';
+import { once } from 'node:events';
+import { fileURLToPath } from 'node:url';
 import { randomBytes, createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { hostname } from 'node:os';
@@ -49,7 +51,7 @@ async function setup(base:string) {
    authorize.searchParams.set('redirect_uri',redirect);authorize.searchParams.set('scope','deskbeacon:device');
    authorize.searchParams.set('state',state);authorize.searchParams.set('code_challenge',challenge);
    authorize.searchParams.set('code_challenge_method','S256');
-   console.log('Open the authorization page and sign in with Owner credentials:\n'+authorize.href);
+   console.log('Open the authorization page and enter your OAuth authorization secret:\n'+authorize.href);
    openBrowser(authorize.href);
    const authorizationCode=await Promise.race([code,new Promise<never>((_,reject)=>setTimeout(()=>reject(Error('OAuth callback timeout')),180_000))]);
    const token=await fetch(base+'/oauth/token',{method:'POST',
@@ -65,52 +67,144 @@ async function setup(base:string) {
    console.log('DeskBeacon device paired. Device ID: '+client.client_id);
  }finally{callback.close();}
 }
-async function launchDaemon(){
- try{return await requestIpc({action:'status'},900);}catch{}
- if(!existsSync(configPath))throw Error('Not configured; run deskbeacon setup --url YOUR_WORKER_URL');
- const child=spawn(process.execPath,[process.argv[1]!, 'daemon'],{detached:true,stdio:'ignore',
-   windowsHide:true,cwd:process.cwd()});
- child.unref();
- for(let attempt=0;attempt<35;attempt++){
-   await sleep(200);
-   try{return await requestIpc({action:'status'},600);}catch{}
- }
- throw Error('Daemon failed to start; run deskbeacon daemon in foreground for diagnostics');
+const pkg={version:'0.1.0'};
+const entry=fileURLToPath(import.meta.url);
+async function promptUrl():Promise<string>{
+  if(!process.stdin.isTTY)throw Error('Run deskbeacon setup --url https://your-worker.example from a terminal');
+  const io=createInterface({input:process.stdin,output:process.stdout});
+  try{
+    const url=(await io.question('DeskBeacon Worker URL (https://...): ')).trim();
+    if(!url)throw Error('Worker URL is required');
+    return url;
+  }finally{io.close();}
+}
+async function configured(){
+  if(!existsSync(configPath))await setup(await promptUrl());
+}
+async function currentRuntime(timeout=700):Promise<any|null>{
+  try{return await requestIpc({action:'status'},timeout);}catch{return null;}
+}
+async function ownerRuntime(background:boolean):Promise<void>{
+  process.env.DESKBEACON_RUNTIME_MODE=background?'background':'foreground';
+  const instance=new ClientDaemon(loadConfig());
+  const server=startIpc(instance);
+  try{
+    // Binding the IPC pipe is the single-owner election. A second process never connects.
+    await once(server,'listening');
+  }catch(e){
+    instance.stop();
+    if(await currentRuntime(1500))return;
+    throw e;
+  }
+  void instance.connect();
+  let exiting=false;
+  const shutdown=async()=>{
+    if(exiting)return;
+    exiting=true;
+    await instance.shutdown();
+    await new Promise<void>(resolve=>server.close(()=>resolve()));
+  };
+  if(background){
+    const handleSignal=()=>{void shutdown().then(()=>{process.exitCode=0;});};
+    process.once('SIGINT',handleSignal);
+    process.once('SIGTERM',handleSignal);
+    return;
+  }
+  try{await showTui();}
+  finally{await shutdown();}
+}
+async function serviceStart(){
+  const running=await currentRuntime();
+  if(running){console.log('DeskBeacon is already running in '+(running.runtimeMode??'legacy')+' mode ('+running.deviceName+').');return;}
+  await configured();
+  const child=spawn(process.execPath,[entry,'__service_run'],{
+    detached:true,stdio:'ignore',windowsHide:true,cwd:process.cwd(),env:process.env
+  });
+  child.unref();
+  for(let i=0;i<40;i++){
+    await sleep(200);
+    const running=await currentRuntime(600);
+    if(running){console.log('DeskBeacon background service started.');return;}
+  }
+  throw Error('Service did not start. Run deskbeacon doctor for diagnostics.');
+}
+async function serviceStop(){
+  const active=await currentRuntime();
+  if(!active){console.log('DeskBeacon is not running.');return;}
+  if(active.runtimeMode==='foreground'){console.log('The app owns this Runtime. Close its terminal or press q instead.');return;}
+  await requestIpc({action:'exit'});
+  for(let i=0;i<40;i++){
+    if(!(await currentRuntime(400))){console.log('DeskBeacon service stopped.');return;}
+    await sleep(200);
+  }
+  throw Error('Service did not stop within the timeout.');
+}
+const usage=()=>{
+ console.log([
+  'DeskBeacon '+pkg.version+' — Your desktop, within your agent’s reach.',
+  '',
+  'Usage: deskbeacon [command]',
+  '',
+  '  (no command)            Open full-screen DeskBeacon. Own the Runtime unless',
+  '                          an existing background service is running.',
+  '  setup [--url URL]       Pair this device using OAuth (prompts for URL).',
+  '  service start           Start the Runtime in the background (no TUI).',
+  '  service stop            Stop the running Runtime.',
+  '  service restart         Restart the background service.',
+  '  service status          Show background Runtime status.',
+  '  status                  Print connected device/Runtime status.',
+  '  doctor                  Check configuration and Runtime.',
+  '  update                  Check the latest npm release and show update steps.',
+  '  version, -v, --version  Show CLI version.',
+  '  help, -h, --help        Display this help.',
+  '',
+  'Inside TUI: ? for keys, /config for settings, q to close.',
+ ].join('\n'));
+};
+async function updateCli(){
+  const remote=await fetch('https://registry.npmjs.org/deskbeacon/latest',{signal:AbortSignal.timeout(8000)});
+  if(!remote.ok){console.log('No published npm release available (HTTP '+remote.status+').');return;}
+  const data=await remote.json() as {version?:string};
+  console.log('Installed '+pkg.version+' · Latest '+(data.version??'unknown'));
+  if(data.version!==pkg.version)console.log('Use npx deskbeacon@latest or npm install -g deskbeacon@latest.');
+  else console.log('You are up to date.');
 }
 async function main(){
- const action=process.argv[2]??'launch';
- if(action==='setup'||action==='login'){const n=process.argv.indexOf('--url');const target=n>=0?process.argv[n+1]:undefined;
-   if(!target)throw Error('Usage: deskbeacon setup --url https://your-worker.example');
-   await setup(target);return;}
- if(action==='daemon'){
-   const instance=new ClientDaemon(loadConfig());
-   startIpc(instance);void instance.connect();
-   process.on('SIGINT',()=>{instance.stop();process.exit(0);});
-   process.on('SIGTERM',()=>{instance.stop();process.exit(0);});
+ const [action,...args]=process.argv.slice(2);
+ if(action==='help'||action==='-h'||action==='--help'){usage();return;}
+ if(action==='version'||action==='-v'||action==='--version'){console.log(pkg.version);return;}
+ if(action==='update'){await updateCli();return;}
+ if(action==='setup'){
+   const index=args.indexOf('--url');
+   await setup(index>=0&&args[index+1]?args[index+1]!:await promptUrl());
    return;
  }
+ if(action==='status'||(action==='service'&&args[0]==='status')){
+   const status=await currentRuntime(1500);
+   if(!status){console.log('DeskBeacon Runtime is not running.');return;}
+   console.log(JSON.stringify(status,null,2));return;
+ }
  if(action==='doctor'){
-   console.log('Node',process.version,'Platform',process.platform,'Config',existsSync(configPath)?'available':'missing');
-   if(existsSync(configPath)){const config=loadConfig();console.log('Server',config.url,'Device',config.deviceId);}
-   try{const status=await requestIpc({action:'status'});console.log('Daemon',status.state);}
-   catch{console.log('Daemon stopped');}return;
+   console.log('DeskBeacon',pkg.version,'Node',process.version,'Platform',process.platform);
+   console.log('Configuration',existsSync(configPath)?'available':'missing');
+   if(existsSync(configPath)){const c=loadConfig();console.log('Server',c.url,'Device',c.deviceId);}
+   const status=await currentRuntime();console.log('Runtime',status?.state??'stopped');
+   return;
  }
- if(action==='stop'){console.log(await requestIpc({action:'exit'}));return;}
- if(action==='status'){console.log(JSON.stringify(await requestIpc({action:'status'}),null,2));return;}
- if(action==='tui'){await showTui();return;}
- if(action==='start'){console.log(await launchDaemon());return;}
- if(action==='launch'){
-   if(!existsSync(configPath)){
-     if(!process.stdin.isTTY)throw Error('Device not configured. Run deskbeacon setup --url https://your-worker.example');
-     const io=createInterface({input:process.stdin,output:process.stdout});
-     let serverUrl='';
-     try{serverUrl=(await io.question('DeskBeacon Worker URL (https://...): ')).trim();}
-     finally{io.close();}
-     if(!serverUrl)throw Error('Worker URL is required for first-time OAuth pairing');
-     await setup(serverUrl);
-   }
-   await launchDaemon();await showTui();return;
+ if(action==='service'){
+   if(args[0]==='start'){await serviceStart();return;}
+   if(args[0]==='stop'){await serviceStop();return;}
+   if(args[0]==='restart'){await serviceStop();await serviceStart();return;}
+   throw Error('Usage: deskbeacon service <start|stop|restart|status>');
  }
- throw Error('Unknown command '+action+'. Use setup/start/tui/status/stop/doctor/daemon.');
+ if(action==='__service_run'){await ownerRuntime(true);return;}
+ if(!action){
+   if(!process.stdin.isTTY||!process.stdout.isTTY)
+     throw Error('The DeskBeacon app requires an interactive terminal. Use deskbeacon service start for headless operation.');
+   await configured();
+   if(await currentRuntime(900)){await showTui();return;}
+   await ownerRuntime(false);return;
+ }
+ throw Error('Unknown command '+action+'. Use deskbeacon help.');
 }
 void main().catch(e=>{console.error('DeskBeacon:',e instanceof Error?e.message:String(e));process.exitCode=1;});

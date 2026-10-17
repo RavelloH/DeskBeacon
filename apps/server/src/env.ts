@@ -7,7 +7,7 @@ export interface Env {
 }
 
 export type GrantProps =
-  | { kind: 'agent'; ownerId: string; grantId: string }
+  | { kind: 'agent'; ownerId: string; grantId: string; actorName?: string }
   | { kind: 'device'; ownerId: string; deviceId: string; deviceName: string };
 
 export interface DeviceRecord {

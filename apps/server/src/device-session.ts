@@ -3,7 +3,7 @@ import { LIMITS, PROTOCOL_VERSION, ProtocolMessageSchema, type ProtocolMessage }
 import type { Env } from "./env.js";
 
 type Waiter = { resolve: (value: Record<string, unknown>) => void; timer: ReturnType<typeof setTimeout>; disconnectTimer?: ReturnType<typeof setTimeout> };
-type Rpc = { name: string; input: Record<string, unknown>; grantId: string; operationId: string };
+type Rpc = { name: string; input: Record<string, unknown>; grantId: string; actorName?: string; operationId: string };
 type Row = Record<string, any>;
 const FG = new Set(["exec_foreground", "exec_batch"]);
 const HISTORY = new Set(["operation_get", "operation_output"]);
@@ -197,6 +197,7 @@ export class DeviceSession extends DurableObject<Env> {
     try {
       socket.send(JSON.stringify({version:PROTOCOL_VERSION,type:"operation.dispatch",messageId:crypto.randomUUID(),
         deviceId:"self",connectionEpoch:epoch,operationId:opId,grantId:body.grantId,
+        ...(typeof body.actorName==="string"?{actorName:body.actorName.slice(0,80)}:{}),
         expiresAt:new Date(expires).toISOString(),requestHash,toolName:body.name,input}));
     } catch(error) {
       this.finish(opId,failure("DEVICE_DISCONNECTED",String(error),opId),"unknown");

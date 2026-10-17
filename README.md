@@ -86,11 +86,25 @@ node apps/client/dist/index.js setup --url https://your-worker.example
 启动客户端并打开本地终端界面：
 
 ```bash
-node apps/client/dist/index.js start
-node apps/client/dist/index.js tui
+node apps/client/dist/index.js
 ```
 
-也可以使用 `status` 查看连接状态、使用 `stop` 停止客户端。在其他电脑上重复上述步骤即可添加设备。
+你可以使用 status 查看设备状态；要停止后台服务，请使用 service stop。
+
+
+也可以省略 setup 的 --url，客户端会交互式询问服务端地址。首次直接执行根命令时，如未配置，也会自动进入配对流程。
+
+如果不希望一直打开终端界面，可以显式启动后台服务：
+
+```bash
+node apps/client/dist/index.js service start
+node apps/client/dist/index.js service status
+node apps/client/dist/index.js service stop
+```
+
+后台服务运行时，根命令只打开 TUI，不再创建第二条连接；关闭 TUI 也不会停止后台服务。未运行后台服务时，主窗口关闭即停止远程连接。
+
+其他常用命令有 help、version、doctor 和 update。
 
 ### 3. 连接 AI Agent
 
