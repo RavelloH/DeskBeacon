@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "deskbeacon-server",
+  "name": "deskbeacon",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-17",
   "compatibility_flags": [
@@ -10,13 +10,12 @@
     "enabled": false
   },
   "vars": {
-    "PUBLIC_BASE_URL": "http://localhost:8787",
-    "OWNER_LOGIN": "owner"
+    "MCP_BASE_URL": ""
   },
   "kv_namespaces": [
     {
       "binding": "OAUTH_KV",
-      "id": "a84b7df46fa742ba902b5fc6d951890f" // replace with your KV namespace ID
+      "id": "a84b7df46fa742ba902b5fc6d951890f"
     }
   ],
   "durable_objects": {

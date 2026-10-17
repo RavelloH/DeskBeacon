@@ -41,7 +41,7 @@ export class ClientDaemon {
   private async refreshAccessToken(){
     if(!this.config.refreshToken)return;
     if(!this.forceRefresh&&this.config.accessTokenExpiresAt&&Date.now()<this.config.accessTokenExpiresAt-60_000)return;
-    const response=await fetch(this.config.url+"/token",{method:"POST",headers:{"content-type":"application/x-www-form-urlencoded"},body:new URLSearchParams({grant_type:"refresh_token",refresh_token:this.config.refreshToken,client_id:this.config.clientId})});
+    const response=await fetch(this.config.url+"/oauth/token",{method:"POST",headers:{"content-type":"application/x-www-form-urlencoded"},body:new URLSearchParams({grant_type:"refresh_token",refresh_token:this.config.refreshToken,client_id:this.config.clientId})});
     if(!response.ok)throw Error("DEVICE_TOKEN_REFRESH_FAILED "+response.status);
     const token=await response.json() as {access_token:string;refresh_token?:string;expires_in?:number};
     this.config.accessToken=token.access_token;

@@ -38,7 +38,7 @@ async function setup(base:string) {
  const addr=callback.address();if(!addr||typeof addr==='string')throw Error('Local callback unavailable');
  const redirect='http://127.0.0.1:'+addr.port+'/callback';
  try {
-   const register=await fetch(base+'/register',{method:'POST',headers:{'content-type':'application/json'},
+   const register=await fetch(base+'/oauth/register',{method:'POST',headers:{'content-type':'application/json'},
      body:JSON.stringify({client_name:'DeskBeacon Device '+hostname(),redirect_uris:[redirect],
        token_endpoint_auth_method:'none',grant_types:['authorization_code','refresh_token'],response_types:['code']})});
    if(!register.ok)throw Error('Device OAuth registration failed: HTTP '+register.status+' '+(await register.text()).slice(0,500));
@@ -52,7 +52,7 @@ async function setup(base:string) {
    console.log('Open the authorization page and sign in with Owner credentials:\n'+authorize.href);
    openBrowser(authorize.href);
    const authorizationCode=await Promise.race([code,new Promise<never>((_,reject)=>setTimeout(()=>reject(Error('OAuth callback timeout')),180_000))]);
-   const token=await fetch(base+'/token',{method:'POST',
+   const token=await fetch(base+'/oauth/token',{method:'POST',
      headers:{'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({
        grant_type:'authorization_code',client_id:client.client_id,code:authorizationCode,
        redirect_uri:redirect,code_verifier:codeVerifier

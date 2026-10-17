@@ -15,39 +15,40 @@ const field=(html,name)=>{
 };
 async function oauth(scope){
  cookies.clear();
- const verifier=randomBytes(32).toString('base64url');
- const challenge=createHash('sha256').update(verifier).digest('base64url');
- const redirect='http://127.0.0.1:52618/callback';
- const registration=await req('/register',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({
-   client_name:'DeskBeacon E2E '+scope,redirect_uris:[redirect],grant_types:['authorization_code','refresh_token'],
-   response_types:['code'],token_endpoint_auth_method:'none'
+ const verifier=randomBytes(32).toString("base64url");
+ const challenge=createHash("sha256").update(verifier).digest("base64url");
+ const redirect="http://127.0.0.1:52618/callback";
+ const registration=await req("/oauth/register",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({
+   client_name:"DeskBeacon E2E "+scope,redirect_uris:[redirect],grant_types:["authorization_code","refresh_token"],
+   response_types:["code"],token_endpoint_auth_method:"none"
  })});
- if(registration.status!==201)throw Error('Registration '+registration.status+' '+await registration.text());
+ if(registration.status!==201)throw Error("Registration "+registration.status+" "+await registration.text());
  const client=await registration.json();
- const auth='/authorize?'+new URLSearchParams({client_id:client.client_id,scope,response_type:'code',redirect_uri:redirect,
-   state:'test-state',code_challenge:challenge,code_challenge_method:'S256'});
+ const auth="/authorize?"+new URLSearchParams({client_id:client.client_id,scope,response_type:"code",redirect_uri:redirect,
+   state:"test-state",code_challenge:challenge,code_challenge_method:"S256"});
  let r=await req(auth);
- assert.equal(r.status,302);
- const redirected=new URL(r.headers.get('location'),base);
- r=await req(redirected.pathname+redirected.search);
- assert.equal(r.status,200);
- const csrf=field(await r.text(),'csrf');
- r=await req('/login',{method:'POST',headers:{'origin':base,'content-type':'application/x-www-form-urlencoded'},
-   body:new URLSearchParams({username:'owner',password:'local-integration-only',csrf,returnTo:auth})});
- if(r.status!==302)throw Error('Login '+r.status+' '+await r.text());
- r=await req(auth);
- if(r.status!==200)throw Error('Consent '+r.status+' '+await r.text());
- const handle=field(await r.text(),'handle');
- r=await req('/consent',{method:'POST',headers:{'origin':base,'content-type':'application/x-www-form-urlencoded'},
-   body:new URLSearchParams({handle,scope,decision:'approve'})});
- if(r.status!==302)throw Error('Consent approval '+r.status+' '+await r.text());
- const callback=new URL(r.headers.get('location'),base);
- const code=callback.searchParams.get('code');
- assert.ok(code);
- r=await req('/token',{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},
-   body:new URLSearchParams({grant_type:'authorization_code',code,client_id:client.client_id,
+ if(r.status!==200)throw Error("Authorize GET "+r.status+" "+await r.text());
+ const screen=await r.text();
+ assert.ok(screen.includes("name=\"secret\""),"Upstream-style secret field required");
+ assert.ok(!screen.includes("name=\"username\""),"Custom username login must not return");
+ const handle=field(screen,"handle");
+ const submit=async(secret)=>req(auth,{method:"POST",headers:{"origin":base,"content-type":"application/x-www-form-urlencoded"},
+   body:new URLSearchParams({handle,scope,secret,decision:"approve"})});
+ if(scope==="deskbeacon:agent"){
+   const denied=await submit("wrong-secret-e2e");
+   assert.equal(denied.status,200,"Invalid owner key must rerender authorize page");
+   assert.ok((await denied.text()).includes("secret"),"Incorrect secret must not issue tokens");
+   console.log("PASS upstream-style incorrect secret rejected");
+ }
+ r=await submit("local-integration-only");
+ if(r.status!==302)throw Error("OAuth approve "+r.status+" "+await r.text());
+ const callback=new URL(r.headers.get("location"),base);
+ const code=callback.searchParams.get("code");
+ assert.ok(code,"No authorization code");
+ r=await req("/oauth/token",{method:"POST",headers:{"content-type":"application/x-www-form-urlencoded"},
+   body:new URLSearchParams({grant_type:"authorization_code",code,client_id:client.client_id,
      redirect_uri:redirect,code_verifier:verifier})});
- if(r.status!==200)throw Error('Token '+r.status+' '+await r.text());
+ if(r.status!==200)throw Error("Token "+r.status+" "+await r.text());
  return{clientId:client.client_id,...await r.json()};
 }
 async function mcp(token,method,params,id){

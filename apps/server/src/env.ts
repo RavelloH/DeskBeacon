@@ -1,10 +1,9 @@
 export interface Env {
   OAUTH_KV: KVNamespace;
   DEVICE_SESSIONS: DurableObjectNamespace;
-  PUBLIC_BASE_URL: string;
-  OWNER_LOGIN: string;
-  OWNER_PASSWORD_HASH?: string;
-  OWNER_SESSION_SECRET?: string;
+  OAUTH_PROVIDER: import("@cloudflare/workers-oauth-provider").OAuthHelpers;
+  MCP_BASE_URL?: string;
+  MCP_AUTH_SECRET: string;
 }
 
 export type GrantProps =
