@@ -1,0 +1,68 @@
+name: DeskBeacon Windows native validation
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'apps/client/**'
+      - 'apps/server/**'
+      - 'packages/protocol/**'
+      - '.github/workflows/windows-native.yml'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+  pull_request:
+    paths:
+      - 'apps/client/**'
+      - 'apps/server/**'
+      - 'packages/protocol/**'
+      - '.github/workflows/windows-native.yml'
+
+jobs:
+  win-x64:
+    name: Windows x64 / NativeAOT / MCP tests
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '11.1.3'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      - run: pnpm check
+      - run: pnpm build
+      - name: Build native Windows Job Object supervisor
+        shell: pwsh
+        run: >
+          dotnet publish apps/client/native/win-job/deskbeacon-job.csproj
+          --configuration Release
+          --runtime win-x64
+          --self-contained true
+          --output apps/client/dist/native/win-x64
+          -p:PublishAot=true
+          -p:StripSymbols=true
+      - name: Verify the self-contained native executable
+        run: node apps/client/scripts/verify-native.mjs win-x64
+      - name: Test foreground, IPC, detached children and daemon crash cleanup
+        run: pnpm test:local
+      - name: Stage truly standalone npm package (bundle unpublished protocol)
+        run: node apps/client/scripts/stage-npm.mjs win-x64
+      - name: Pack staged CLI; do not publish
+        shell: pwsh
+        run: |
+          New-Item -Type Directory -Force packed | Out-Null
+          npm pack apps/client/dist/npm --pack-destination packed
+          Get-ChildItem packed
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deskbeacon-windows-native-alpha
+          path: packed/*.tgz
+          retention-days: 7

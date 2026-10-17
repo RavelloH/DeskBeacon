@@ -1,0 +1,38 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "deskbeacon-server",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-17",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "observability": {
+    "enabled": false
+  },
+  "vars": {
+    "PUBLIC_BASE_URL": "http://localhost:8787",
+    "OWNER_LOGIN": "owner"
+  },
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV",
+      "id": "00000000000000000000000000000000"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "DEVICE_SESSIONS",
+        "class_name": "DeviceSession"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "DeviceSession"
+      ]
+    }
+  ]
+}

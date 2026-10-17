@@ -1,0 +1,44 @@
+{
+  "name": "deskbeacon",
+  "version": "0.1.0",
+  "description": "DeskBeacon local companion CLI and Ink TUI for Agent-controlled devices",
+  "type": "module",
+  "bin": {
+    "deskbeacon": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "build:native:win-x64": "dotnet publish native/win-job/deskbeacon-job.csproj -c Release -r win-x64 --self-contained true -o dist/native/win-x64 -p:PublishAot=true -p:StripSymbols=true",
+    "verify:native:win-x64": "node scripts/verify-native.mjs win-x64",
+    "prepack": "node scripts/verify-native.mjs win-x64"
+  },
+  "devDependencies": {
+    "@types/adm-zip": "^0.6.0",
+    "@types/cross-spawn": "^6.0.6",
+    "@types/node": "^26.6.5",
+    "@types/react": "^19.3.0",
+    "@types/screenshot-desktop": "^1.15.0",
+    "@types/tar": "^7.0.87",
+    "@types/ws": "^8.18.2",
+    "esbuild": "^0.28.2",
+    "typescript": "^6.0.0"
+  },
+  "dependencies": {
+    "@deskbeacon/protocol": "workspace:*",
+    "@vscode/ripgrep": "^1.18.0",
+    "adm-zip": "^0.6.1",
+    "cross-spawn": "^7.0.6",
+    "diff": "^9.0.0",
+    "ink": "^8.0.0",
+    "react": "^19.3.1",
+    "screenshot-desktop": "^1.15.7",
+    "sharp": "^0.35.5",
+    "systeminformation": "^5.33.15",
+    "tar": "^7.5.22",
+    "ws": "^8.22.0"
+  }
+}
