@@ -10,8 +10,13 @@ for(const name of ['supervisor.mjs','ipc.mjs','connect-recovery.mjs','cli-lifecy
   const args=[join(root,'apps','client','test',name)];
   const exitCode=await new Promise((resolve,reject)=>{
     const child=spawn(process.execPath,args,{cwd:root,env,stdio:'inherit',windowsHide:true});
-    child.once('error',reject);
-    child.once('exit',(code,signal)=>resolve(code??(signal?1:0)));
+    const deadline=setTimeout(()=>{
+      console.error('Local test exceeded 100 seconds:',name);
+      child.kill('SIGKILL');
+      resolve(124);
+    },100_000);
+    child.once('error',error=>{clearTimeout(deadline);reject(error);});
+    child.once('exit',(code,signal)=>{clearTimeout(deadline);resolve(code??(signal?1:0));});
   });
   if(exitCode!==0){console.error('Local test failed',name,exitCode);process.exitCode=exitCode;break;}
 }

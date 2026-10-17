@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { EventEmitter } from 'node:events';
 import { mkdirSync, existsSync, readFileSync, writeFileSync, chmodSync, promises as fs } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join, resolve, dirname } from 'node:path';
 import { hostname, homedir, platform, arch, totalmem, freemem, cpus } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
@@ -95,7 +95,7 @@ export class ClientDaemon extends EventEmitter {
       lastHeartbeatAt:this.lastHeartbeatAt,heartbeatMisses:this.heartbeatMisses,operationsTotal:total.total,
       active:this.supervisor.active(),background:this.supervisor.list(),
       transfers:[...this.transfers].map(([id,t])=>({id,...t})),
-      activity:this.db.prepare('SELECT id,grant_id,actor_name,tool,description,status,time,finished_at,duration_ms,cwd,request_json,result FROM activity ORDER BY time DESC LIMIT 120').all()};
+      activity:this.db.prepare('SELECT id,grant_id,actor_name,tool,description,status,time,finished_at,duration_ms,cwd,request_json,result FROM activity ORDER BY time DESC LIMIT 40').all()};
   }
   private scheduleReconnect(){
     if(this.stopped||this.reconnectTimer)return;
@@ -284,11 +284,14 @@ export class ClientDaemon extends EventEmitter {
     };
     const safeInput=JSON.parse(JSON.stringify(input,redact));
     const started=Date.now();
-    const cwd=String(input.command?.cwd??input.cwd??input.path??input.sourcePath??input.targetPath??process.cwd());
+    const fileAction=['fs_read','fs_write','fs_edit'].includes(tool);
+    const pathHint=input.path??input.sourcePath??input.targetPath;
+    const cwd=String(input.command?.cwd??input.cwd??
+      (fileAction&&typeof pathHint==='string'?dirname(pathHint):pathHint)??process.cwd());
     const requestPreview=JSON.stringify(safeInput);
     this.db.prepare('INSERT OR REPLACE INTO activity(id,grant_id,actor_name,tool,description,status,time,cwd,request_json) VALUES(?,?,?,?,?,?,?,?,?)')
       .run(opId,m.grantId,m.actorName??null,tool,description,'running',started,cwd,
-        requestPreview.length>12000?JSON.stringify({summary:'参数过大，详情已省略'}):requestPreview);
+        requestPreview.length>6000?JSON.stringify({summary:'参数过大，详情已省略'}):requestPreview);
     this.emit('change');
     this.send({type:'operation.accepted',operationId:opId,payload:{acceptedAt:now()}});
     this.send({type:'operation.started',operationId:opId,payload:{startedAt:now()}});
@@ -301,7 +304,7 @@ export class ClientDaemon extends EventEmitter {
         if(Array.isArray(value)&&value.length>40)return [...value.slice(0,40),'[truncated]'];
         return value;
       });
-      const resultPreview=safeResult.length>12000?JSON.stringify({summary:'结果过大，请查看操作日志'}):safeResult;
+      const resultPreview=safeResult.length>6000?JSON.stringify({summary:'结果过大，请查看操作日志'}):safeResult;
       this.db.prepare('UPDATE activity SET status=?,result=?,finished_at=?,duration_ms=? WHERE id=?')
         .run('completed',resultPreview,Date.now(),Date.now()-started,opId);
       this.emit('change');

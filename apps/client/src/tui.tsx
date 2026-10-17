@@ -56,9 +56,9 @@ export function App(){
  const transfers=(status?.transfers??[]).filter(t=>t.status==='running');
  const tasks=[...jobs.map(t=>({...t,title:t.description})),
    ...transfers.map(t=>({...t,title:t.path,start:tick,kind:'transfer'}))];
- const maxTasks=expandedTasks?Math.min(tasks.length,Math.max(1,h-14)):Math.min(5,tasks.length);
- const displayedTasks=tasks.length>5&&!expandedTasks?tasks.slice(0,4):tasks.slice(0,maxTasks);
- const omitted=tasks.length>5&&!expandedTasks?tasks.length-4:0;
+ const maxTasks=Math.min(tasks.length,5);
+ const displayedTasks=tasks.length>5?tasks.slice(0,4):tasks.slice(0,maxTasks);
+ const omitted=tasks.length>5?tasks.length-4:0;
  const taskRows=tasks.length===0?0:Math.min(5,displayedTasks.length+(omitted?1:0));
  const bodyRows=Math.max(5,h-taskRows-3);
  const visible=Math.max(1,Math.floor((bodyRows-1)/7));
@@ -156,13 +156,21 @@ export function App(){
    </Box>;
  };
  return <Box flexDirection="column" width={w} height={h}>
-   <Box height={1} width="100%" backgroundColor={bg} justifyContent="space-between">
-     <Text bold color={fg}>{' '+logo+' '+info}</Text>
-     <Text bold color={fg}>DeskBeacon</Text>
-     <Text color={fg}>{safeText(ping,Math.max(14,Math.floor(w/3)))+' '}</Text>
+   <Box height={1} width="100%" backgroundColor={bg}>
+     <Box width={Math.floor(w/3)}><Text bold color={fg}>{' '+logo+' '+info}</Text></Box>
+     <Box width={Math.floor(w/3)} justifyContent="center"><Text bold color={fg}>DeskBeacon</Text></Box>
+     <Box flexGrow={1} justifyContent="flex-end">
+       <Text color={fg}>{safeText(ping,Math.max(12,Math.floor(w/3)-2))+' '}</Text>
+     </Box>
    </Box>
    <Box height={bodyRows} flexDirection="column" paddingX={1} flexGrow={1}>
-     {view==='help'?<Box flexDirection="column">
+     {expandedTasks&&view==='main'?<Box flexDirection="column">
+       <Text bold color="cyan">全部长期任务 ({tasks.length}) · Esc 返回</Text>
+       {tasks.slice(0,Math.max(1,h-8)).map((task,i)=><Box key={task.id} justifyContent="space-between">
+         <Text color={taskCursor===i?'cyan':'white'}>{taskCursor===i?'> ':'  '}{safeText(task.title,Math.max(15,w-20))}</Text>
+         <Text color="gray">{duration(tick-task.start)}</Text>
+       </Box>)}
+     </Box>:view==='help'?<Box flexDirection="column">
        <Text bold color="cyan">快捷键</Text>
        {['↑↓ / j k    选择上一条、下一条','Tab          切换操作和长期任务',
          'Enter        展开记录或选择任务','s            搜索操作历史',
