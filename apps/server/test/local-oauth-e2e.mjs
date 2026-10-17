@@ -25,16 +25,20 @@ async function oauth(scope){
  if(registration.status!==201)throw Error("Registration "+registration.status+" "+await registration.text());
  const client=await registration.json();
  const auth="/authorize?"+new URLSearchParams({client_id:client.client_id,scope,response_type:"code",redirect_uri:redirect,
-   state:"test-state",code_challenge:challenge,code_challenge_method:"S256"});
+   state:"test-state",code_challenge:challenge,code_challenge_method:"S256",resource:base});
  let r=await req(auth);
  if(r.status!==200)throw Error("Authorize GET "+r.status+" "+await r.text());
  const screen=await r.text();
  assert.ok(screen.includes("name=\"secret\""),"Upstream-style secret field required");
  assert.ok(!screen.includes("name=\"username\""),"Custom username login must not return");
  const handle=field(screen,"handle");
+ if(scope.includes("deskbeacon:agent")&&scope.includes("deskbeacon:device")){
+   assert.ok(screen.includes('name="scope" value="deskbeacon:agent"'));
+   assert.ok(!screen.includes('name="scope" value="deskbeacon:device"'),"Agent consent must not offer Device scope");
+ }
  const submit=async(secret)=>req(auth,{method:"POST",headers:{"origin":base,"content-type":"application/x-www-form-urlencoded"},
-   body:new URLSearchParams({handle,scope,secret,decision:"approve"})});
- if(scope==="deskbeacon:agent"){
+   body:new URLSearchParams({handle,scope:"deskbeacon:device",secret,decision:"approve"})});
+ if(scope.includes("deskbeacon:agent")){
    const denied=await submit("wrong-secret-e2e");
    assert.equal(denied.status,200,"Invalid owner key must rerender authorize page");
    assert.ok((await denied.text()).includes("secret"),"Incorrect secret must not issue tokens");
@@ -57,8 +61,19 @@ async function mcp(token,method,params,id){
    body:JSON.stringify({jsonrpc:'2.0',id,method,params})});
  const raw=await r.text();return {status:r.status,raw};
 }
-const device=await oauth('deskbeacon:device');console.log('PASS device OAuth grant');
-const agent=await oauth('deskbeacon:agent');console.log('PASS agent OAuth grant');
+const device=await oauth('deskbeacon:device');
+assert.equal(device.scope,'deskbeacon:device');console.log('PASS device-only OAuth grant');
+const agent=await oauth('deskbeacon:agent deskbeacon:device');
+assert.equal(agent.scope,'deskbeacon:agent','Combined scope request must never grant Device privileges');
+console.log('PASS ChatGPT-style combined scope authorizes Agent ONLY');
+const agentSingle=await oauth('deskbeacon:agent');
+assert.equal(agentSingle.scope,'deskbeacon:agent');
+console.log('PASS agent-only OAuth grant');
+const deniedDevice=await fetch(base+'/device/info',{headers:{Authorization:'Bearer '+agent.access_token}});
+assert.equal(deniedDevice.status,403,'Combined-scope Agent must not become a Device');
+const deniedMcp=await mcp(device.access_token,'initialize',{protocolVersion:'2025-06-18',capabilities:{},clientInfo:{name:'Device token denial',version:'0.1.0'}},99);
+assert.equal(deniedMcp.status,403,'Device token must not become Agent');
+console.log('PASS Agent and Device bearer tokens cannot cross privileges');
 const daemon=new ClientDaemon({url:base,deviceId:device.clientId,clientId:device.clientId,deviceName:'E2E test device',
  accessToken:device.access_token,refreshToken:device.refresh_token});
 try{
