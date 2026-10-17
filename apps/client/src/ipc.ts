@@ -4,8 +4,9 @@ import { join } from 'node:path';
 import { existsSync, rmSync, chmodSync, readdirSync, openSync, closeSync, readSync, statSync } from 'node:fs';
 import type { ClientDaemon } from './daemon.js';
 import { dataDir } from './daemon.js';
-export const ipcPath=platform()==='win32'?'\\\\.\\pipe\\deskbeacon-'+process.env.USERNAME:
-  join(homedir(),'.deskbeacon','daemon.sock');
+export const ipcPath=process.env.DESKBEACON_IPC_PATH ?? (platform()==='win32'?'\\\\.\\pipe\\deskbeacon-'+process.env.USERNAME:
+  join(dataDir,'daemon.sock'));
+
 export function startIpc(daemon:ClientDaemon){
  if(process.platform!=='win32'&&existsSync(ipcPath))rmSync(ipcPath,{force:true});
  const server=createServer(socket=>{

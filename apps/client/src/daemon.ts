@@ -38,10 +38,14 @@ export class ClientDaemon {
   private replayInProgress=false;
   private disconnectTimer:NodeJS.Timeout|undefined;
   private keepaliveTimer:NodeJS.Timeout|undefined;
+  private handshakeTimer:NodeJS.Timeout|undefined;
+  private reconnectTimer:NodeJS.Timeout|undefined;
+  private connecting=false;
+  private reconnectDelayMs=1500;
   private async refreshAccessToken(){
     if(!this.config.refreshToken)return;
     if(!this.forceRefresh&&this.config.accessTokenExpiresAt&&Date.now()<this.config.accessTokenExpiresAt-60_000)return;
-    const response=await fetch(this.config.url+"/oauth/token",{method:"POST",headers:{"content-type":"application/x-www-form-urlencoded"},body:new URLSearchParams({grant_type:"refresh_token",refresh_token:this.config.refreshToken,client_id:this.config.clientId})});
+    const response=await fetch(this.config.url+"/oauth/token",{method:"POST",headers:{"content-type":"application/x-www-form-urlencoded"},body:new URLSearchParams({grant_type:"refresh_token",refresh_token:this.config.refreshToken,client_id:this.config.clientId}),signal:AbortSignal.timeout(10_000)});
     if(!response.ok)throw Error("DEVICE_TOKEN_REFRESH_FAILED "+response.status);
     const token=await response.json() as {access_token:string;refresh_token?:string;expires_in?:number};
     this.config.accessToken=token.access_token;
@@ -67,13 +71,39 @@ export class ClientDaemon {
   status(){return{state:this.state,deviceId:this.config.deviceId,deviceName:this.config.deviceName,
     server:this.config.url,active:this.supervisor.active(),background:this.supervisor.list(),
     activity:this.db.prepare('SELECT id,grant_id,tool,description,status,time FROM activity ORDER BY time DESC LIMIT 120').all()}};
+  private scheduleReconnect(){
+    if(this.stopped||this.reconnectTimer)return;
+    const delay=this.reconnectDelayMs;
+    this.reconnectDelayMs=Math.min(this.reconnectDelayMs*2,30_000);
+    this.reconnectTimer=setTimeout(()=>{
+      this.reconnectTimer=undefined;
+      void this.connect();
+    },delay);
+    this.reconnectTimer.unref();
+  }
   async connect(){
-    if(this.stopped)return;
+    if(this.stopped||this.connecting||this.ws?.readyState===WebSocket.OPEN)return;
+    this.connecting=true;
     this.state='connecting';
-    try{await this.refreshAccessToken();}catch(e){this.state="error: "+err(e);console.error(err(e));return;}
+    try{await this.refreshAccessToken();}catch(e){
+      this.connecting=false;
+      this.state='error: '+err(e);
+      console.error('DeskBeacon token refresh:',err(e));
+      this.scheduleReconnect();
+      return;
+    }
+    this.connecting=false;
     const target=this.config.url.replace(/^http:/,'ws:').replace(/^https:/,'wss:').replace(/\/$/,'')+'/device/connect';
     const socket=new WebSocket(target,{headers:{Authorization:'Bearer '+this.config.accessToken}});
     this.ws=socket;this.ready=false;
+    // A stalled TCP/TLS/WebSocket handshake must not leave the daemon stuck in connecting.
+    this.handshakeTimer=setTimeout(()=>{
+      if(this.ws===socket&&!this.ready){
+        this.state='error: device handshake timeout';
+        socket.terminate();
+      }
+    },15_000);
+    this.handshakeTimer.unref();
     socket.on('open',()=>{
       this.state='connected';
       // Cloudflare DO replies using WebSocket auto-response without waking its handler.
@@ -85,6 +115,7 @@ export class ClientDaemon {
     socket.on('message',raw=>{void this.message(raw.toString()).catch(e=>{console.error('Remote message:',err(e));});});
     socket.on('close',(code,reason)=>{
       if(this.ws!==socket)return;
+      if(this.handshakeTimer){clearTimeout(this.handshakeTimer);this.handshakeTimer=undefined;}
       if(this.keepaliveTimer){clearInterval(this.keepaliveTimer);this.keepaliveTimer=undefined;}
       console.error('DeskBeacon WebSocket closed:',code,reason.toString());this.ready=false;this.state='disconnected';
       if(this.disconnectTimer)clearTimeout(this.disconnectTimer);
@@ -94,12 +125,12 @@ export class ClientDaemon {
           void this.supervisor.stop(task.id).catch(e=>console.error('Disconnected foreground stop:',err(e)));
         }
       },LIMITS.shortDisconnectGraceMs);
-      if(!this.stopped)setTimeout(()=>{void this.connect();},1500).unref();
+      this.scheduleReconnect();
     });
     socket.on('unexpected-response',(_req,response)=>{if(response.statusCode===401)this.forceRefresh=true;});
     socket.on('error',e=>{this.state='error: '+err(e);console.error('DeskBeacon WebSocket:',err(e));});
   }
-  stop(){this.stopped=true;if(this.disconnectTimer)clearTimeout(this.disconnectTimer);if(this.keepaliveTimer)clearInterval(this.keepaliveTimer);this.ws?.close();this.db.close();}
+  stop(){this.stopped=true;if(this.disconnectTimer)clearTimeout(this.disconnectTimer);if(this.keepaliveTimer)clearInterval(this.keepaliveTimer);if(this.handshakeTimer)clearTimeout(this.handshakeTimer);if(this.reconnectTimer)clearTimeout(this.reconnectTimer);this.ws?.close();this.db.close();}
   private send(value:Record<string,unknown>):string{
     if(this.ws?.readyState!==WebSocket.OPEN)throw Error('DEVICE_DISCONNECTED');
     const messageId=randomUUID();
@@ -135,6 +166,9 @@ export class ClientDaemon {
     const m=msg.data;
     if(m.type==='device.ready'){
       this.epoch=m.connectionEpoch;this.ready=true;
+      this.state='connected';
+      this.reconnectDelayMs=1500;
+      if(this.handshakeTimer){clearTimeout(this.handshakeTimer);this.handshakeTimer=undefined;}
       if(this.disconnectTimer){clearTimeout(this.disconnectTimer);this.disconnectTimer=undefined;}
       this.send({type:'device.hello',payload:{deviceName:this.config.deviceName,platform:platform(),clientVersion:'0.1.0',protocolVersion:PROTOCOL_VERSION}});
       this.send({type:'device.capabilities',payload:{capabilities:['filesystem','foreground','batch','background','archive','network','system','transfer-inline']}});
@@ -264,6 +298,7 @@ export class ClientDaemon {
     if(tool==='background_stop')return this.supervisor.stop(input.backgroundTaskId);
     if(tool==='background_input')return this.supervisor.input(input.backgroundTaskId,input.data,input.signal);
     if(tool==='background_output')return this.supervisor.output(input.backgroundTaskId,input.stream,Number(input.cursor??0),input.maxBytes);
+    if(tool==='net_ports')return systemTool(tool,input);
     if(tool.startsWith('net_')||tool==='http_request')return networkTool(tool,input);
     if(tool.startsWith('system_')||tool==='screen_capture')return systemTool(tool,input);
     if(tool==='transfer_upload'){

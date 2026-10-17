@@ -2,8 +2,11 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 const root=dirname(dirname(fileURLToPath(import.meta.url)));
-const env={...process.env,DESKBEACON_DATA_DIR:join(root,'.test-data')};
-for(const name of ['supervisor.mjs','ipc.mjs',...(process.platform==='win32'?['job-tree.mjs','job-daemon-crash.mjs']:[])]){
+const env={...process.env,DESKBEACON_DATA_DIR:join(root,'.test-data'),
+  DESKBEACON_IPC_PATH:process.platform==='win32'
+    ? '\\\\.\\pipe\\deskbeacon-ci-'+process.pid
+    : join(root,'.test-data','ipc-test.sock')};
+for(const name of ['supervisor.mjs','ipc.mjs','connect-recovery.mjs',...(process.platform==='win32'?['job-tree.mjs','job-daemon-crash.mjs']:[])]){
   const args=[join(root,'apps','client','test',name)];
   const exitCode=await new Promise((resolve,reject)=>{
     const child=spawn(process.execPath,args,{cwd:root,env,stdio:'inherit',windowsHide:true});
