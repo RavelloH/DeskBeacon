@@ -397,7 +397,13 @@ export class ClientDaemon extends EventEmitter {
     if(tool==='background_get')return{task:this.supervisor.get(input.backgroundTaskId)};
     if(tool==='background_stop')return this.supervisor.stop(input.backgroundTaskId);
     if(tool==='background_input')return this.supervisor.input(input.backgroundTaskId,input.data,input.signal);
-    if(tool==='background_output')return this.supervisor.output(input.backgroundTaskId,input.stream,Number(input.cursor??0),input.maxBytes);
+    if(tool==='background_output'){
+      const output=this.supervisor.output(input.backgroundTaskId,input.stream,Number(input.cursor??0),input.maxBytes,input.maxLines);
+      return {...output,
+        ...(input.stream==='both'?{nextOffsets:{
+          stdout:output.results[0]?.nextOffset??0,stderr:output.results[1]?.nextOffset??0
+        }}:{nextCursor:String(output.results[0]?.nextOffset??0)})};
+    }
     if(tool==='net_ports')return systemTool(tool,input);
     if(tool.startsWith('net_')||tool==='http_request')return networkTool(tool,input);
     if(tool.startsWith('system_')||tool==='screen_capture')return systemTool(tool,input);

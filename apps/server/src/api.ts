@@ -122,14 +122,8 @@ const descriptions: Record<string,string> = {
   system_snapshot: "Read CPU, memory, filesystem, and network system information without mutating the device.",
   system_processes: "List matching system processes by name or PID; read-only, not a process kill tool.",
   screen_capture: "Capture the current screen and return image content when desktop permissions permit. Use sparingly and avoid sensitive screens.",
-  exec_foreground: "Execute a single finite command synchronously on the selected device; waits until command exits, is cancelled, or times out. Never runs in background. A short human-readable description is mandatory.",
-  exec_batch: "Execute staged commands synchronously; serial stages and parallel commands inside a stage. One foreground slot per device. All managed processes end before response.",
-  exec_background: "Explicitly create a long-running process; returns a background task ID. Use background_* tools to manage it.",
   fs_find: "High performance filename and glob search via device-integrated ripgrep. Prefer this over shell-based recursive filesystem scans.",
   fs_grep: "Fast content grep via ripgrep with bounded structured results and truncation metadata.",
-  operation_output: "Read recent bounded foreground stdout/stderr TEXT from the device Durable Object by offset or filters.",
-  transfer_upload: "Send actual file bytes supplied by the MCP host to this device. Large host file transfer may not be supported.",
-  transfer_download: "Read file bytes from a device for the requesting Agent. Never automatically copy between devices.",
 };
 
 export async function handleApiRequest(request: Request, env: Env, ctx: ApiCtx): Promise<Response> {

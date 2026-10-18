@@ -1,6 +1,6 @@
 import si from 'systeminformation';
 import { lookup, resolve as resolveDns } from 'node:dns/promises';
-import { connect as tcpConnect } from 'node:net';
+import { connect as tcpConnect, isIP } from 'node:net';
 import { connect as tlsConnect } from 'node:tls';
 import screen from 'screenshot-desktop';
 import sharp from 'sharp';
@@ -73,12 +73,16 @@ export async function networkTool(name:string,i:I){
        const socket=tcpConnect({host:i.host,port:i.port});
        socket.setTimeout(timeout,()=>socket.destroy(Error('TCP_TIMEOUT')));
        socket.once('connect',()=>{socket.end();resolve({connected:true,host:i.host,port:i.port,durationMs:Date.now()-began});});
-       socket.once('error',reject);
+       socket.once('error',(error:NodeJS.ErrnoException)=>resolve({
+         mode:'tcp',connected:false,host:i.host,port:i.port,
+         errorCode:error.code??error.message,errorMessage:error.message,
+         durationMs:Date.now()-began
+       }));
      });
    }
    if(i.mode==='tls'){
      return await new Promise((resolve,reject)=>{
-       const socket=tlsConnect({host:i.host,port:i.port??443,servername:i.host,rejectUnauthorized:true});
+       const socket=tlsConnect({host:i.host,port:i.port??443,servername:isIP(i.host)?undefined:i.host,rejectUnauthorized:true});
        socket.setTimeout(timeout,()=>socket.destroy(Error('TLS_TIMEOUT')));
        socket.once('secureConnect',()=>{
          const cert=socket.getPeerCertificate();
@@ -86,7 +90,11 @@ export async function networkTool(name:string,i:I){
            subject:cert.subject,issuer:cert.issuer,expiresAt:cert.valid_to,durationMs:Date.now()-began};
          socket.end();resolve(result);
        });
-       socket.once('error',reject);
+       socket.once('error',(error:NodeJS.ErrnoException)=>resolve({
+         mode:'tls',connected:false,host:i.host,port:i.port??443,
+         errorCode:error.code??error.message,errorMessage:error.message,
+         durationMs:Date.now()-began
+       }));
      });
    }
  }

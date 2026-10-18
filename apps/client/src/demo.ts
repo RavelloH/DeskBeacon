@@ -13,7 +13,7 @@ export type DemoStatus={
  uptimeMs:number;cpuPercent:number;memoryBytes:number;latencyMs:number|null;
  operationsTotal:number;active:DemoTask[];transfers:DemoTransfer[];activity:DemoActivity[];
 };
-const root='E:\\DeskBeacon';
+const root=process.platform==='win32'?'C:\\Projects\\DeskBeacon':'/projects/deskbeacon';
 function activity(id:string,tool:string,description:string,request:Record<string,unknown>,result:Record<string,unknown>,
  status:string,started:number,durationMs:number,actor='ChatGPT'):DemoActivity{
  return {id,grant_id:'demo-grant',actor_name:actor,tool,description,status,
