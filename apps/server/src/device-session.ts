@@ -2,7 +2,13 @@
 import { LIMITS, PROTOCOL_VERSION, ProtocolMessageSchema, type ProtocolMessage } from "@deskbeacon/protocol";
 import type { Env } from "./env.js";
 
-type Waiter = { resolve: (value: Record<string, unknown>) => void; subscribers: Set<(value: Record<string, unknown>) => void>; timer: ReturnType<typeof setTimeout>; disconnectTimer?: ReturnType<typeof setTimeout> };
+type Waiter = {
+  resolve:(value:Record<string,unknown>)=>void;
+  subscribers:Set<(value:Record<string,unknown>)=>void>;
+  timer:ReturnType<typeof setTimeout>;
+  deadline:number; extraMs:number; suspendedAt?:number; expire:()=>void;
+  disconnectTimer?:ReturnType<typeof setTimeout>;
+};
 type Rpc = { name: string; input: Record<string, unknown>; grantId: string; actorName?: string; operationId: string };
 type Row = Record<string, any>;
 const FG = new Set(["exec_foreground"]);
@@ -19,6 +25,9 @@ function utf8size(value: string) { return new TextEncoder().encode(value).byteLe
 export class DeviceSession extends DurableObject<Env> {
   private waiters = new Map<string, Waiter>();
   private foregroundTail: Promise<void> = Promise.resolve();
+  // These exist only while a synchronous MCP request is alive. No polling or alarms.
+  private socketWaiters=new Set<(socket:WebSocket)=>void>();
+  private pendingDispatches=new Map<string,{send:(socket:WebSocket)=>void;attempts:number}>();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -50,15 +59,21 @@ export class DeviceSession extends DurableObject<Env> {
   private epoch(): number {
     return Number((this.ctx.storage.sql.exec("SELECT value FROM state WHERE key='epoch'").toArray()[0] as Row | undefined)?.value ?? 0);
   }
-  /** Keep queued operations waiting through a short connection loss, without redispatching any work. */
+  /** Suspend a live RPC while disconnected; wake only on a real connection event or timeout. */
   private async waitForSocket(maxWaitMs:number):Promise<WebSocket|null>{
-    const until=Date.now()+Math.max(0,maxWaitMs);
-    let socket=this.currentSocket();
-    while(!socket&&Date.now()<until){
-      await new Promise(resolve=>setTimeout(resolve,Math.min(250,until-Date.now())));
-      socket=this.currentSocket();
-    }
-    return socket;
+    const existing=this.currentSocket();
+    if(existing||maxWaitMs<=0)return existing;
+    // Bound outstanding requests held during an outage, including non-foreground tools.
+    if(this.socketWaiters.size>=32)return null;
+    return await new Promise<WebSocket|null>(resolve=>{
+      let timer:ReturnType<typeof setTimeout>;
+      const ready=(socket:WebSocket)=>{clearTimeout(timer);this.socketWaiters.delete(ready);resolve(socket);};
+      timer=setTimeout(()=>{this.socketWaiters.delete(ready);resolve(null);},maxWaitMs);
+      this.socketWaiters.add(ready);
+      // Check again to close the race with a reconnect between the first read and registration.
+      const raced=this.currentSocket();
+      if(raced)ready(raced);
+    });
   }
   private lookup(id: string): Row | undefined {
     return this.ctx.storage.sql.exec("SELECT * FROM ops WHERE id=?", id).toArray()[0] as Row | undefined;
@@ -97,13 +112,31 @@ export class DeviceSession extends DurableObject<Env> {
       const client=pair[0]!;
       const server=pair[1]!;
       const next = this.epoch() + 1;
-      for(const waiter of this.waiters.values())if(waiter.disconnectTimer){clearTimeout(waiter.disconnectTimer);delete waiter.disconnectTimer;}
+      for(const waiter of this.waiters.values()){
+        if(waiter.disconnectTimer){clearTimeout(waiter.disconnectTimer);delete waiter.disconnectTimer;}
+        if(waiter.suspendedAt!==undefined){
+          const elapsed=Date.now()-waiter.suspendedAt;
+          const extension=Math.min(elapsed,Math.max(0,LIMITS.shortDisconnectGraceMs-waiter.extraMs));
+          waiter.extraMs+=extension;waiter.deadline+=extension;
+          delete waiter.suspendedAt;
+          clearTimeout(waiter.timer);
+          waiter.timer=setTimeout(waiter.expire,Math.max(1,waiter.deadline-Date.now()));
+        }
+      }
       for(const old of this.ctx.getWebSockets()) if(old.readyState===WebSocket.OPEN) old.close(4001,"reconnected");
       this.ctx.storage.sql.exec("INSERT INTO state(key,value) VALUES('epoch',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", String(next));
       server.serializeAttachment({ epoch:next });
       this.ctx.acceptWebSocket(server);
       server.send(JSON.stringify({ version:PROTOCOL_VERSION, type:"device.ready", messageId:crypto.randomUUID(),
         deviceId:"self", connectionEpoch:next, payload:{ready:true} }));
+      // Reconnection itself is the only retry trigger; no background polling or Alarm.
+      for(const notify of [...this.socketWaiters])notify(server);
+      for(const [id,pending] of this.pendingDispatches){
+        if(this.lookup(id)?.status!=="dispatched"){this.pendingDispatches.delete(id);continue;}
+        if(pending.attempts>=3)continue;
+        pending.attempts++;
+        try{pending.send(server);}catch{/* Wait for another connection or the RPC deadline. */}
+      }
       return new Response(null, {status:101,webSocket:client});
     }
     if(pathname==="/rpc") {
@@ -119,8 +152,6 @@ export class DeviceSession extends DurableObject<Env> {
         const key=typeof body.input.idempotencyKey==="string" ? body.grantId+":"+body.input.idempotencyKey : null;
         if(key && this.ctx.storage.sql.exec("SELECT 1 FROM ops WHERE idem=?",key).toArray().length)
           return json(await this.dispatch(body));
-        if(!this.currentSocket()&&!await this.waitForSocket(5_000))
-          return json(failure("DEVICE_OFFLINE","Device did not reconnect within 5s",body.operationId));
         const now=Date.now(), deadline=now+LIMITS.queueTtlMs;
         // This queue is for *live synchronous* MCP calls. On DO restart abandoned queue records
         // become unknown; DO must never silently replay a potentially side-effecting operation.
@@ -141,7 +172,7 @@ export class DeviceSession extends DurableObject<Env> {
           // The device may have disconnected while this request waited behind a long command.
           // Wait for the same connection to recover, but never execute more than once.
           const socket=await this.waitForSocket(Math.min(LIMITS.shortDisconnectGraceMs,Math.max(0,deadline-Date.now())));
-          if(!socket)return json(failure("DEVICE_OFFLINE","Device did not reconnect before the queue's dispatch deadline",body.operationId));
+          if(!socket)return json(failure("DEVICE_OFFLINE","Device did not reconnect within the 60s dispatch window; command was not sent",body.operationId));
           this.ctx.storage.sql.exec("UPDATE fg_queue SET status='dispatched' WHERE id=?",body.operationId);
           return json(await this.dispatch(body));
         } finally {
@@ -212,20 +243,24 @@ export class DeviceSession extends DurableObject<Env> {
         return failure("OPERATION_UNKNOWN","Idempotent operation has no live waiter; inspect operation history before retry",prev.id);
       }
     }
-    if(!this.currentSocket()&&!await this.waitForSocket(5_000))
-      return failure("DEVICE_OFFLINE","Device did not reconnect within 5s",body.operationId);
+    if(!this.currentSocket()&&!await this.waitForSocket(LIMITS.shortDisconnectGraceMs))
+      return failure("DEVICE_OFFLINE","Device did not reconnect within the 60s dispatch window; command was not sent",body.operationId);
     const opId=body.operationId;
     const timeout=Math.min(LIMITS.maxForegroundTimeoutMs,Math.max(1000,Number(body.input.timeoutMs??(isFg?LIMITS.defaultForegroundTimeoutMs:30_000))));
-    const expires=Date.now()+timeout+10_000;
+    // The device must also accept a delivery postponed by the bounded outage allowance.
+    const expires=Date.now()+timeout+LIMITS.shortDisconnectGraceMs+10_000;
     this.ctx.storage.sql.exec("INSERT INTO ops(id,grant_id,tool,status,created,expires,idem,request_hash) VALUES(?,?,?,?,?,?,?,?)",
       opId,body.grantId,body.name,"dispatched",Date.now(),Date.now()+LIMITS.operationTtlMs,existingKey,requestHash);
     const socket=this.currentSocket();
     if(!socket) {this.saveStatus(opId,"unknown");return failure("DEVICE_OFFLINE","Device disconnected",opId);}
     const epoch=(socket.deserializeAttachment() as {epoch?:number}|null)?.epoch??this.epoch();
     const response=new Promise<Record<string,unknown>>(resolve=>{
-      const timer=setTimeout(()=>{
+      const deadline=Date.now()+timeout+5_000;
+      const expire=()=>{
         const expired=this.waiters.get(opId);
+        if(!expired)return;
         this.waiters.delete(opId);
+        if(expired.disconnectTimer)clearTimeout(expired.disconnectTimer);
         this.ctx.storage.sql.exec("UPDATE ops SET status='unknown' WHERE id=? AND status NOT IN ('completed','failed')",opId);
         const cancelSocket=this.currentSocket();
         if(isFg && cancelSocket){
@@ -237,8 +272,9 @@ export class DeviceSession extends DurableObject<Env> {
         const value=failure("OPERATION_TIMEOUT","Operation deadline exceeded; execution state may be unknown",opId);
         for(const subscriber of expired?.subscribers??[])subscriber(value);
         resolve(value);
-      },timeout+5_000);
-      this.waiters.set(opId,{resolve,timer,subscribers:new Set()});
+      };
+      const timer=setTimeout(expire,timeout+5_000);
+      this.waiters.set(opId,{resolve,timer,subscribers:new Set(),deadline,extraMs:0,expire});
     });
     // Until the device acknowledges receipt, the frame may have been dropped by a
     // half-open WebSocket. Re-send the SAME operation ID; the device persists a
@@ -251,16 +287,16 @@ export class DeviceSession extends DurableObject<Env> {
         expiresAt:new Date(expires).toISOString(),requestHash,toolName:body.name,input}));
       this.ctx.storage.sql.exec("UPDATE ops SET dispatch_attempts=dispatch_attempts+1 WHERE id=?",opId);
     };
-    try{sendDispatch(socket);}catch{/* A later retry may use the next connection. */}
-    const dispatchRetry=setInterval(()=>{
-      if(this.lookup(opId)?.status!=="dispatched"){clearInterval(dispatchRetry);return;}
-      const current=this.currentSocket();
-      if(current)try{sendDispatch(current);}catch{/* Retry while the waiter remains live. */}
-    },4_000);
-    try{return await response;}finally{clearInterval(dispatchRetry);}
+    // Bound total delivery attempts (initial + up to two reconnects).
+    // Until a reconnect or result, no timer runs and no Alarm is scheduled.
+    const pending={send:sendDispatch,attempts:1};
+    this.pendingDispatches.set(opId,pending);
+    try{sendDispatch(socket);}catch{/* Only a connection event may trigger another attempt. */}
+    try{return await response;}finally{this.pendingDispatches.delete(opId);}
   }
 
   private finish(id:string,result:Record<string,unknown>,status:string) {
+    this.pendingDispatches.delete(id);
     const row=this.lookup(id);
     if(!row) return;
     const fg=FG.has(row.tool);
@@ -305,12 +341,15 @@ export class DeviceSession extends DurableObject<Env> {
     if(msg.connectionEpoch!==attachment.epoch) return;
     if(msg.type==="device.hello") return;
     if(msg.type==="operation.accepted") {
+      this.pendingDispatches.delete(msg.operationId);
       this.ctx.storage.sql.exec("UPDATE ops SET status='accepted',accepted_at=COALESCE(accepted_at,?) WHERE id=? AND status IN ('dispatched','accepted')",Date.now(),msg.operationId);return;
     }
     if(msg.type==="operation.started") {
+      this.pendingDispatches.delete(msg.operationId);
       this.ctx.storage.sql.exec("UPDATE ops SET status='running',started_at=COALESCE(started_at,?),accepted_at=COALESCE(accepted_at,?) WHERE id=? AND status IN ('dispatched','accepted','running')",Date.now(),Date.now(),msg.operationId);return;
     }
     if(msg.type==="operation.result.begin") {
+      this.pendingDispatches.delete(msg.operationId);
       const row=this.lookup(msg.operationId);
       if(!row||row.status==="completed"||row.status==="failed"||row.status==="cancelled")return;
       const total=msg.payload.stdoutBytes+msg.payload.stderrBytes;
@@ -336,6 +375,7 @@ export class DeviceSession extends DurableObject<Env> {
       this.setHistorySize(this.historySize()+pendingBytes);return;
     }
     if(msg.type==="operation.result.commit") {
+      this.pendingDispatches.delete(msg.operationId);
       const row=this.lookup(msg.operationId);if(!row)return;
       if(row.status==="completed"||row.status==="failed"||row.status==="cancelled"){
         this.ackCommit(ws,msg.messageId,msg.operationId);return;
@@ -370,6 +410,10 @@ export class DeviceSession extends DurableObject<Env> {
     if(attachment?.epoch!==this.epoch()) return;
     for(const [id,waiter] of this.waiters){
       if(waiter.disconnectTimer)clearTimeout(waiter.disconnectTimer);
+      if(waiter.suspendedAt===undefined){
+        waiter.suspendedAt=Date.now();
+        clearTimeout(waiter.timer);
+      }
       waiter.disconnectTimer=setTimeout(()=>{
         if(this.currentSocket())return;
         this.finish(id,failure("DEVICE_DISCONNECTED","Device offline beyond grace interval; check operation history before retry",id),"unknown");

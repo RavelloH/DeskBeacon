@@ -158,7 +158,12 @@ try{
   return firstDispatch(msg);
  };
  let rescued;
- try{rescued=await invoke('device_info',{},450);}finally{daemon.dispatch=firstDispatch;}
+ try{
+  const pending=invoke('device_info',{},450);
+  await new Promise(r=>setTimeout(r,650));
+  daemon.ws.terminate(); // Recovery send is triggered by a new connection, not a DO timer.
+  rescued=await pending;
+ }finally{daemon.dispatch=firstDispatch;}
  assert.ok(skippedDispatch&&rescued.data?.deviceId,'lost first dispatch must recover without caller retry');
  const rescueHistory=await invoke('operation_get',{operationId:rescued.operationId},451);
  assert.ok(rescueHistory.dispatchAttempts>=2,'DO must resend unacknowledged dispatch');
@@ -173,7 +178,12 @@ try{
  const onceFile='E:/DeskBeacon/.test-data/delivery-once-'+Date.now()+'.txt';
  const onceScript='const fs=require("node:fs");fs.appendFileSync('+JSON.stringify(onceFile)+',"1");setTimeout(()=>console.log("delivered-once"),6500)';
  let once;
- try{once=await invoke('exec_foreground',{description:'Lost acceptance ACK should not rerun side effects',command:{mode:'program',program:'node',args:['-e',onceScript]},timeoutMs:12000},452);}finally{daemon.send=originalSend;}
+ try{
+  const pending=invoke('exec_foreground',{description:'Lost acceptance ACK should not rerun side effects',command:{mode:'program',program:'node',args:['-e',onceScript]},timeoutMs:12000},452);
+  await new Promise(r=>setTimeout(r,650));
+  daemon.ws.terminate(); // DO resends on reconnect with the same ID.
+  once=await pending;
+ }finally{daemon.send=originalSend;}
  assert.equal(skippedAcks,2);
  assert.ok(once.outputPreview.includes('delivered-once'));
  assert.equal(readFileSync(onceFile,'utf8'),'1','duplicate delivery must never rerun process');
@@ -203,12 +213,12 @@ try{
   daemon.ws.terminate();
   await new Promise(r=>setTimeout(r,850));
   const pendingCall=invoke('device_info',{},454);
-  await new Promise(r=>setTimeout(r,800));
+  await new Promise(r=>setTimeout(r,5_500));
   await daemon.connect();
   const afterRecovery=await pendingCall;
   assert.ok(afterRecovery.data?.deviceId,'RPC during transient outage should recover');
  }finally{daemon.scheduleReconnect=scheduleBefore;}
- console.log('PASS RPC started during WebSocket reconnect is held until device returns');
+ console.log('PASS RPC started during >5s WebSocket outage is held until device returns');
  const combinedBatch=await invoke('batch',{description:'E2E mixed tool batch',stages:[
    {parallel:true,calls:[
      {id:'read-project',tool:'fs_read',input:{path:'E:/DeskBeacon/package.json',maxBytes:900}},

@@ -53,7 +53,9 @@ export class ClientDaemon extends EventEmitter {
   private handshakeTimer:NodeJS.Timeout|undefined;
   private reconnectTimer:NodeJS.Timeout|undefined;
   private connecting=false;
-  private readonly reconnectIntervalMs=1_000;
+  // Reconnection is intentionally rate-limited; only a healthy, sustained session resets the budget.
+  private reconnectAttempts=0;
+  private readonly reconnectDelaysMs=[3_000,8_000,20_000,30_000];
   private readonly startedAt=Date.now();
   private activityRevision=0;
   private heartbeatSentAt=0;
@@ -150,8 +152,12 @@ export class ClientDaemon extends EventEmitter {
   }
   private scheduleReconnect(){
     if(this.stopped||this.reconnectTimer)return;
-    // Single-user device: retry at a fixed, short interval instead of exponential backoff.
-    const delay=this.reconnectIntervalMs;
+    const activeForeground=this.supervisor.active().some(task=>task.kind==='foreground');
+    const unacked=Number((this.db.prepare('SELECT COUNT(*) AS total FROM unacked_results').get() as {total:number}).total);
+    // Only an active command/result warrants a fast retry. Idle devices back off.
+    const urgent=activeForeground||unacked>0;
+    const delay=urgent?3_000:this.reconnectDelaysMs[Math.min(this.reconnectAttempts,this.reconnectDelaysMs.length-1)]!;
+    this.reconnectAttempts++;
     this.recordConnection('reconnect_scheduled','delayMs='+delay);
     this.reconnectTimer=setTimeout(()=>{
       this.reconnectTimer=undefined;
@@ -297,6 +303,7 @@ export class ClientDaemon extends EventEmitter {
       if(this.heartbeatAwaiting){
         this.latencyMs=Math.round(performance.now()-this.heartbeatSentAt);
         this.lastHeartbeatAt=Date.now();
+        if(Date.now()-this.socketOpenedAt>=120_000)this.reconnectAttempts=0;
         this.heartbeatAwaiting=false;this.heartbeatMisses=0;
         if(++this.heartbeatReplies===1)this.recordConnection('first_pong','rttMs='+this.latencyMs);
         this.emit('change');
