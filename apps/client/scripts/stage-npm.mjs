@@ -10,8 +10,10 @@ const smoke=process.argv.includes('--local-smoke');
 const rid=process.argv.find(x=>x.startsWith('win-'))??'win-x64';
 if(rid!=='win-x64')throw Error('Only win-x64 is supported in the initial native package');
 const binDir=join(client,'dist','native',rid);
-const native=join(binDir,'deskbeacon-job.exe');
-const helper=smoke?{status:0}:spawnSync(process.execPath,[join(client,'scripts','verify-native.mjs'),rid],{
+// A verified CI NativeAOT artifact can be staged without replacing a helper
+// currently in use by the local DeskBeacon service.
+const native=process.env.DESKBEACON_RELEASE_NATIVE??join(binDir,'deskbeacon-job.exe');
+const helper=smoke?{status:0}:spawnSync(process.execPath,[join(client,'scripts','verify-native.mjs'),rid,native],{
  stdio:'inherit',windowsHide:true
 });
 if(helper.status!==0&&!smoke)throw Error('Refusing to assemble npm package without verified native AOT binary');
@@ -36,9 +38,14 @@ const pkg={
  description:src.description,
  type:'module',
  license:'MIT',
+ repository:{type:'git',url:'git+https://github.com/RavelloH/DeskBeacon.git',directory:'apps/client'},
+ homepage:'https://github.com/RavelloH/DeskBeacon#readme',
+ bugs:{url:'https://github.com/RavelloH/DeskBeacon/issues'},
+ keywords:['mcp','ai-agent','remote-device','cli','tui','cloudflare','remote-access'],
  ...(smoke?{private:true}:{}),
  engines:{node:'>=24'},
- bin:{deskbeacon:'./cli.js'},
+ bin:{deskbeacon:'cli.js'},
+ publishConfig:{access:'public'},
  dependencies:Object.fromEntries(Object.entries(src.dependencies).filter(([name])=>name!=='@deskbeacon/protocol'))
 };
 writeFileSync(join(base,'package.json'),JSON.stringify(pkg,null,2)+'\n');

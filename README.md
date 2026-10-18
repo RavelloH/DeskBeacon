@@ -76,9 +76,19 @@ pnpm exec wrangler deploy
 
 ### 2. 安装并连接设备
 
-在需要远程控制的电脑上安装项目客户端。当前 npm 包尚未正式发布，可以从源码运行。
+在需要远程控制的电脑上安装客户端。**npm 分发包不需要 pnpm、.NET SDK 或源码仓库**；要求 Node.js 24 或更新版本。首个发布版本已针对 Windows x64 验证，Windows ARM64 原生进程监督程序尚未提供。
 
-在项目根目录执行：
+通过 npm 安装：
+
+```bash
+npm install -g deskbeacon
+deskbeacon setup --url https://your-worker.example
+deskbeacon
+```
+
+也可以直接运行 `npx deskbeacon`，无需全局安装。首次运行时，如果未配置 Worker，CLI 会提示配对地址。浏览器会打开 OAuth 授权页面，输入之前设置的 `MCP_AUTH_SECRET` 完成设备授权。
+
+如果希望从源码运行，在仓库根目录执行：
 
 ```bash
 pnpm install
@@ -86,23 +96,11 @@ pnpm --filter @deskbeacon/protocol build
 pnpm --filter deskbeacon build
 ```
 
-Windows 从源码运行还需要 .NET 10 SDK 和 Visual Studio C++ Build Tools，用于构建随客户端使用的本地运行组件：
+Windows 从源码运行还需要 .NET 10 SDK 与 Visual Studio C++ Build Tools，以生成 NativeAOT 原生进程监督组件：
 
 ```bash
 pnpm --filter deskbeacon build:native:win-x64
-```
-
-完成后，配对设备（将地址替换为你的 Worker 地址）：
-
-```bash
 node apps/client/dist/index.js setup --url https://your-worker.example
-```
-
-浏览器会打开 OAuth 授权页面。输入之前设置的 `MCP_AUTH_SECRET`，完成设备授权。
-
-启动客户端并打开本地终端界面：
-
-```bash
 node apps/client/dist/index.js
 ```
 
