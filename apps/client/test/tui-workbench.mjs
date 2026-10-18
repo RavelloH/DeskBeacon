@@ -98,7 +98,7 @@ class TerminalCapture{
 }
 
 function terminal(width,height){
-  const input=new PassThrough();input.isTTY=true;input.setRawMode=()=>input;
+  const input=new PassThrough();input.isTTY=true;input.setRawMode=()=>input;input.ref=()=>input;input.unref=()=>input;
   const output=new PassThrough();output.isTTY=true;output.columns=width;output.rows=height;output.getColorDepth=()=>24;
   const capture=new TerminalCapture(output);
   return {input,output,capture};
@@ -109,7 +109,8 @@ async function mountDemo(scenario,width,height){
   const app=render(React.createElement(App,{demoScenario:scenario}),{
     stdin:io.input,stdout:io.output,exitOnCtrlC:false,
   });
-  await waitFor(()=>io.capture.snapshot().includes('ACTIVITY'),`Ink did not render ${scenario}`);
+  await waitFor(()=>io.capture.snapshot().includes('ACTIVITY'),`Ink did not render ${scenario}: ${io.capture.snapshot().slice(0,2500)}`);
+  await sleep(160); // Wait for Ink input effects to attach after the initial paint.
   const send=async value=>{io.input.write(value);await sleep(55);};
   const resize=async(nextWidth,nextHeight)=>{
     io.output.columns=nextWidth;io.output.rows=nextHeight;io.output.emit('resize');await sleep(100);
@@ -171,20 +172,20 @@ try{
     assert.ok(layout.capture.snapshot().includes('以上运行中 · 以下为历史'),'running/history separator is visible\n'+layout.capture.snapshot());
 
     await layout.send('j');
-    await waitFor(()=>layout.capture.snapshot().includes('检查开发服务健康状态'),'down must select the next activity');
+    await waitFor(()=>layout.capture.snapshot().includes('2 / 6'),'down must select the next activity\n'+layout.capture.snapshot());
     await layout.send('k');
     await waitFor(()=>layout.capture.snapshot().includes('构建桌面客户端'),'up must restore the prior activity');
 
     await layout.send('j');
     await layout.send('6');
     await waitFor(()=>layout.capture.snapshot().includes('ACTIVITY 7'),'new demo activity should be added');
-    assert.ok(layout.capture.snapshot().includes('检查开发服务健康状态'),
+    assert.ok(layout.capture.snapshot().includes('3 / 7'),
       'the selected activity must remain selected when a newer row arrives');
 
     for(let i=0;i<40;i++)await layout.send('6');
     await waitFor(()=>layout.capture.snapshot().includes('ACTIVITY 47'),
       'demo should retain the full activity list as newer records arrive');
-    assert.ok(layout.capture.snapshot().includes('检查开发服务健康状态'));
+    assert.ok(layout.capture.snapshot().includes('43 / 47'),'the same selected activity should remain available after many insertions');
     await layout.send('f');
     await waitFor(()=>layout.capture.snapshot().includes('● live'),'f returns to following new events');
 
@@ -199,6 +200,15 @@ try{
     await layout.resize(31,40);
     assert.ok(assertPosition(layout.capture,'ACTIVITY').row<assertPosition(layout.capture,'DETAIL').row,
       'narrow portrait terminals still provide stacked panes');
+    for(let n=0;n<18;n++){
+      const [width,height]=[[120,32],[97,25],[80,28],[47,30],[31,40],[135,19]][n%6];
+      await layout.resize(width,height);
+      if(n%3===0)await layout.send('6');
+    }
+    await layout.resize(120,32);
+    assert.ok(layout.capture.snapshot().includes('ACTION'));
+    assert.ok(layout.capture.snapshot().includes('RESULT'));
+    console.log('PASS 18 rapid Ink resize and live activity redraw cycles');
   }finally{await layout.close();}
   console.log('PASS responsive wide/portrait/square layout, history separator and stable selection');
 

@@ -104,6 +104,9 @@ export class ClientDaemon extends EventEmitter {
     }
     this.db.exec('CREATE INDEX IF NOT EXISTS activity_time_id_desc ON activity(time DESC,id DESC)');
     this.db.exec("CREATE INDEX IF NOT EXISTS activity_running_time_id_desc ON activity ((CASE WHEN status='running' THEN 1 ELSE 0 END) DESC,time DESC,id DESC)");
+    // This Runtime owns its process tree. A prior Runtime's unfinished activity cannot still be running here.
+    // Mark it interrupted (unknown result), not failed or successfully completed.
+    this.db.prepare("UPDATE activity SET status='interrupted' WHERE status IN ('running','accepted','started')").run();
     this.activityRevision=(this.db.prepare('SELECT COUNT(*) AS total FROM activity').get() as {total:number}).total;
     this.db.exec('CREATE TABLE IF NOT EXISTS workspaces(id TEXT PRIMARY KEY, grant_id TEXT, cwd TEXT, shell TEXT, version INTEGER)');
     this.db.exec('CREATE TABLE IF NOT EXISTS unacked_results (operation_id TEXT PRIMARY KEY, tool TEXT NOT NULL, created INTEGER NOT NULL)');

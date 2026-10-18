@@ -1,4 +1,5 @@
 import { execFile, spawnSync } from 'node:child_process';
+import { StringDecoder } from 'node:string_decoder';
 import spawn from 'cross-spawn';
 import { mkdirSync, createWriteStream, existsSync, openSync, closeSync, readSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -34,7 +35,11 @@ function shellPlan(c:Input):{exe:string;args:string[];cwd:string}{
  const shell=c.shellProfile??(process.platform==='win32'?(spawnSync('where.exe',['pwsh.exe'],{windowsHide:true}).status===0?'pwsh':'powershell'):process.platform==='darwin'?'zsh':'bash');
  if(shell==='powershell'||shell==='pwsh'||shell==='powershell.exe'||shell==='pwsh.exe'){
    const exe=shell.startsWith('pwsh')?'pwsh.exe':'powershell.exe';
-   return {exe,args:['-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(c.script,'utf16le').toString('base64')],cwd};
+   // Initialize UTF-8 for pipe-backed PowerShell, including Windows PowerShell 5.1.
+   // A nested script block preserves leading param() and using directives.
+   const bootstrap = '$ProgressPreference = "SilentlyContinue"; [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $OutputEncoding = [System.Text.UTF8Encoding]::new($false);';
+   const script = `${bootstrap}\n& {\n${c.script}\n}`;
+   return {exe,args:['-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],cwd};
  }
  if(shell==='cmd'||shell==='cmd.exe')return {exe:'cmd.exe',args:['/d','/s','/c',c.script],cwd};
  if(shell==='bash'||shell==='zsh'||shell==='sh')return {exe:shell,args:['-c',c.script],cwd};
@@ -79,6 +84,7 @@ export class TaskSupervisor{
    const outFile=createWriteStream(task.out),errFile=createWriteStream(task.err);
    let stdout='',stderr='',outputBytes=0,timedOut=false,outputLimitReached=false,spawnError='';
    let stdoutWritten=0,stderrWritten=0;
+   const decoders={stdout:new StringDecoder('utf8'),stderr:new StringDecoder('utf8')};
    const handle=(stream:'stdout'|'stderr',data:Buffer)=>{
      const prior=outputBytes;outputBytes+=data.byteLength;
      if(outputBytes>outputLimit&&fg&&!outputLimitReached){outputLimitReached=true;void stopTree(child,jobManaged);}
@@ -91,7 +97,8 @@ export class TaskSupervisor{
          this.db.prepare('UPDATE background SET '+(isOut?'stdout_truncated':'stderr_truncated')+'=1 WHERE id=?').run(id);
        }
      }
-     const text=recorded.toString('utf8');
+     // A UTF-8 character can straddle stdout/stderr data events.
+     const text=decoders[stream].write(recorded);
      if(isOut){if(stdout.length<outputLimit)stdout+=text.slice(0,outputLimit-stdout.length);if(recorded.length)outFile.write(recorded);}
      else{if(stderr.length<outputLimit)stderr+=text.slice(0,outputLimit-stderr.length);if(recorded.length)errFile.write(recorded);}
    };
@@ -108,6 +115,7 @@ export class TaskSupervisor{
      return {backgroundTaskId:id,pid:child.pid??null,description,status:'running',cwd:p.cwd,program:p.exe};
    }
    const code=await new Promise<number|null>(resolve=>child.once('close',(code)=>resolve(code)));
+   stdout+=decoders.stdout.end();stderr+=decoders.stderr.end();
    if(timeout)clearTimeout(timeout);
    outFile.end();errFile.end();this.fg.delete(id);this.onChange();
    return {exitCode:code,stdout,stderr,timedOut,outputLimit:outputLimitReached,spawnError,

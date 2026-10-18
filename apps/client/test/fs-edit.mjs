@@ -39,7 +39,9 @@ try{
  write('one\r\ntwo\r\nthree\r\n');
  result=await edit({mode:'replace',oldText:'two',newText:'two\nextra'});
  assert.equal(read(),'one\r\ntwo\r\nextra\r\nthree\r\n');
- console.log('PASS newly inserted lines adopt existing CRLF');
+ assert.equal(result.addedLines,1);
+ assert.equal(result.removedLines,0);
+ console.log('PASS inserted lines adopt CRLF and return a minimal +1 / -0 line diff');
 
  write('same\r\nend\r\nsame\r\nend\r\n');
  const ambiguous=read();

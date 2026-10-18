@@ -1,10 +1,12 @@
 import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {render, Box, Text, useInput, useApp, useStdout} from 'ink';
 import {requestIpc, subscribeIpc} from './ipc.js';
-import {activityPresentation, detailLines, safeText, duration, type ActivityEntry} from './presenter.js';
+import {activityPresentation, safeText, duration, type ActivityEntry} from './presenter.js';
+import {toolRow, type Segment, type Tone} from './tool-presentation.js';
+import {detailPresentation, wrapDetail, type DetailLine} from './detail-presentation.js';
 import {ACTIVITY_PAGE_SIZE, sortActivityRows, type ActivityPage} from './activity-query.js';
 import {createDemoStatus, advanceDemo, demoHelp, type DemoScenario, type DemoStatus} from './demo.js';
-import {cellWidth, fit, fitPath, oneLine, paneLayout, tableColumns, wrapLines} from './tui-layout.js';
+import {cellWidth, fit, oneLine, paneLayout, tableColumns, wrapLines, rightFit, activityTime, dateDivider, dateKey} from './tui-layout.js';
 import {copyText} from './clipboard.js';
 
 type Task={id:string;description:string;start:number;kind:'foreground'|'background';
@@ -21,7 +23,7 @@ type TaskLog={id:string;line:string};
 type OutputPage={text:string;nextOffset:number;totalBytes:number;hasMore:boolean;stream:string};
 type Focus='activity'|'detail'|'tasks';
 const palette={text:'#D6D6D6',muted:'#969696',line:'#5E5E5E',accent:'#75D9CF',selection:'#303030'};
-const stateColor={running:'#EFC778',success:'#92D6A2',failed:'#F58D91',stopped:'#A6A6A6',unknown:'#A6A6A6'};
+const stateColor={running:'#EFC778',success:'#92D6A2',failed:'#F58D91',stopped:'#A6A6A6',interrupted:'#EFC778',unknown:'#A6A6A6'};
 const spinnerFrames=['⣾','⣷','⣯','⣟','⡿','⢿','⣻','⣽'] as const;
 const barTheme={
  connected:{background:'#BCE6C6',foreground:'#164D2A'},
@@ -29,6 +31,7 @@ const barTheme={
  disconnected:{background:'#F2B9B9',foreground:'#692526'},
 };
 const time=(value:number)=>new Date(value).toLocaleTimeString('zh-CN',{hour12:false});
+const toneColor:Record<Tone,string>={default:palette.text,muted:palette.muted,success:stateColor.success,danger:stateColor.failed,warning:stateColor.running};
 function liveElapsed(ms:number){
  const elapsed=Math.max(0,ms),totalSeconds=Math.floor(elapsed/1000);
  if(totalSeconds===0)return Math.floor(elapsed)+'ms';
@@ -40,7 +43,7 @@ function liveElapsed(ms:number){
 function SpinnerCell({color}:{color:string}){
  const [frame,setFrame]=useState(0);
  useEffect(()=>{
-  const timer=setInterval(()=>setFrame(current=>(current+1)%spinnerFrames.length),80);
+  const timer=setInterval(()=>setFrame(current=>(current+1)%spinnerFrames.length),160);
   return()=>clearInterval(timer);
  },[]);
  return <Text color={color}>{spinnerFrames[frame]+' '}</Text>;
@@ -48,7 +51,7 @@ function SpinnerCell({color}:{color:string}){
 function RunningElapsedCell({entry,color,bold,width}:{entry:ActivityEntry;color:string;bold:boolean;width:number}){
  const [now,setNow]=useState(()=>Date.now());
  useEffect(()=>{
-  const timer=setInterval(()=>setNow(Date.now()),100);
+  const timer=setInterval(()=>setNow(Date.now()),500);
   return()=>clearInterval(timer);
  },[]);
  return <Text color={color} bold={bold}>{fit(liveElapsed(now-entry.time),width)+' '}</Text>;
@@ -56,7 +59,7 @@ function RunningElapsedCell({entry,color,bold,width}:{entry:ActivityEntry;color:
 function RunningDetailHeading({entry,tool,status,width}:{entry:ActivityEntry;tool:string;status:string;width:number}){
  const [now,setNow]=useState(()=>Date.now());
  useEffect(()=>{
-  const timer=setInterval(()=>setNow(Date.now()),100);
+  const timer=setInterval(()=>setNow(Date.now()),500);
   return()=>clearInterval(timer);
  },[]);
  return <Line text={tool+' · '+status+' · '+liveElapsed(now-entry.time)} width={width} color={stateColor.running} bold/>;
@@ -84,7 +87,7 @@ function BackgroundTable({tasks,start,slots,width,height,focus,selectedId,demo,h
    }).catch(()=>{}).finally(()=>{pending=false;});
   };
   poll();
-  const timer=setInterval(()=>{setNow(Date.now());poll();},100);
+  const timer=setInterval(()=>{setNow(Date.now());poll();},500);
   return()=>{alive=false;clearInterval(timer);};
  },[demo,taskIds]);
  const contentWidth=Math.max(1,width-2),iconWidth=Math.min(2,contentWidth);
@@ -159,6 +162,21 @@ function Title({label,right='',width,active=false,junctionAt}:{label:string;righ
 }
 function Line({text,width,color=palette.text,bold=false}:{text:string;width:number;color?:string;bold?:boolean}){
  return <Box height={1} flexShrink={0}><Text color={color} bold={bold}>{fit(text,width)}</Text></Box>;
+}
+
+/** Rich text clipped by terminal cells, never by UTF-16 length. */
+function RichCell({segments,width,selected=false}:{segments:Segment[];width:number;selected?:boolean}){
+ let remaining=Math.max(0,width);
+ const spans:{text:string;tone:Tone}[]=[];
+ for(const segment of segments){
+  if(remaining<=0)break;
+  const raw=oneLine(segment.text);
+  const fitted=fit(raw,remaining,false),used=cellWidth(fitted);
+  spans.push({text:fitted,tone:segment.tone??'default'});
+  remaining-=used;
+  if(cellWidth(raw)>used)break;
+ }
+ return <Text>{spans.map((part,index)=><Text key={index} color={selected&&part.tone==='default'?palette.accent:toneColor[part.tone]} bold={selected&&part.tone==='default'}>{part.text}</Text>)}{' '.repeat(remaining)+' '}</Text>;
 }
 
 export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
@@ -359,12 +377,15 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
    pendingActivityIndexRef.current=null;
   }
  },[activities.length,pageHasMore,pageLoading]);
- const rows:(ActivityEntry|'divider')[]=[];
+ type ActivityRow=ActivityEntry|'divider'|{kind:'date';timestamp:number};
+ const rows:ActivityRow[]=[];
  activities.forEach((a,index)=>{
-  if(index>0&&a.status!=='running'&&activities[index-1]?.status==='running')rows.push('divider');
+  const previous=activities[index-1];
+  if(index>0&&a.status!=='running'&&previous?.status==='running')rows.push('divider');
+  if(a.status!=='running'&&(!previous||dateKey(previous.time)!==dateKey(a.time)))rows.push({kind:'date',timestamp:a.time});
   rows.push(a);
  });
- const selectedRow=Math.max(0,rows.findIndex(a=>a!=='divider'&&a.id===selected?.id));
+ const selectedRow=Math.max(0,rows.findIndex(a=>a!=='divider'&&'id' in a&&a.id===selected?.id));
  const rowStart=Math.max(0,selectedRow-tableRows+1);
  const visibleRows=rows.slice(rowStart,rowStart+tableRows);
  const columns=tableColumns(Math.max(1,aw-2));
@@ -387,25 +408,25 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
    .catch(error=>{if(alive)setOutputError(safeText(String(error),200));});
   return()=>{alive=false;};
  },[demo,outputMode,entry?.id,stream,pageOffset,refresh]);
- const detail=useMemo(()=>{
-  if(view==='help')return wrapLines([
-   '键盘操作','↑↓ / j k 选择完整活动列表中的记录',
-   'PgUp / PgDn 翻页；Home 定位最新；End 定位最旧记录',
-   '已加载的活动详情即时显示；向下翻页时继续从数据库读取','Tab 在活动、详情、后台之间切换','Enter 打开详情；Esc 返回活动',
-   '/ 搜索（Agent / 工具 / 意图）','> 命令面板；f 跟随最新记录',
+ const detail=useMemo(():DetailLine[]=>{
+  const fromPlain=(lines:string[])=>wrapDetail(lines.map(text=>({text})),Math.max(1,dw-2));
+  if(view==='help')return fromPlain([
+   '键盘操作','↑↓ / j k 浏览活动；Home / f 跟随最新',
+   'PgUp / PgDn 翻页；End 定位最旧',
+   'Tab 切换活动、详情和后台任务焦点',
+   '/ 搜索全部历史 · > 命令面板 · ? 帮助',
    'o 查看本地完整输出；e 切换 stdout / stderr',
-   '[ / ] 上一页 / 下一页输出；r 刷新输出','y 复制命令，非命令记录复制目标',
-   'x 停止选中任务；X 停止全部进程（需确认）','q 关闭界面；? 帮助',
-   ...(demo?demoHelp:[])],Math.max(1,dw-2));
-  if(view==='config')return wrapLines(['连接信息',status?.deviceName??'等待本地 Runtime',
-   status?.server??'', '后台服务：deskbeacon service start / stop / restart'],Math.max(1,dw-2));
-  if(!entry||!model)return ['选择活动记录以查看参数与结果。'];
-  const heading=[model.tool+' · '+model.status+' · '+model.elapsed];
-  if(outputMode)return wrapLines([...heading,
+   '[ / ] 上一页 / 下一页输出；r 刷新输出',
+   'y 复制命令；x/X 停止进程（需确认）；q 退出',
+   ...(demo?demoHelp:[])]);
+  if(view==='config')return fromPlain(['连接信息',status?.deviceName??'等待本地 Runtime',
+   status?.server??'', '后台服务：deskbeacon service start / stop / restart']);
+  if(!entry||!model)return fromPlain(['选择活动记录以查看参数与结果。']);
+  if(outputMode)return fromPlain([model.tool+' · '+model.status,
    '本地日志 · '+stream+' · '+(output?output.totalBytes+' B · offset '+pageOffset:'读取中…'),
-   ...(outputError?[outputError]:output?[(output.text||'(empty)')]:[])],Math.max(1,dw-2));
-  return wrapLines([...heading,'',...detailLines(entry)],Math.max(1,dw-2));
- },[entry,model?.state,model?.elapsed,outputMode,output,outputError,pageOffset,view,dw,status?.deviceName,status?.server,demo]);
+   ...(outputError?[outputError]:output?[(output.text||'(empty)')]:[])]);
+  return wrapDetail(detailPresentation(entry,tick),Math.max(1,dw-2));
+ },[entry,model?.state,model?.elapsed,outputMode,output,outputError,pageOffset,view,dw,status?.deviceName,status?.server,demo,tick]);
  const scroll=Math.min(detailScroll,Math.max(0,detail.length-detailRows));
  const resetDetail=()=>{setDetailScroll(0);setOutputMode(false);setView('main');};
  const move=(delta:number,edge?:'first'|'last')=>{
@@ -421,7 +442,8 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
     loadNextPage();
    }
    const index=Math.max(0,Math.min(activities.length-1,requested));
-   setSelectedId(activities[index]?.id??null);setDetailTask(false);resetDetail();
+   // Selecting the newest row in ACTIVITY enables continuous follow mode.
+   setSelectedId(index===0&&!activeQuery?null:activities[index]?.id??null);setDetailTask(false);resetDetail();
   }
  };
  const stop=async(ids:string[])=>{
@@ -520,19 +542,26 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
   <Title label={'ACTIVITY '+(demo?activities.length:pageTotal)} width={aw}
    right={(pageLoading?'加载中 · ':'')+(selectedId===null?'● live':selectedIndex<0?'历史快照':(selectedIndex+1)+' / '+pageTotal)} active={focus==='activity'}/>
   <Box height={1} paddingX={1} flexShrink={0}><Text color={palette.muted}>{'  '+columns.map(c=>fit(c.title,c.width-1)+' ').join('')}</Text></Box>
-  {visibleRows.length?visibleRows.map(row=>row==='divider'?<Line key="divider" width={aw} text=" ┄ 以上运行中 · 以下为历史 ┄" color={palette.line}/>:(()=>{
-   const a=activityPresentation(row,tick),isSelected=row.id===selected?.id;
-   return <Box key={row.id} height={1} flexShrink={0} paddingX={1} backgroundColor={isSelected?palette.selection:undefined}>
+  {visibleRows.length?visibleRows.map(row=>row==='divider'?
+    <Line key="divider" width={aw} text=" ┄ 以上运行中 · 以下为历史 ┄" color={palette.line}/>:
+    'kind' in row&&row.kind==='date'?
+    <Line key={'day-'+row.timestamp} width={aw} text={' ┄ '+dateDivider(row.timestamp,tick)+' ┄'} color={palette.line}/>:(()=>{
+   const record=row as ActivityEntry;
+   const a=activityPresentation(record,tick),visual=toolRow(record),isSelected=record.id===selected?.id;
+   return <Box key={record.id} height={1} flexShrink={0} paddingX={1} backgroundColor={isSelected?palette.selection:undefined}>
     <Text color={isSelected?palette.accent:palette.muted}>{isSelected?'▸ ':'  '}</Text>
     {columns.map(c=>{
+     const width=c.width-1;
+     if(c.key==='action'||c.key==='result')return <RichCell key={c.key}
+      segments={c.key==='action'?visual.action:visual.result} width={width} selected={isSelected}/>;
      const color=c.key==='state'?stateColor[a.state]:c.key==='elapsed'||c.key==='time'?palette.muted:palette.text;
      if(c.key==='state'&&a.state==='running')return <SpinnerCell key={c.key} color={color}/>;
-     if(c.key==='elapsed'&&a.state==='running')return <RunningElapsedCell key={c.key} entry={row}
-      color={color} bold={isSelected} width={c.width-1}/>;
-     const value=c.key==='target'&&['fs_read','fs_write','fs_edit','fs_list','workspace_open','workspace_cd'].includes(row.tool)?
-      fitPath(a.target,c.width-1):fit(c.key==='time'?time(row.time):c.key==='state'?a.symbol:
-       c.key==='summary'?(a.state==='running'?a.intent:a.summary||a.intent):a[c.key],c.width-1);
-     return <Text key={c.key} color={color} bold={isSelected}>{value+' '}</Text>;
+     if(c.key==='elapsed'&&a.state==='running')return <RunningElapsedCell key={c.key} entry={record}
+      color={color} bold={isSelected} width={width}/>;
+     const value=c.key==='time'?activityTime(record.time,tick):c.key==='state'?a.symbol:
+       c.key==='tool'?visual.toolLabel:a[c.key];
+     const formatted=c.key==='elapsed'?rightFit(value,width):fit(value,width);
+     return <Text key={c.key} color={color} bold={isSelected}>{formatted+' '}</Text>;
     })}
    </Box>;
   })()):<Line width={aw} text={pageError?' 历史读取失败 · '+pageError:pageLoading?' 正在加载活动…':activeQuery?' 没有匹配记录 · Esc 清除筛选':' 暂无操作，等待 Agent 请求'} color={palette.muted}/>}
@@ -543,10 +572,8 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
   <Box flexDirection="column" paddingX={1} height={detailRows} overflow="hidden">
    {detail.slice(scroll,scroll+detailRows).map((line,i)=>{
     const index=scroll+i;
-    if(index===0&&view==='main'&&entry&&model?.state==='running')
-     return <RunningDetailHeading key={index} entry={entry} tool={model.tool} status={model.status} width={Math.max(1,dw-2)}/>;
-    return <Line key={index} text={line} width={Math.max(1,dw-2)}
-     color={index===0&&model?stateColor[model.state]:line.startsWith('stdout')||line.startsWith('stderr')?palette.accent:palette.text} bold={index===0}/>;
+    return <Line key={index} text={line.text} width={Math.max(1,dw-2)}
+     color={line.tone?toneColor[line.tone]:palette.text} bold={line.bold===true}/>;
    })}
   </Box>
   <Line width={dw} text={outputMode?' [ ] 翻页 · e 切换流 · r 刷新 · Esc 返回':' y 复制预览 · o 本地输出 · ↑↓ 滚动'} color={palette.muted}/>

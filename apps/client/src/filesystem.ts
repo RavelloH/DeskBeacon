@@ -6,6 +6,7 @@ import { resolve, dirname, basename, join, relative, isAbsolute, sep } from 'nod
 import { spawn } from 'node:child_process';
 import { rgPath } from '@vscode/ripgrep';
 import { editText, type EditTextRequest } from './edit-text.js';
+import { diffLines } from 'diff';
 import AdmZip from 'adm-zip';
 import * as tar from 'tar';
 
@@ -247,16 +248,28 @@ export async function fileTool(tool:string,input:Input,workspace?:string):Promis
    // Validate every replacement before the single atomic file write.
    const result=editText(original,input as EditTextRequest);
    const changed=utf8(result.text);
+   // Report actual line changes, not guesses based on user-supplied patch text.
+   let addedLines:number|undefined,removedLines:number|undefined;
+   if(result.text!==original&&changed.length<=1_048_576&&Buffer.byteLength(original)<=1_048_576){
+     const difference=diffLines(original,result.text);
+     addedLines=difference.filter(part=>part.added).reduce((sum,part)=>sum+(part.count??0),0);
+     removedLines=difference.filter(part=>part.removed).reduce((sum,part)=>sum+(part.count??0),0);
+   }
    if(!input.dryRun&&result.text!==original)await atomicWrite(path,changed,true);
    return{path,sha256:hash(changed),bytes:changed.length,
      replacements:result.replacements,normalizedEol:result.normalizedEol,
-     changed:result.text!==original,dryRun:input.dryRun===true};
+     changed:result.text!==original,dryRun:input.dryRun===true,
+     ...(addedLines!==undefined&&removedLines!==undefined?{addedLines,removedLines}:{})};
  }
  case 'fs_manage':{
    const dest=input.destination?location(input.destination,workspace):'';
    switch(input.action){
     case 'mkdir':await fs.mkdir(path,{recursive:input.recursive});break;
-    case 'remove':await fs.rm(path,{recursive:input.recursive,force:false});break;
+    case 'remove':{
+      if(!input.recursive&&(await fs.lstat(path)).isDirectory())
+        throw Error('DIRECTORY_REQUIRES_RECURSIVE: fs_manage remove requires recursive:true for directories');
+      await fs.rm(path,{recursive:input.recursive,force:false});break;
+    }
     case 'copy':await fs.cp(path,dest,{recursive:input.recursive,force:input.overwrite,errorOnExist:!input.overwrite});break;
     case 'move':case 'rename':if(!input.overwrite)await fs.stat(dest).then(()=>{throw Error('FILE_EXISTS');}).catch(e=>{if(e.message==='FILE_EXISTS')throw e;});await fs.rename(path,dest);break;
    }

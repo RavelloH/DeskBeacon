@@ -106,7 +106,7 @@ export function duration(ms:number):string{
  String(m).padStart(2,'0')+':'+String(s).padStart(2,'0');
 }
 
-export type ActivityState='running'|'success'|'failed'|'stopped'|'unknown';
+export type ActivityState='running'|'success'|'failed'|'stopped'|'interrupted'|'unknown';
 export type ActivityPresentation={
  agent:string;tool:string;state:ActivityState;symbol:string;status:string;
  target:string;intent:string;summary:string;elapsed:string;command:string;
@@ -207,6 +207,7 @@ function hasFailedResult(a:ActivityEntry,r:Record<string,any>):boolean{
  return Array.isArray(r.stages)&&r.stages.some((stage:any)=>Array.isArray(stage?.results)&&stage.results.some((item:any)=>item?.ok===false));
 }
 function stateFor(a:ActivityEntry,r:Record<string,any>):ActivityState{
+ if(a.status==='interrupted')return 'interrupted';
  if(isCancelled(a,r))return 'stopped';
  if(hasFailedResult(a,r))return 'failed';
  if(a.status==='running'||a.status==='accepted'||a.status==='started')return 'running';
@@ -217,6 +218,7 @@ function statusFor(state:ActivityState,r:Record<string,any>):string{
  if(state==='running')return '进行中';
  if(state==='success')return '成功';
  if(state==='stopped')return '已停止';
+ if(state==='interrupted')return '执行中断';
  if(state==='unknown')return '未知';
  if(r.timedOut===true)return '超时';
  if(r.outputLimit===true)return '输出超限';
@@ -225,7 +227,7 @@ function statusFor(state:ActivityState,r:Record<string,any>):string{
  if(typeof r.failureCount==='number'&&r.failureCount>0)return `${r.failureCount} 项失败`;
  return '失败';
 }
-function symbolFor(state:ActivityState):string{return state==='running'?'⠹':state==='success'?'✓':state==='failed'?'✗':state==='stopped'?'■':'?';}
+function symbolFor(state:ActivityState):string{return state==='running'?'⠹':state==='success'?'✓':state==='failed'?'✗':state==='stopped'?'■':state==='interrupted'?'!':'?';}
 function targetFor(tool:string,i:Record<string,any>):string{
  const path=oneLine(i.path??i.sourcePath??i.targetPath??i.archivePath??i.outputPath??i.targetDirectory,220);
  const command=i.command&&typeof i.command==='object'?argvCommand(i.command as Record<string,any>):'';

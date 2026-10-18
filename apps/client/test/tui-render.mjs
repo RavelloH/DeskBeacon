@@ -15,7 +15,7 @@ const output=new PassThrough();
 output.columns=100;output.rows=28;output.isTTY=true;
 output.getColorDepth=()=>24;
 const input=new PassThrough();
-input.isTTY=true;input.setRawMode=()=>input;
+input.isTTY=true;input.setRawMode=()=>input;input.ref=()=>input;input.unref=()=>input;
 let screen='';
 let app;
 output.on('data',data=>screen+=data.toString('utf8'));
