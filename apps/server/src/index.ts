@@ -18,7 +18,9 @@ export function oauthResourcesFor(env: Env, request: Request) {
 
   const authorizationServer = new OAuthAuthorizationServer<Env>({
     issuer: origin,
-    resources: [origin, mcpResource],
+    // Advertise the MCP audience first: generic OAuth clients may select the
+    // first protected resource, while old Device grants still use the origin.
+    resources: [mcpResource, origin],
     defaultResource: origin, // Old Device clients omit resource during authorization.
     legacyGrantResource: origin, // Keep grants written before resource binding.
     scopesSupported: ["deskbeacon:agent", "deskbeacon:device"],

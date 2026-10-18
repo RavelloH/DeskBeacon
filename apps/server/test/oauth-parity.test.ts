@@ -28,7 +28,7 @@ describe('upstream cf-browser-mcp OAuth contract', () => {
   it('uses upstream OAuth endpoint paths for both worker and device client', () => {
     expect(entry).toContain('"/authorize"');
     expect(entry).toContain('authorizationServer.fetch(request, env, ctx)');
-    expect(entry).toContain('resources: [origin, mcpResource]');
+    expect(entry).toContain('resources: [mcpResource, origin]');
     expect(entry).toContain('refreshTokenIdleTTL: 30 * 24 * 60 * 60');
     expect(entry).toContain('clientIdMetadataDocumentEnabled: true');
     expect(entry).toContain('legacyGrantResource: origin');
