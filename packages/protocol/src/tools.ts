@@ -62,10 +62,33 @@ export const toolInputSchemas = {
   fs_find: z.object({ ...CommonDevice, path: Path, pattern: z.string().max(2_048).optional(), glob: z.array(z.string().max(512)).max(64).default([]), includeHidden: z.boolean().default(false), respectIgnore: z.boolean().default(true), maxResults: z.number().int().min(1).max(20_000).default(1_000), cursor: Cursor, workspaceId: WorkspaceId.optional() }).strict(),
   fs_grep: z.object({ ...CommonDevice, path: Path, pattern: z.string().min(1).max(16_384), literal: z.boolean().default(false), caseSensitive: z.boolean().default(false), glob: z.array(z.string().max(512)).max(64).default([]), contextLines: z.number().int().min(0).max(20).default(0), maxResults: z.number().int().min(1).max(10_000).default(500), maxBytes: z.number().int().min(1).max(8_388_608).default(1_048_576), timeoutMs: z.number().int().min(1).max(120_000).default(30_000), cursor: Cursor, workspaceId: WorkspaceId.optional() }).strict(),
   fs_write: z.object({ ...CommonDevice, path: Path, mode: z.enum(['create', 'rewrite', 'append']), content: z.string().max(1_048_576), encoding: z.enum(['utf8', 'base64']).default('utf8'), expectedHash: z.string().regex(/^[a-f0-9]{64}$/i).optional(), overwrite: z.boolean().default(false), workspaceId: WorkspaceId.optional() }).strict(),
-  fs_edit: z.discriminatedUnion('mode', [
-    z.object({ ...CommonDevice, path: Path, mode: z.literal('replace'), oldText: z.string().min(1).max(256_000), newText: z.string().max(256_000), expectedReplacements: z.number().int().min(1).max(1_000).default(1), expectedHash: z.string().regex(/^[a-f0-9]{64}$/i).optional(), workspaceId: WorkspaceId.optional() }).strict(),
-    z.object({ ...CommonDevice, path: Path, mode: z.literal('patch'), patch: z.string().min(1).max(512_000), expectedHash: z.string().regex(/^[a-f0-9]{64}$/i).optional(), workspaceId: WorkspaceId.optional() }).strict(),
-  ]),
+  // A flat schema produces named MCP arguments instead of a generic union.
+  fs_edit: z.object({
+    ...CommonDevice, path: Path, workspaceId: WorkspaceId.optional(),
+    mode: z.enum(['replace','replace_many','patch']),
+    oldText: z.string().min(1).max(256_000).optional(),
+    newText: z.string().max(256_000).optional(),
+    expectedReplacements: z.number().int().min(1).max(1_000).optional(),
+    replacements: z.array(z.object({
+      oldText: z.string().min(1).max(256_000),
+      newText: z.string().max(256_000),
+      expectedReplacements: z.number().int().min(1).max(1_000).optional(),
+    }).strict()).min(1).max(64).optional(),
+    patch: z.string().min(1).max(512_000).optional(),
+    expectedHash: z.string().regex(/^[a-f0-9]{64}$/i).optional(),
+    dryRun: z.boolean().default(false),
+  }).strict().superRefine((value,ctx)=>{
+    const allowed=value.mode==='replace'
+      ? ['oldText','newText','expectedReplacements']
+      :value.mode==='replace_many'?['replacements']:['patch'];
+    const required=value.mode==='replace'
+      ? ['oldText','newText']:value.mode==='replace_many'?['replacements']:['patch'];
+    for(const key of required)if(value[key as keyof typeof value]===undefined)
+      ctx.addIssue({code:'custom',path:[key],message:key+' is required for '+value.mode});
+    for(const key of ['oldText','newText','expectedReplacements','replacements','patch'])
+      if(!allowed.includes(key)&&value[key as keyof typeof value]!==undefined)
+        ctx.addIssue({code:'custom',path:[key],message:key+' is not supported for '+value.mode});
+  }),
   fs_manage: z.object({ ...CommonDevice, action: z.enum(['mkdir', 'copy', 'move', 'rename', 'remove']), path: Path, destination: Path.optional(), recursive: z.boolean().default(false), overwrite: z.boolean().default(false), workspaceId: WorkspaceId.optional() }).strict(),
   exec_foreground: z.object({ ...CommonDevice, description: Description, command: CommandSchema, timeoutMs: z.number().int().min(1).max(LIMITS.maxForegroundTimeoutMs).default(LIMITS.defaultForegroundTimeoutMs), idempotencyKey: z.string().min(1).max(128).optional() }).strict(),
   batch: batchInputSchema,

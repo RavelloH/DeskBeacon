@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 import {
   LIMITS,
   PROTOCOL_VERSION,
@@ -64,6 +65,24 @@ describe('protocol schemas', () => {
       offset: 0,
       final: true,
     }, new Uint8Array(LIMITS.binaryChunkBytes + 1))).toThrow(RangeError);
+  });
+
+  it('publishes concrete fs_edit MCP parameters and checks mode-specific arguments', () => {
+    const output=z.toJSONSchema(toolInputSchemas.fs_edit) as {
+      type?:string;properties?:Record<string,unknown>;required?:string[];
+    };
+    expect(output.type).toBe('object');
+    for(const key of ['deviceId','path','mode','oldText','newText','replacements','patch','dryRun','expectedHash'])
+      expect(output.properties).toHaveProperty(key);
+    expect(output.required).toContain('mode');
+    const base={deviceId:'dev',path:'example.ts'};
+    expect(toolInputSchemas.fs_edit.safeParse({...base,mode:'replace',oldText:'old',newText:'new'}).success).toBe(true);
+    expect(toolInputSchemas.fs_edit.safeParse({...base,mode:'replace_many',replacements:[{oldText:'old',newText:'new'}]}).success).toBe(true);
+    expect(toolInputSchemas.fs_edit.safeParse({...base,mode:'patch',patch:'@@ -1 +1 @@\\n-old\\n+new'}).success).toBe(true);
+    for(const invalid of [
+      {mode:'replace',oldText:'old'}, {mode:'replace',oldText:'old',newText:'new',patch:'bad'},
+      {mode:'replace_many',replacements:[]},{mode:'patch',patch:'patch',oldText:'unexpected'},
+    ])expect(toolInputSchemas.fs_edit.safeParse({...base,...invalid}).success).toBe(false);
   });
 
   it('rejects additional fields and oversized inline transfer data', () => {

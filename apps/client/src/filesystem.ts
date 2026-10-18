@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { resolve, dirname, basename, join, relative, isAbsolute, sep } from 'node:path';
 import { spawn } from 'node:child_process';
 import { rgPath } from '@vscode/ripgrep';
-import { applyPatch } from 'diff';
+import { editText, type EditTextRequest } from './edit-text.js';
 import AdmZip from 'adm-zip';
 import * as tar from 'tar';
 
@@ -244,18 +244,13 @@ export async function fileTool(tool:string,input:Input,workspace?:string):Promis
  case 'fs_edit':{
    const original=await fs.readFile(path,'utf8');
    if(input.expectedHash&&hash(utf8(original))!==input.expectedHash)throw Error('FILE_VERSION_CONFLICT');
-   let changed:string;
-   if(input.mode==='replace'){
-     const occurrences=original.split(input.oldText).length-1;
-     if(occurrences!==input.expectedReplacements)throw Error('REPLACEMENT_COUNT_MISMATCH '+occurrences);
-     changed=original.split(input.oldText).join(input.newText);
-   }else{
-     const patched=applyPatch(original,input.patch);
-     if(patched===false)throw Error('PATCH_CONTEXT_MISMATCH');
-     changed=patched;
-   }
-   await atomicWrite(path,utf8(changed),true);
-   return{path,sha256:hash(utf8(changed)),bytes:Buffer.byteLength(changed)};
+   // Validate every replacement before the single atomic file write.
+   const result=editText(original,input as EditTextRequest);
+   const changed=utf8(result.text);
+   if(!input.dryRun&&result.text!==original)await atomicWrite(path,changed,true);
+   return{path,sha256:hash(changed),bytes:changed.length,
+     replacements:result.replacements,normalizedEol:result.normalizedEol,
+     changed:result.text!==original,dryRun:input.dryRun===true};
  }
  case 'fs_manage':{
    const dest=input.destination?location(input.destination,workspace):'';
