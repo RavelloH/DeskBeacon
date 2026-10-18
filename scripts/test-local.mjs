@@ -6,7 +6,7 @@ const env={...process.env,DESKBEACON_DATA_DIR:join(root,'.test-data'),
   DESKBEACON_IPC_PATH:process.platform==='win32'
     ? '\\\\.\\pipe\\deskbeacon-ci-'+process.pid
     : join(root,'.test-data','ipc-test.sock')};
-for(const name of ['supervisor.mjs','ipc.mjs','connect-recovery.mjs','cli-lifecycle.mjs','demo-mode.mjs','agent-ux.mjs','file-range.mjs','fs-read-many.mjs','activity-model.mjs','output-paging.mjs','tui-render.mjs','tui-workbench.mjs',...(process.platform==='win32'?['job-tree.mjs','job-daemon-crash.mjs']:[])]){
+for(const name of ['supervisor.mjs','ipc.mjs','connect-recovery.mjs','cli-lifecycle.mjs','demo-mode.mjs','agent-ux.mjs','file-range.mjs','fs-read-many.mjs','activity-model.mjs','activity-paging.mjs','output-paging.mjs','tui-render.mjs','tui-workbench.mjs',...(process.platform==='win32'?['job-tree.mjs','job-daemon-crash.mjs']:[])]){
   const args=[join(root,'apps','client','test',name)];
   const exitCode=await new Promise((resolve,reject)=>{
     const child=spawn(process.execPath,args,{cwd:root,env,stdio:'inherit',windowsHide:true});

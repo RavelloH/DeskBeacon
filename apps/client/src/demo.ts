@@ -82,7 +82,7 @@ export function advanceDemo(status:DemoStatus,key:string,now=Date.now()):DemoSta
      {command:{mode:'program',program:'pnpm',args:['test'],cwd:root}},
      kind==='failed'?{error:'BUILD_FAILED: compilation error'}:{exitCode:0,stdout:'Build succeeded\n'},
      kind,now-2500,2500,'ChatGPT');
-   return {...status,activity:[latest,...status.activity].slice(0,40),operationsTotal:status.operationsTotal+1};
+   return {...status,activity:[latest,...status.activity],operationsTotal:status.operationsTotal+1};
  }
  if(key==='7'){
    const count=status.active.length===0?2:status.active.length<7?9:0;

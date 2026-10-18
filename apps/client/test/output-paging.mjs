@@ -22,7 +22,7 @@ const expectIpcError=(request,code)=>assert.rejects(requestIpc(request),new RegE
 
 try{
   await new Promise(resolve=>setTimeout(resolve,40));
-  assert.equal(daemon.status().state,'disconnected','fixture must not connect to a remote Worker');
+  assert.equal((await daemon.status()).state,'disconnected','fixture must not connect to a remote Worker');
   assert.equal((await requestIpc({action:'status'})).server,'https://worker.example.test');
 
   const operationId='paging-fixture-1';

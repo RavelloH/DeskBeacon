@@ -11,6 +11,9 @@ import { PROTOCOL_VERSION, LIMITS, ProtocolMessageSchema, type ProtocolMessage }
 import { TaskSupervisor } from './process.js';
 import { fileTool } from './filesystem.js';
 import { systemTool, networkTool } from './system.js';
+import {activityPage, type ActivityPageOptions} from './activity-query.js';
+
+
 
 export type Config={url:string;deviceId:string;accessToken:string;refreshToken?:string;accessTokenExpiresAt?:number;clientId:string;deviceName:string};
 export const dataDir=process.env.DESKBEACON_DATA_DIR ?? join(homedir(),'.deskbeacon');
@@ -50,6 +53,7 @@ export class ClientDaemon extends EventEmitter {
   private connecting=false;
   private reconnectDelayMs=1500;
   private readonly startedAt=Date.now();
+  private activityRevision=0;
   private heartbeatSentAt=0;
   private heartbeatAwaiting=false;
   private latencyMs:number|null=null;
@@ -98,6 +102,9 @@ export class ClientDaemon extends EventEmitter {
     for(const column of ['request_json TEXT','finished_at INTEGER','duration_ms INTEGER','cwd TEXT','actor_name TEXT']){
       try{this.db.exec('ALTER TABLE activity ADD COLUMN '+column);}catch{}
     }
+    this.db.exec('CREATE INDEX IF NOT EXISTS activity_time_id_desc ON activity(time DESC,id DESC)');
+    this.db.exec("CREATE INDEX IF NOT EXISTS activity_running_time_id_desc ON activity ((CASE WHEN status='running' THEN 1 ELSE 0 END) DESC,time DESC,id DESC)");
+    this.activityRevision=(this.db.prepare('SELECT COUNT(*) AS total FROM activity').get() as {total:number}).total;
     this.db.exec('CREATE TABLE IF NOT EXISTS workspaces(id TEXT PRIMARY KEY, grant_id TEXT, cwd TEXT, shell TEXT, version INTEGER)');
     this.db.exec('CREATE TABLE IF NOT EXISTS unacked_results (operation_id TEXT PRIMARY KEY, tool TEXT NOT NULL, created INTEGER NOT NULL)');
     try{this.db.exec('ALTER TABLE unacked_results ADD COLUMN device_id TEXT');}catch{}
@@ -116,16 +123,17 @@ export class ClientDaemon extends EventEmitter {
     return {state:this.state,runtimeMode:process.env.DESKBEACON_RUNTIME_MODE??'legacy',deviceId:this.config.deviceId,deviceName:this.config.deviceName,
       server:this.config.url,uptimeMs:Date.now()-this.startedAt,memoryBytes:process.memoryUsage().rss,
       ...systemMemory,
-      cpuPercent:Math.round(this.cpuPercent*10)/10,latencyMs:this.latencyMs,
+      cpuPercent:Math.round(this.cpuPercent*10)/10,latencyMs:this.latencyMs,activityRevision:this.activityRevision,
       lastHeartbeatAt:this.lastHeartbeatAt,heartbeatMisses:this.heartbeatMisses,operationsTotal:total.total,
       active:this.supervisor.active().map(task=>{
-        // A long-running process can outlive the forty-row activity window.
         const row=this.db.prepare('SELECT actor_name,grant_id,request_json,cwd FROM activity WHERE id=?').get(task.id) as
           {actor_name:string|null;grant_id:string;request_json:string|null;cwd:string|null}|undefined;
         return {...task,...(row?{actorName:row.actor_name,grantId:row.grant_id,requestJson:row.request_json,cwd:row.cwd}:{})};
       }),background:this.supervisor.list(),
-      transfers:[...this.transfers].map(([id,t])=>({id,...t})),
-      activity:this.db.prepare('SELECT id,grant_id,actor_name,tool,description,status,time,finished_at,duration_ms,cwd,request_json,result FROM activity ORDER BY time DESC LIMIT 40').all()};
+      transfers:[...this.transfers].map(([id,t])=>({id,...t}))};
+  }
+  activityList(options:ActivityPageOptions={}){
+    return activityPage(this.db,options);
   }
   private scheduleReconnect(){
     if(this.stopped||this.reconnectTimer)return;
@@ -299,8 +307,9 @@ export class ClientDaemon extends EventEmitter {
     }
     const actorName=safeActorName(m.actorName);
     if(actorName){
-      this.db.prepare("UPDATE activity SET actor_name=? WHERE grant_id=? AND (actor_name IS NULL OR trim(actor_name)='' OR (actor_name='Agent' AND ?<>'Agent'))")
+      const updated=this.db.prepare("UPDATE activity SET actor_name=? WHERE grant_id=? AND (actor_name IS NULL OR trim(actor_name)='' OR (actor_name='Agent' AND ?<>'Agent'))")
         .run(actorName,m.grantId,actorName);
+      if(updated.changes){this.activityRevision++;this.emit('change');}
     }
     const prev=this.supervisor.hasReceipt(opId);
     if(prev){
@@ -327,6 +336,7 @@ export class ClientDaemon extends EventEmitter {
     this.db.prepare('INSERT OR REPLACE INTO activity(id,grant_id,actor_name,tool,description,status,time,cwd,request_json) VALUES(?,?,?,?,?,?,?,?,?)')
       .run(opId,m.grantId,actorName,tool,description,'running',started,cwd,
         requestPreview.length>6000?JSON.stringify({summary:'参数过大，详情已省略'}):requestPreview);
+    this.activityRevision++;
     this.emit('change');
     this.send({type:'operation.accepted',operationId:opId,payload:{acceptedAt:now()}});
     this.send({type:'operation.started',operationId:opId,payload:{startedAt:now()}});
@@ -342,6 +352,7 @@ export class ClientDaemon extends EventEmitter {
       const resultPreview=safeResult.length>6000?JSON.stringify({summary:'结果过大，请查看操作日志'}):safeResult;
       this.db.prepare('UPDATE activity SET status=?,result=?,finished_at=?,duration_ms=? WHERE id=?')
         .run('completed',resultPreview,Date.now(),Date.now()-started,opId);
+      this.activityRevision++;
       this.emit('change');
       this.db.prepare('INSERT OR IGNORE INTO unacked_results(operation_id,tool,created,device_id) VALUES(?,?,?,?)').run(opId,tool,Date.now(),this.config.deviceId);
       try{await this.final(opId,tool,result);}
@@ -351,6 +362,7 @@ export class ClientDaemon extends EventEmitter {
       this.supervisor.record(opId,'failed',{error:message});
       this.db.prepare('UPDATE activity SET status=?,result=?,finished_at=?,duration_ms=? WHERE id=?')
         .run('failed',JSON.stringify({error:message}).slice(0,32000),Date.now(),Date.now()-started,opId);
+      this.activityRevision++;
       this.emit('change');
       if(this.ws?.readyState===WebSocket.OPEN){
         this.send({type:'operation.failed',operationId:opId,payload:{code:message.split(':')[0]?.slice(0,64)||'INTERNAL',message:message.slice(0,2000),retryable:false}});

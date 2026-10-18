@@ -13,11 +13,11 @@ globalThis.fetch=async()=>{attempts++;throw Error('simulated network loss');};
 const daemon=new ClientDaemon(config);
 try{
  await daemon.connect();
- assert.match(daemon.status().state,/^error:/);
+ assert.match((await daemon.status()).state,/^error:/);
  const deadline=Date.now()+6000;
  while(attempts<2&&Date.now()<deadline)await new Promise(r=>setTimeout(r,100));
  assert.ok(attempts>=2,'refresh errors must schedule reconnect without manual restart');
- assert.match(daemon.status().state,/^error:/);
+ assert.match((await daemon.status()).state,/^error:/);
  console.log('PASS client automatically retries failed OAuth refresh after temporary disconnection');
  const ports=await daemon.execute('net_ports',{protocol:'tcp',state:'listen',limit:1},'local-netports-test','test-agent');
  assert.ok(Array.isArray(ports.connections),'net_ports must route to implemented system tool');

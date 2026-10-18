@@ -5,6 +5,7 @@ export type ActivityEntry={
   cwd?:string|null;finished_at?:number|null;duration_ms?:number|null;
   request_json?:string|null;result?:string|null;
 };
+export type ActivityDetail=Pick<ActivityEntry,'cwd'|'request_json'|'result'>;
 const verbs:Record<string,[string,string]>={
  device_info:['读取设备信息中','读取了设备信息'],device_list:['发现设备中','列出了设备'],
  workspace_open:['创建工作区中','创建了工作区'],workspace_info:['读取工作区中','读取了工作区'],
@@ -298,10 +299,12 @@ export function activityPresentation(a:ActivityEntry,now:number):ActivityPresent
  const i=inputObject(a),r=resultObject(a),state=stateFor(a,r);
  const actor=oneLine(a.actor_name,100);
  const grant=oneLine(a.grant_id,40);
+ const target=Object.keys(i).length?targetFor(a.tool,i):oneLine(a.description||a.tool,220)||'—';
  return {
   agent:actor||`Agent ${grant.slice(0,8)||'unknown'}`,
   tool:shortTools[a.tool]??'操作',state,symbol:symbolFor(state),status:statusFor(state,r),
-  target:previewLine(targetFor(a.tool,i),220),intent:oneLine(a.description||a.tool,180),summary:summaryFor(a.tool,r),
+  target:previewLine(target,220),intent:oneLine(a.description||a.tool,180),
+  summary:a.result===undefined?'':summaryFor(a.tool,r),
   elapsed:elapsedFor(a,r,now),command:commandFor(i)
  };
 }

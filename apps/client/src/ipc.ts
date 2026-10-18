@@ -143,6 +143,12 @@ export function startIpc(daemon:ClientDaemon){
              return;
            }
            if(request.action==='status')result=await daemon.status();
+           else if(request.action==='activity-list')result=daemon.activityList({
+             cursor:request.cursor,query:request.query,limit:request.limit,watchIds:request.watchIds
+           });
+           else if(request.action==='task-logs')result=daemon.supervisor.active()
+             .filter(task=>task.kind==='background')
+             .map(task=>({id:task.id,line:daemon.supervisor.latestLine(task.id)}));
            else if(request.action==='stop')result=await daemon.supervisor.stop(String(request.taskId));
            else if(request.action==='exit') {result={stopping:true};setImmediate(()=>{void daemon.shutdown().finally(()=>server.close());});}
            else if(request.action==='output')result=outputPage(request.operationId,request.stream,request.byteOffset,request.maxBytes);

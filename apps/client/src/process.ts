@@ -126,6 +126,21 @@ export class TaskSupervisor{
  list(){
    return this.db.prepare('SELECT id,description,pid,status,start,exit_code FROM background ORDER BY start DESC LIMIT 200').all();
  }
+ latestLine(id:string){
+   const task=this.bg.get(id);if(!task)return '';
+   let latest={mtime:-1,line:''};
+   for(const path of [task.out,task.err])try{
+     if(!existsSync(path))continue;
+     const info=statSync(path),length=Math.min(info.size,8192);
+     if(!length)continue;
+     const buffer=Buffer.alloc(length),fd=openSync(path,'r');
+     try{readSync(fd,buffer,0,length,info.size-length);}finally{closeSync(fd);}
+     const lines=buffer.toString('utf8').replace(/\r\n?/g,'\n').split('\n').filter(line=>line.trim().length>0);
+     const line=lines[lines.length-1]??'';
+     if(line&&info.mtimeMs>=latest.mtime)latest={mtime:info.mtimeMs,line};
+   }catch{}
+   return latest.line;
+ }
  get(id:string){return this.db.prepare('SELECT * FROM background WHERE id=?').get(id)??null;}
  output(id:string,stream:string,offset:number,maxBytes:number,maxLines=5000){
    const row=this.get(id) as any;if(!row)throw Error('BACKGROUND_NOT_FOUND');

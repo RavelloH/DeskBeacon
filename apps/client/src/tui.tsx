@@ -1,7 +1,8 @@
-import React, {useEffect, useMemo, useState} from 'react';
+import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {render, Box, Text, useInput, useApp, useStdout} from 'ink';
 import {requestIpc, subscribeIpc} from './ipc.js';
 import {activityPresentation, detailLines, safeText, duration, type ActivityEntry} from './presenter.js';
+import {ACTIVITY_PAGE_SIZE, sortActivityRows, type ActivityPage} from './activity-query.js';
 import {createDemoStatus, advanceDemo, demoHelp, type DemoScenario, type DemoStatus} from './demo.js';
 import {cellWidth, fit, fitPath, oneLine, paneLayout, tableColumns, wrapLines} from './tui-layout.js';
 import {copyText} from './clipboard.js';
@@ -12,10 +13,11 @@ type Transfer={id:string;status:string;bytes:number;path:string;totalBytes?:numb
 type Status={
  state:string;deviceName:string;deviceId:string;server?:string;uptimeMs:number;
  memoryBytes:number;availableMemoryBytes:number;totalMemoryBytes:number;
- cpuPercent:number;latencyMs:number|null;operationsTotal:number;
- active:Task[];transfers:Transfer[];activity:ActivityEntry[];
+ cpuPercent:number;latencyMs:number|null;operationsTotal:number;activityRevision?:number;
+ active:Task[];transfers:Transfer[];activity?:ActivityEntry[];
 };
 type LocalTask={id:string;title:string;start:number;kind:string;entry:ActivityEntry|undefined;progress?:number};
+type TaskLog={id:string;line:string};
 type OutputPage={text:string;nextOffset:number;totalBytes:number;hasMore:boolean;stream:string};
 type Focus='activity'|'detail'|'tasks';
 const palette={text:'#D6D6D6',muted:'#969696',line:'#5E5E5E',accent:'#75D9CF',selection:'#303030'};
@@ -27,6 +29,14 @@ const barTheme={
  disconnected:{background:'#F2B9B9',foreground:'#692526'},
 };
 const time=(value:number)=>new Date(value).toLocaleTimeString('zh-CN',{hour12:false});
+function liveElapsed(ms:number){
+ const elapsed=Math.max(0,ms),totalSeconds=Math.floor(elapsed/1000);
+ if(totalSeconds===0)return Math.floor(elapsed)+'ms';
+ const minutes=Math.floor(totalSeconds/60),seconds=totalSeconds%60;
+ if(minutes===0)return totalSeconds+'s';
+ if(minutes<60)return minutes+'m'+String(seconds).padStart(2,'0')+'s';
+ return Math.floor(minutes/60)+'h'+String(minutes%60).padStart(2,'0')+'m'+String(seconds).padStart(2,'0')+'s';
+}
 function SpinnerCell({color}:{color:string}){
  const [frame,setFrame]=useState(0);
  useEffect(()=>{
@@ -41,7 +51,68 @@ function RunningElapsedCell({entry,color,bold,width}:{entry:ActivityEntry;color:
   const timer=setInterval(()=>setNow(Date.now()),100);
   return()=>clearInterval(timer);
  },[]);
- return <Text color={color} bold={bold}>{fit(activityPresentation(entry,now).elapsed,width)+' '}</Text>;
+ return <Text color={color} bold={bold}>{fit(liveElapsed(now-entry.time),width)+' '}</Text>;
+}
+function RunningDetailHeading({entry,tool,status,width}:{entry:ActivityEntry;tool:string;status:string;width:number}){
+ const [now,setNow]=useState(()=>Date.now());
+ useEffect(()=>{
+  const timer=setInterval(()=>setNow(Date.now()),100);
+  return()=>clearInterval(timer);
+ },[]);
+ return <Line text={tool+' · '+status+' · '+liveElapsed(now-entry.time)} width={width} color={stateColor.running} bold/>;
+}
+function BackgroundTable({tasks,start,slots,width,height,focus,selectedId,demo,horizontal,activityWidth}:{
+ tasks:LocalTask[];start:number;slots:number;width:number;height:number;focus:boolean;selectedId:string|null;
+ demo:boolean;horizontal:boolean;activityWidth:number;
+}){
+ const [now,setNow]=useState(()=>Date.now());
+ const [logs,setLogs]=useState<Record<string,string>>({});
+ const taskIds=tasks.map(task=>task.id).join('\0');
+ useEffect(()=>{
+  if(!tasks.length)return;
+  let alive=true,pending=false;
+  const poll=()=>{
+   if(demo||pending)return;
+   pending=true;
+   void requestIpc({action:'task-logs'},800).then((value:TaskLog[])=>{
+    if(!alive||!Array.isArray(value))return;
+    const next=Object.fromEntries(value.map(item=>[item.id,item.line]));
+    setLogs(previous=>{
+     const keys=Object.keys(next),oldKeys=Object.keys(previous);
+     return keys.length===oldKeys.length&&keys.every(key=>previous[key]===next[key])?previous:next;
+    });
+   }).catch(()=>{}).finally(()=>{pending=false;});
+  };
+  poll();
+  const timer=setInterval(()=>{setNow(Date.now());poll();},100);
+  return()=>{alive=false;clearInterval(timer);};
+ },[demo,taskIds]);
+ const contentWidth=Math.max(1,width-2),iconWidth=Math.min(2,contentWidth);
+ const visible=tasks.slice(start,start+slots);
+ return <Box flexDirection="column" width={width} height={height} flexShrink={0} overflow="hidden">
+  <Title label={'BACKGROUND '+tasks.length} width={width} active={focus} junctionAt={horizontal?activityWidth:undefined}
+   right={tasks.length>slots?(start+visible.length)+' / '+tasks.length:''}/>
+  {tasks.length>0?visible.map(task=>{
+    const chosen=task.id===selectedId;
+    const model=task.entry?activityPresentation(task.entry,now):undefined;
+    const tool=model?.tool??(task.kind==='transfer'?'传输':'后台');
+    const agent=model?.agent??'—';
+    const intent=model?.intent??task.title;
+    const log=logs[task.id]?.trim()||'';
+    const elapsed=liveElapsed(now-task.start);
+    const started=contentWidth-iconWidth>=36?time(task.start):new Date(task.start).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',hour12:false});
+    const leftText=[started,agent,tool,intent,...(log?[log]:[])].join(' ');
+    const elapsedWidth=Math.min(cellWidth(elapsed),Math.min(10,Math.max(1,contentWidth-iconWidth-2)));
+    const leftWidth=Math.max(0,contentWidth-iconWidth-elapsedWidth-1);
+    return <Box key={task.id} height={1} width={width} paddingX={1} flexShrink={0}
+     backgroundColor={chosen?palette.selection:undefined}>
+     <SpinnerCell color={chosen?palette.accent:stateColor.running}/>
+     {leftWidth>0?<Text color={chosen?palette.accent:palette.text} bold={chosen}>{fit(leftText,leftWidth,false)}</Text>:null}
+     <Box flexGrow={1}/>
+     <Text color={palette.muted}>{' '+fit(elapsed,elapsedWidth,false)}</Text>
+    </Box>;
+   }):null}
+ </Box>;
 }
 function useSize(){
  const {stdout}=useStdout();const term=stdout as NodeJS.WriteStream;
@@ -96,6 +167,10 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
  const {exit}=useApp(),{w,h}=useSize();
  const [liveStatus,setLiveStatus]=useState<Status|null>(null);
  const status:Status|null=demo?demoStatus:liveStatus;
+ const [loadedActivity,setLoadedActivity]=useState<ActivityEntry[]>(()=>demoStatus?.activity??[]);
+ const activityDeviceRef=useRef<string|null>(null);
+ const activityVersionRef=useRef<number|null>(null);
+ const activityLoadGenerationRef=useRef(0);
  const [tick,setTick]=useState(Date.now());
  const [mountedAt]=useState(Date.now);
  const [focus,setFocus]=useState<Focus>('activity');
@@ -116,6 +191,17 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
  const [output,setOutput]=useState<OutputPage|null>(null);
  const [outputError,setOutputError]=useState('');
  const [refresh,setRefresh]=useState(0);
+ const [pageHasMore,setPageHasMore]=useState(false);
+ const [pageLoading,setPageLoading]=useState(false);
+ const [pageTotal,setPageTotal]=useState(0);
+ const [pageError,setPageError]=useState('');
+ const activityCursorRef=useRef<string|null>(null);
+ const activityQueryRef=useRef<string|null>(null);
+ const activityPageCountRef=useRef(0);
+ const pendingActivityIndexRef=useRef<number|null>(null);
+ const pageLoadingRef=useRef(false);
+ const loadedActivityRef=useRef(loadedActivity);
+ loadedActivityRef.current=loadedActivity;
  useEffect(()=>{
   const timer=setInterval(()=>setTick(Date.now()),1000);
   return()=>clearInterval(timer);
@@ -137,20 +223,107 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
   return()=>{alive=false;unsubscribe();if(retry)clearTimeout(retry);clearInterval(sampleTimer);};
  },[demo]);
  const activeQuery=edit==='search'?text:query;
+ useEffect(()=>{
+  if(!status)return;
+  if(demo){
+   activityDeviceRef.current=status.deviceId;
+   setLoadedActivity(status.activity??[]);
+   setPageTotal((status.activity??[]).length);
+   setPageHasMore(false);
+   return;
+  }
+  const changed=activityDeviceRef.current!==status.deviceId||activityQueryRef.current!==activeQuery;
+  if(changed){
+   activityDeviceRef.current=status.deviceId;
+   activityQueryRef.current=activeQuery;
+   activityVersionRef.current=null;
+   activityCursorRef.current=null;
+   activityPageCountRef.current=0;
+   pageLoadingRef.current=false;
+   setPageLoading(false);
+   setLoadedActivity([]);
+   setPageHasMore(true);
+   setPageTotal(0);
+   setSelectedId(null);
+   setPinnedEntry(null);
+   pendingActivityIndexRef.current=null;
+  }
+  const revision=status.activityRevision??0;
+  if(!changed&&activityVersionRef.current===revision)return;
+  activityVersionRef.current=revision;
+  // A status revision must not invalidate an older-page request in progress.
+  // Only a device or search change invalidates its pagination cursor.
+  const generation=changed?++activityLoadGenerationRef.current:activityLoadGenerationRef.current;
+  let alive=true,retry:ReturnType<typeof setTimeout>|undefined;
+  const load=()=>{
+   const watchIds=changed?[]:loadedActivityRef.current.filter(a=>a.status==='running').map(a=>a.id).slice(0,100);
+   void requestIpc({action:'activity-list',limit:ACTIVITY_PAGE_SIZE,query:activeQuery,watchIds},10000)
+    .then((page:ActivityPage)=>{
+     if(!alive||generation!==activityLoadGenerationRef.current)return;
+     const replace=changed||activityPageCountRef.current<=1;
+     setLoadedActivity(previous=>{
+      if(replace)return sortActivityRows(page.rows as ActivityEntry[]);
+      const merged=new Map(previous.map(item=>[item.id,item]));
+      for(const record of [...page.rows,...page.updates] as ActivityEntry[])merged.set(record.id,record);
+      return sortActivityRows([...merged.values()]);
+     });
+     if(replace){
+      activityCursorRef.current=page.nextCursor;
+      activityPageCountRef.current=1;
+      setPageHasMore(page.hasMore);
+     }
+     setPageTotal(page.total);
+     setPageError('');
+    }).catch(error=>{
+     if(!alive||generation!==activityLoadGenerationRef.current)return;
+     setPageError(safeText(String(error),120));
+     retry=setTimeout(load,2000);
+    });
+  };
+  const delay=changed&&edit==='search'?180:0;
+  if(delay)retry=setTimeout(load,delay);else load();
+  return()=>{alive=false;if(retry)clearTimeout(retry);};
+ },[demo,status?.deviceId,status?.activityRevision,status?.activity,activeQuery]);
  const activities=useMemo(()=>{
+  if(!demo)return loadedActivity;
   const needle=activeQuery.toLowerCase();
-  return (status?.activity??[]).filter(a=>!needle||
-   [a.tool,a.description,a.cwd,a.actor_name,a.grant_id,activityPresentation(a,0).target].join(' ').toLowerCase().includes(needle))
-   .sort((a,b)=>Number(b.status==='running')-Number(a.status==='running')||b.time-a.time);
- },[status?.activity,activeQuery]);
+  return sortActivityRows(loadedActivity.filter(a=>!needle||
+   [a.tool,a.description,a.cwd,a.actor_name,a.grant_id,activityPresentation(a,0).target].join(' ').toLowerCase().includes(needle)));
+ },[loadedActivity,activeQuery,demo]);
+ const loadNextPage=()=>{
+  if(demo||!pageHasMore||pageLoadingRef.current||!activityCursorRef.current)return;
+  const generation=activityLoadGenerationRef.current,cursor=activityCursorRef.current;
+  pageLoadingRef.current=true;setPageLoading(true);
+  void requestIpc({action:'activity-list',limit:ACTIVITY_PAGE_SIZE,query:activityQueryRef.current??'',cursor},10000)
+   .then((page:ActivityPage)=>{
+    if(generation!==activityLoadGenerationRef.current)return;
+    setLoadedActivity(previous=>{
+     const merged=new Map(previous.map(item=>[item.id,item]));
+     for(const record of page.rows as ActivityEntry[])merged.set(record.id,record);
+     return sortActivityRows([...merged.values()]);
+    });
+    activityCursorRef.current=page.nextCursor;
+    activityPageCountRef.current++;
+    setPageHasMore(page.hasMore);
+    setPageTotal(page.total);
+    setPageError('');
+   }).catch(error=>{
+    if(generation===activityLoadGenerationRef.current)setPageError(safeText(String(error),120));
+   }).finally(()=>{
+    if(generation===activityLoadGenerationRef.current){pageLoadingRef.current=false;setPageLoading(false);}
+   });
+ };
  const currentSelection=activities.find(a=>a.id===selectedId);
  useEffect(()=>{if(selectedId&&currentSelection)setPinnedEntry(currentSelection);},[selectedId,currentSelection]);
  const selected=edit==='search'?activities[0]:selectedId?(currentSelection??(pinnedEntry?.id===selectedId?pinnedEntry:activities[0])):activities[0];
  const selectedIndex=activities.findIndex(a=>a.id===selected?.id);
- const tasks:LocalTask[]=[...(status?.active??[]).filter(t=>t.kind==='background').map(t=>({
-  id:t.id,title:t.description,start:t.start,kind:'background',entry:status?.activity.find(a=>a.id===t.id)??{
+ const tasks:LocalTask[]=[...(status?.active??[]).filter(t=>t.kind==='background').map(t=>{
+  const activity=loadedActivity.find(a=>a.id===t.id);
+  return {id:t.id,title:t.description,start:t.start,kind:'background',entry:activity?{
+   ...activity,actor_name:activity.actor_name??t.actorName??null}: {
    id:t.id,grant_id:t.grantId??'',actor_name:t.actorName??null,tool:'exec_background',description:t.description,
-   status:'running',time:t.start,request_json:t.requestJson??null,cwd:t.cwd??null}})),
+   status:'running',time:t.start,request_json:t.requestJson??null,cwd:t.cwd??null}};
+ }),
   ...(status?.transfers??[]).filter(t=>t.status==='running').map(t=>({
    id:t.id,title:t.path,start:t.start??tick,kind:'transfer',entry:undefined,
    ...(t.totalBytes?{progress:Math.min(100,Math.max(0,Math.round(t.bytes/t.totalBytes*100)))}:{})}))];
@@ -161,16 +334,31 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
  const taskIndex=Math.max(0,tasks.findIndex(t=>t.id===task?.id));
  const taskEntry=task?{...(task.entry??{id:task.id,grant_id:'',tool:task.kind==='transfer'?'transfer_upload':'exec_background',description:task.title}),
   status:'running',time:task.start,finished_at:null,duration_ms:null}:undefined;
- const entry=detailTask?taskEntry:selected;
+ const baseEntry=detailTask?taskEntry:selected;
+ const entry=baseEntry;
  const model=entry?activityPresentation(entry,tick):null;
  const wideFooter=w>=112;
  const footerRows=wideFooter?1:2;
  const taskSlots=Math.min(tasks.length,h>=22?3:h>=16?2:1);
- const taskHeight=1+taskSlots;
+ const taskHeight=1+(tasks.length?taskSlots:0);
  const bodyHeight=Math.max(1,h-4-taskHeight-footerRows);
  const layout=paneLayout(w,bodyHeight,h);
  const horizontal=layout.sideBySide,aw=layout.activityWidth,dw=layout.detailWidth;
  const tableRows=Math.max(1,layout.activityHeight-2);
+ useEffect(()=>{
+  if(!demo&&focus==='activity'&&selectedId!==null&&pageHasMore&&
+   selectedIndex>=activities.length-Math.max(4,tableRows))loadNextPage();
+ },[demo,focus,selectedId,selectedIndex,activities.length,pageHasMore,tableRows]);
+ useEffect(()=>{
+  const index=pendingActivityIndexRef.current;
+  if(index===null)return;
+  if(index<activities.length){
+   pendingActivityIndexRef.current=null;
+   setSelectedId(activities[index]?.id??null);
+  }else if(!pageHasMore&&!pageLoading){
+   pendingActivityIndexRef.current=null;
+  }
+ },[activities.length,pageHasMore,pageLoading]);
  const rows:(ActivityEntry|'divider')[]=[];
  activities.forEach((a,index)=>{
   if(index>0&&a.status!=='running'&&activities[index-1]?.status==='running')rows.push('divider');
@@ -178,7 +366,7 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
  });
  const selectedRow=Math.max(0,rows.findIndex(a=>a!=='divider'&&a.id===selected?.id));
  const rowStart=Math.max(0,selectedRow-tableRows+1);
- const page=rows.slice(rowStart,rowStart+tableRows);
+ const visibleRows=rows.slice(rowStart,rowStart+tableRows);
  const columns=tableColumns(Math.max(1,aw-2));
  const detailRows=Math.max(1,layout.detailHeight-2);
  const pageOffset=offsets[offsets.length-1]??0;
@@ -201,9 +389,10 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
  },[demo,outputMode,entry?.id,stream,pageOffset,refresh]);
  const detail=useMemo(()=>{
   if(view==='help')return wrapLines([
-   '键盘操作','↑↓ / j k 选择记录；详情内滚动','PgUp / PgDn 翻页；Home / End 首尾',
-   'Tab 在活动、详情、后台之间切换','Enter 打开详情；Esc 返回活动',
-   '/ 搜索（Agent / 工具 / 路径 / 意图）','> 命令面板；f 跟随最新记录',
+   '键盘操作','↑↓ / j k 选择完整活动列表中的记录',
+   'PgUp / PgDn 翻页；Home 定位最新；End 定位最旧记录',
+   '已加载的活动详情即时显示；向下翻页时继续从数据库读取','Tab 在活动、详情、后台之间切换','Enter 打开详情；Esc 返回活动',
+   '/ 搜索（Agent / 工具 / 意图）','> 命令面板；f 跟随最新记录',
    'o 查看本地完整输出；e 切换 stdout / stderr',
    '[ / ] 上一页 / 下一页输出；r 刷新输出','y 复制命令，非命令记录复制目标',
    'x 停止选中任务；X 停止全部进程（需确认）','q 关闭界面；? 帮助',
@@ -226,7 +415,12 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
    const index=edge==='first'?0:edge==='last'?tasks.length-1:Math.max(0,Math.min(tasks.length-1,taskIndex+delta));
    setTaskId(tasks[index]?.id??null);setDetailTask(true);resetDetail();
   }else{
-   const index=edge==='first'?0:edge==='last'?activities.length-1:Math.max(0,Math.min(activities.length-1,selectedIndex+delta));
+   const requested=edge==='first'?0:edge==='last'?activities.length-1:Math.max(0,selectedIndex+delta);
+   if(pageHasMore&&(edge==='last'||requested>=activities.length)){
+    if(requested>=activities.length)pendingActivityIndexRef.current=requested;
+    loadNextPage();
+   }
+   const index=Math.max(0,Math.min(activities.length-1,requested));
    setSelectedId(activities[index]?.id??null);setDetailTask(false);resetDetail();
   }
  };
@@ -323,9 +517,10 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
  const host=(()=>{try{return new URL(status?.server??'').host;}catch{return status?.deviceName??'local runtime';}})();
  const taskStart=Math.max(0,taskIndex-taskSlots+1);
  const activityPane=<Box flexDirection="column" width={aw} height={layout.activityHeight} overflow="hidden">
-  <Title label={'ACTIVITY '+activities.length} width={aw} right={selectedId===null?'● live':selectedIndex<0?'历史快照':(selectedIndex+1)+' / '+activities.length} active={focus==='activity'}/>
+  <Title label={'ACTIVITY '+(demo?activities.length:pageTotal)} width={aw}
+   right={(pageLoading?'加载中 · ':'')+(selectedId===null?'● live':selectedIndex<0?'历史快照':(selectedIndex+1)+' / '+pageTotal)} active={focus==='activity'}/>
   <Box height={1} paddingX={1} flexShrink={0}><Text color={palette.muted}>{'  '+columns.map(c=>fit(c.title,c.width-1)+' ').join('')}</Text></Box>
-  {page.length?page.map(row=>row==='divider'?<Line key="divider" width={aw} text=" ┄ 以上运行中 · 以下为历史 ┄" color={palette.line}/>:(()=>{
+  {visibleRows.length?visibleRows.map(row=>row==='divider'?<Line key="divider" width={aw} text=" ┄ 以上运行中 · 以下为历史 ┄" color={palette.line}/>:(()=>{
    const a=activityPresentation(row,tick),isSelected=row.id===selected?.id;
    return <Box key={row.id} height={1} flexShrink={0} paddingX={1} backgroundColor={isSelected?palette.selection:undefined}>
     <Text color={isSelected?palette.accent:palette.muted}>{isSelected?'▸ ':'  '}</Text>
@@ -340,14 +535,19 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
      return <Text key={c.key} color={color} bold={isSelected}>{value+' '}</Text>;
     })}
    </Box>;
-  })()):<Line width={aw} text={query?' 没有匹配记录 · Esc 清除筛选':' 暂无操作，等待 Agent 请求'} color={palette.muted}/>}
+  })()):<Line width={aw} text={pageError?' 历史读取失败 · '+pageError:pageLoading?' 正在加载活动…':activeQuery?' 没有匹配记录 · Esc 清除筛选':' 暂无操作，等待 Agent 请求'} color={palette.muted}/>}
  </Box>;
  const detailPane=<Box flexDirection="column" width={dw} height={layout.detailHeight} overflow="hidden">
   <Title label={view==='help'?'HELP':view==='config'?'CONNECTION':outputMode?'LOCAL OUTPUT':'DETAIL'} width={dw} active={focus==='detail'}
    right={detail.length>detailRows?(scroll+1)+' / '+detail.length:''}/>
   <Box flexDirection="column" paddingX={1} height={detailRows} overflow="hidden">
-   {detail.slice(scroll,scroll+detailRows).map((line,i)=><Line key={scroll+i} text={line} width={Math.max(1,dw-2)}
-    color={scroll+i===0&&model?stateColor[model.state]:line.startsWith('stdout')||line.startsWith('stderr')?palette.accent:palette.text} bold={scroll+i===0}/>)}
+   {detail.slice(scroll,scroll+detailRows).map((line,i)=>{
+    const index=scroll+i;
+    if(index===0&&view==='main'&&entry&&model?.state==='running')
+     return <RunningDetailHeading key={index} entry={entry} tool={model.tool} status={model.status} width={Math.max(1,dw-2)}/>;
+    return <Line key={index} text={line} width={Math.max(1,dw-2)}
+     color={index===0&&model?stateColor[model.state]:line.startsWith('stdout')||line.startsWith('stderr')?palette.accent:palette.text} bold={index===0}/>;
+   })}
   </Box>
   <Line width={dw} text={outputMode?' [ ] 翻页 · e 切换流 · r 刷新 · Esc 返回':' y 复制预览 · o 本地输出 · ↑↓ 滚动'} color={palette.muted}/>
  </Box>;
@@ -363,7 +563,7 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
  const headerRightWidth=Math.max(0,w-headerLeftWidth);
  const footerPrompt=confirm?
   '停止 '+confirm.length+' 个进程及其子进程？ y / Enter 确认 · n / Esc 返回':
-  notice||(w<64?'q 退出 · ? 帮助 · ↑↓ 选择 · Tab 切换 · / 搜索':'↑↓ 选择 · Tab 切换 · / 搜索 · x 停止 · ? 帮助 · q 退出');
+  notice||(pageError?'活动读取失败 · '+pageError:w<64?'↑↓ 选择 · Tab 切换 · / 搜索 · q 退出':'↑↓ 选择 · Tab 切换 · / 搜索 · x 停止 · ? 帮助 · q 退出');
  const compactMetrics=w<40?'CPU '+(status?.cpuPercent??0).toFixed(1)+'% · RAM '+ramText:
   w<72?'CPU '+(status?.cpuPercent??0).toFixed(1)+'% · RAM '+ramText+' · '+(status?.operationsTotal??0)+' ops':metrics;
  const footerRightWidth=wideFooter?Math.min(64,Math.max(48,Math.floor(w*.48))):0;
@@ -386,21 +586,9 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
     <Line text={'─'.repeat(w)} width={w} color={palette.line}/>}
    {detailPane}
   </Box>
-  <Box flexDirection="column" height={taskHeight} flexShrink={0} overflow="hidden">
-   <Title label={'BACKGROUND '+tasks.length} width={w} active={focus==='tasks'} junctionAt={horizontal?aw:undefined}
-    right={tasks.length>taskSlots?(taskIndex+1)+' / '+tasks.length:''}/>
-   {tasks.slice(taskStart,taskStart+taskSlots).map(t=>{
-    const chosen=t.id===task?.id&&detailTask;
-    const agent=t.entry?activityPresentation(t.entry,tick).agent:'—';
-    return <Box key={t.id} height={1} paddingX={1} flexShrink={0} backgroundColor={chosen?palette.selection:undefined}>
-     <Text color={chosen?palette.accent:stateColor.running}>{chosen?'▸ ':'● '}</Text>
-     <Text color={palette.muted}>{fit(t.id.slice(0,8),9)}</Text>
-     {w>=80?<Text color={palette.text}>{fit(agent,12)}</Text>:null}
-     <Text color={palette.muted}>{fit(t.progress!==undefined?t.progress+'%':duration(tick-t.start),9)}</Text>
-     <Text color={palette.text}>{fit(t.entry?activityPresentation(t.entry,tick).target:t.title,Math.max(1,w-(w>=80?34:22)))}</Text>
-    </Box>;
-   })}
-  </Box>
+  <BackgroundTable tasks={tasks} start={taskStart} slots={taskSlots} width={w} height={taskHeight}
+   focus={focus==='tasks'} selectedId={detailTask?task?.id??null:null} demo={demo}
+   horizontal={horizontal} activityWidth={aw}/>
   {wideFooter?<Box height={1} width={w} flexShrink={0} backgroundColor="#2D61B7">
    <Box height={1} width={footerLeftWidth} flexShrink={0}>
     <Text color="white" bold>{fit(' '+footerPrompt,footerLeftWidth)}</Text>
