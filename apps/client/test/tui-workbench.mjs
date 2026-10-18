@@ -4,12 +4,15 @@ import { PassThrough } from 'node:stream';
 // Ink intentionally disables its terminal renderer when CI is set. This test
 // owns a real PassThrough terminal, so keep the real renderer enabled in CI.
 const previousCi=process.env.CI;
+const previousForceColor=process.env.FORCE_COLOR;
 delete process.env.CI;
+// Verify actual ANSI foreground colors, not only the text snapshot.
+process.env.FORCE_COLOR='3';
 
 const React=(await import('react')).default;
 const {render,Box,Text}=await import('ink');
 const {App}=await import('../dist/tui.js');
-const {cellWidth,fit,paneLayout,tableColumns}=await import('../dist/tui-layout.js');
+const {cellWidth,fit,paneLayout,tableColumns,detailScrollStatus}=await import('../dist/tui-layout.js');
 
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const segmenter=new Intl.Segmenter(undefined,{granularity:'grapheme'});
@@ -154,6 +157,26 @@ try{
   assert.equal(paneLayout(120,20,32).sideBySide,true,'landscape screens use left/right panes');
   assert.equal(paneLayout(40,30,50).sideBySide,false,'portrait screens use top/bottom panes');
   assert.equal(paneLayout(42,30,42).sideBySide,false,'square screens use top/bottom panes');
+  for(const terminalWidth of [96,100,105,110,112,119,120,135,158,180]){
+    const originalActivityWidth=Math.floor((terminalWidth-1)*.72);
+    const oldColumns=tableColumns(Math.max(1,originalActivityWidth-2),12);
+    const panel=paneLayout(terminalWidth,24,36,12);
+    const newColumns=tableColumns(Math.max(1,panel.activityWidth-2),12,panel.detailGain);
+    const column=(list,name)=>list.find(item=>item.key===name)?.width??0;
+    assert.equal(column(newColumns,'action'),column(oldColumns,'action'),
+      'ACTION must not lose a single cell when widening DETAIL at width '+terminalWidth);
+    assert.equal(column(oldColumns,'result')-column(newColumns,'result'),panel.detailGain,
+      'DETAIL gains must be sourced exclusively from RESULT at width '+terminalWidth);
+    assert.equal(panel.detailWidth,terminalWidth-1-panel.activityWidth);
+    assert.ok(panel.detailGain<=4,'DETAIL should widen by at most four columns');
+  }
+  console.log('PASS DETAIL width transfer preserves ACTION and only reduces RESULT across terminal sizes');
+  assert.equal(detailScrollStatus(124,27,0),'0 / 97');
+  assert.equal(detailScrollStatus(124,27,40),'40 / 97');
+  assert.equal(detailScrollStatus(124,27,99),'97 / 97','offset is clamped to actual scrollable rows');
+  assert.equal(detailScrollStatus(27,27,0),'','no scroll indicator when all content fits');
+  assert.equal(detailScrollStatus(15,27,0),'','short content does not report fake scroll range');
+  console.log('PASS DETAIL scroll count excludes current viewport rows');
   for(const column of tableColumns(112)){
     for(const value of ['中文 Agent 路径','Claude 🦊 ChatGPT','e\u0301 · 文件操作']){
       assert.equal(cellWidth(fit(value,column.width)),column.width,
@@ -169,7 +192,39 @@ try{
     const detailWide=assertPosition(layout.capture,'DETAIL');
     assert.equal(activityWide.row,detailWide.row,'landscape panes must share the same header row');
     assert.ok(detailWide.column>activityWide.column,'landscape detail must be to the right of activity');
-    assert.ok(layout.capture.snapshot().includes('以上运行中 · 以下为历史'),'running/history separator is visible\n'+layout.capture.snapshot());
+    assert.ok(!layout.capture.snapshot().includes('以上运行中 · 以下为历史'),'pinned running rows need no extra separator');
+    const initial=layout.capture.snapshot();
+    const liveAt=layout.capture.raw.lastIndexOf('● LIVE');
+    assert.ok(liveAt>0,'LIVE indicator should be present');
+    assert.match(layout.capture.raw.slice(Math.max(0,liveAt-120),liveAt),
+      /\x1b\[38;2;146;214;162m/,
+      'LIVE dot and label should use the success-green ANSI color');
+    const screenLines=initial.split('\n');
+    const actionHeading=screenLines.findIndex((row,index)=>index>detailWide.row&&
+      row.includes('│ ACTION'));
+    assert.ok(actionHeading>0,'ACTION should occupy a separate line under its divider\n'+initial);
+    const thinDivider=screenLines[actionHeading-1];
+    assert.ok(thinDivider.includes('├')&&thinDivider.includes('─────'),
+      'thin full-width rule must connect to the vertical detail border');
+    assert.ok(!thinDivider.includes('┠'),'divider junction must be thin on both sides');
+    const detailTitleLine=screenLines[detailWide.row]??'';
+    assert.ok(!detailTitleLine.includes(' / '),
+      'DETAIL should suppress the scroll indicator when the selected entry fits the viewport');
+    assert.ok(!thinDivider.includes('ACTION'),'section titles must not appear inside the rule');
+    assert.ok(!thinDivider.includes('━'),'section dividers must use light line glyphs');
+    assert.ok(screenLines.some(row=>row.includes('│ TOOL')&&row.includes('│')),
+      'tabular detail fields should retain a single left inner margin');
+    const runningRow=screenLines.find(row=>row.includes('构建桌面客户端')&&row.includes('17s'));
+    const finishedRow=screenLines.find(row=>row.includes('执行 TypeScript 类型检查')&&row.includes('2.6s'));
+    assert.ok(runningRow&&finishedRow,'fixture must render both running and completed DUR columns');
+    const elapsedEnd=(row,value)=>cellWidth(row.slice(0,row.indexOf(value)))+cellWidth(value);
+    assert.equal(elapsedEnd(runningRow,'17s'),elapsedEnd(finishedRow,'2.6s'),
+      'running DUR must align to the same right edge as completed DUR');
+    const beforeDuration=initial.match(/DUR\s*│\s*([0-9.]+s)/)?.[1];
+    assert.ok(beforeDuration,'running operation must show decimal duration in DETAIL');
+    await sleep(340);
+    const afterDuration=layout.capture.snapshot().match(/DUR\s*│\s*([0-9.]+s)/)?.[1];
+    assert.notEqual(afterDuration,beforeDuration,'DETAIL duration should refresh at 100ms without polling the server');
 
     await layout.send('j');
     await waitFor(()=>layout.capture.snapshot().includes('2 / 6'),'down must select the next activity\n'+layout.capture.snapshot());
@@ -187,7 +242,15 @@ try{
       'demo should retain the full activity list as newer records arrive');
     assert.ok(layout.capture.snapshot().includes('43 / 47'),'the same selected activity should remain available after many insertions');
     await layout.send('f');
-    await waitFor(()=>layout.capture.snapshot().includes('● live'),'f returns to following new events');
+    await waitFor(()=>layout.capture.snapshot().includes('● LIVE'),'f returns to following new events');
+    await layout.send('\x1b[<65;20;9M');
+    await waitFor(()=>layout.capture.snapshot().includes('2 / 47'),'one wheel event moves exactly one activity');
+    for(let step=0;step<10;step++)layout.input.write('\x1b[<65;20;9M');
+    await waitFor(()=>layout.capture.snapshot().includes('12 / 47'),
+      'rapid wheel messages must accumulate without losing selection');
+    for(let step=0;step<11;step++)layout.input.write('\x1b[<64;20;9M');
+    await waitFor(()=>layout.capture.snapshot().includes('● LIVE'),'wheel can scroll back to live follow');
+    console.log('PASS mouse wheel burst navigation, stable viewport and live follow');
 
     await layout.resize(40,50);
     const activityPortrait=assertPosition(layout.capture,'ACTIVITY');
@@ -210,17 +273,17 @@ try{
     assert.ok(layout.capture.snapshot().includes('RESULT'));
     console.log('PASS 18 rapid Ink resize and live activity redraw cycles');
   }finally{await layout.close();}
-  console.log('PASS responsive wide/portrait/square layout, history separator and stable selection');
+  console.log('PASS responsive layouts, combined date statistics and stable selection');
 
   const search=await mountDemo('connected',120,32);
   try{
-    await search.send('/');await search.send('Codex');
+    await search.send('S');await search.send('Codex');
     await waitFor(()=>search.capture.snapshot().includes('ACTIVITY 1'),'search previews matches before Enter');
     await search.send('\r');
     await waitFor(()=>search.capture.snapshot().includes('ACTIVITY 1'),'search must match the OAuth actor name');
     assert.ok(search.capture.snapshot().includes('Codex'),'actor search result must be visible');
     await search.send('\x1b');
-    await search.send('/');await search.send('pnpm');await search.send('\r');
+    await search.send('S');await search.send('pnpm');await search.send('\r');
     await waitFor(()=>search.capture.snapshot().includes('ACTIVITY 1'),'search must match a command target');
     assert.ok(search.capture.snapshot().includes('pnpm'),'command search result must be visible');
   }finally{await search.close();}
@@ -233,7 +296,7 @@ try{
     await waitFor(()=>controls.capture.snapshot().includes('TypeScript'),'keyboard navigation reaches the command activity');
     await controls.send('\t');await controls.send('j');
     const detailLine=assertPosition(controls.capture,'DETAIL').line;
-    assert.match(detailLine,/2\s*\//,'Tab must focus detail so j scrolls its pages');
+    assert.match(detailLine,/1\s*\/\s*\d+/,'Tab must focus detail and show one line scrolled / remaining scrollable range');
     await controls.send('o');
     await waitFor(()=>controls.capture.snapshot().includes('LOCAL OUTPUT'),'o opens the local output view');
     await waitFor(()=>controls.capture.snapshot().includes('Checking protocol'),'demo output is displayed locally');
@@ -264,13 +327,39 @@ try{
   }finally{await controls.close();}
   console.log('PASS detail scrolling, Tab focus, local stdout/stderr, stop cancellation and 9-task navigation');
 
+  const commands=await mountDemo('connected',120,32);
+  try{
+    await commands.send('/');
+    await commands.send('config');await commands.send('\r');
+    await waitFor(()=>commands.capture.snapshot().includes('CONNECTION'),'slash should open the command palette');
+    await commands.send('\x1b');
+    await commands.send('?');
+    await waitFor(()=>commands.capture.snapshot().includes('↑↓ 浏览'),'contextual key hints replace the help page');
+    await sleep(3400);
+    assert.ok(!commands.capture.snapshot().includes('↑↓ 浏览'),'transient toast must expire automatically');
+    console.log('PASS slash command, context help and automatic notice expiration');
+  }finally{await commands.close();}
+
+  const interrupted=await mountDemo('connected',120,32);
+  try{
+    await interrupted.send('\x03');
+    await waitFor(()=>interrupted.capture.snapshot().includes('再次按 Ctrl+C'),
+      'first Ctrl+C must ask for confirmation without exiting');
+    const finished=interrupted.app.waitUntilExit();
+    await interrupted.send('\x03');
+    await Promise.race([finished,new Promise((_,reject)=>setTimeout(()=>reject(Error('second Ctrl+C did not exit Ink')),2500))]);
+    console.log('PASS Ctrl+C confirmation requires two presses');
+  }finally{await interrupted.close();}
+
   const quitting=await mountDemo('crowded',120,32);
   try{
-    const exit=quitting.app.waitUntilExit();
+    const done=quitting.app.waitUntilExit();
     await quitting.send('q');
-    await Promise.race([exit,new Promise((_,reject)=>setTimeout(()=>reject(Error('q did not exit Ink')),2500))]);
+    await Promise.race([done,new Promise((_,reject)=>setTimeout(()=>reject(Error('q did not exit Ink')),2500))]);
   }finally{await quitting.close();}
   console.log('PASS q exits the workbench');
 }finally{
   if(previousCi!==undefined)process.env.CI=previousCi;
+  if(previousForceColor===undefined)delete process.env.FORCE_COLOR;
+  else process.env.FORCE_COLOR=previousForceColor;
 }

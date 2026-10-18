@@ -34,6 +34,7 @@
     "adm-zip": "^0.6.1",
     "cross-spawn": "^7.0.6",
     "diff": "^9.0.0",
+    "highlight.js": "11.11.1",
     "ink": "^7.1.1",
     "react": "^19.3.1",
     "screenshot-desktop": "^1.15.7",

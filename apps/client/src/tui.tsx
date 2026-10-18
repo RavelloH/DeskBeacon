@@ -1,19 +1,19 @@
 import React, {useEffect, useMemo, useRef, useState} from 'react';
-import {render, Box, Text, useInput, useApp, useStdout} from 'ink';
+import {render, Box, Text, useInput, useApp, useStdout, useStdin} from 'ink';
 import {requestIpc, subscribeIpc} from './ipc.js';
 import {activityPresentation, safeText, duration, type ActivityEntry} from './presenter.js';
 import {toolRow, type Segment, type Tone} from './tool-presentation.js';
 import {detailPresentation, wrapDetail, type DetailLine} from './detail-presentation.js';
-import {ACTIVITY_PAGE_SIZE, sortActivityRows, type ActivityPage} from './activity-query.js';
+import {ACTIVITY_PAGE_SIZE, sortActivityRows, compatibleDayStats, type ActivityPage, type ActivityDayStats} from './activity-query.js';
 import {createDemoStatus, advanceDemo, demoHelp, type DemoScenario, type DemoStatus} from './demo.js';
-import {cellWidth, fit, oneLine, paneLayout, tableColumns, wrapLines, rightFit, activityTime, dateDivider, dateKey} from './tui-layout.js';
+import {cellWidth, fit, oneLine, paneLayout, tableColumns, detailScrollStatus, wrapLines, rightFit, activityTime, dateDivider, dateKey} from './tui-layout.js';
 import {copyText} from './clipboard.js';
 
 type Task={id:string;description:string;start:number;kind:'foreground'|'background';
  actorName?:string|null;grantId?:string;requestJson?:string|null;cwd?:string|null};
 type Transfer={id:string;status:string;bytes:number;path:string;totalBytes?:number;start?:number};
 type Status={
- state:string;deviceName:string;deviceId:string;server?:string;uptimeMs:number;
+ state:string;deviceName:string;deviceId:string;server?:string;runtimeMode?:string;uptimeMs:number;
  memoryBytes:number;availableMemoryBytes:number;totalMemoryBytes:number;
  cpuPercent:number;latencyMs:number|null;operationsTotal:number;activityRevision?:number;
  active:Task[];transfers:Transfer[];activity?:ActivityEntry[];
@@ -31,7 +31,7 @@ const barTheme={
  disconnected:{background:'#F2B9B9',foreground:'#692526'},
 };
 const time=(value:number)=>new Date(value).toLocaleTimeString('zh-CN',{hour12:false});
-const toneColor:Record<Tone,string>={default:palette.text,muted:palette.muted,success:stateColor.success,danger:stateColor.failed,warning:stateColor.running};
+const toneColor:Record<Tone,string>={default:palette.text,muted:palette.muted,success:stateColor.success,danger:stateColor.failed,warning:stateColor.running,accent:palette.accent};
 function liveElapsed(ms:number){
  const elapsed=Math.max(0,ms),totalSeconds=Math.floor(elapsed/1000);
  if(totalSeconds===0)return Math.floor(elapsed)+'ms';
@@ -54,7 +54,7 @@ function RunningElapsedCell({entry,color,bold,width}:{entry:ActivityEntry;color:
   const timer=setInterval(()=>setNow(Date.now()),500);
   return()=>clearInterval(timer);
  },[]);
- return <Text color={color} bold={bold}>{fit(liveElapsed(now-entry.time),width)+' '}</Text>;
+ return <Text color={color} bold={bold}>{rightFit(liveElapsed(now-entry.time),width)+' '}</Text>;
 }
 function RunningDetailHeading({entry,tool,status,width}:{entry:ActivityEntry;tool:string;status:string;width:number}){
  const [now,setNow]=useState(()=>Date.now());
@@ -87,7 +87,7 @@ function BackgroundTable({tasks,start,slots,width,height,focus,selectedId,demo,h
    }).catch(()=>{}).finally(()=>{pending=false;});
   };
   poll();
-  const timer=setInterval(()=>{setNow(Date.now());poll();},500);
+  const timer=setInterval(()=>{setNow(Date.now());poll();},1000);
   return()=>{alive=false;clearInterval(timer);};
  },[demo,taskIds]);
  const contentWidth=Math.max(1,width-2),iconWidth=Math.min(2,contentWidth);
@@ -104,13 +104,13 @@ function BackgroundTable({tasks,start,slots,width,height,focus,selectedId,demo,h
     const log=logs[task.id]?.trim()||'';
     const elapsed=liveElapsed(now-task.start);
     const started=contentWidth-iconWidth>=36?time(task.start):new Date(task.start).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',hour12:false});
-    const leftText=[started,agent,tool,intent,...(log?[log]:[])].join(' ');
+    const leftText=[started,agent,tool,intent].join('   ');
     const elapsedWidth=Math.min(cellWidth(elapsed),Math.min(10,Math.max(1,contentWidth-iconWidth-2)));
     const leftWidth=Math.max(0,contentWidth-iconWidth-elapsedWidth-1);
     return <Box key={task.id} height={1} width={width} paddingX={1} flexShrink={0}
      backgroundColor={chosen?palette.selection:undefined}>
      <SpinnerCell color={chosen?palette.accent:stateColor.running}/>
-     {leftWidth>0?<Text color={chosen?palette.accent:palette.text} bold={chosen}>{fit(leftText,leftWidth,false)}</Text>:null}
+     {leftWidth>0?<><Text color={chosen?palette.accent:palette.text} bold={chosen}>{fit(leftText,log?Math.max(12,Math.floor(leftWidth*.68)):leftWidth,false)}</Text>{log?<Text color={palette.muted}>{fit('   '+log,Math.max(0,leftWidth-Math.max(12,Math.floor(leftWidth*.68))),false)}</Text>:null}</>:null}
      <Box flexGrow={1}/>
      <Text color={palette.muted}>{' '+fit(elapsed,elapsedWidth,false)}</Text>
     </Box>;
@@ -126,7 +126,7 @@ function useSize(){
  },[term]);
  return size;
 }
-function Title({label,right='',width,active=false,junctionAt}:{label:string;right?:string;width:number;active?:boolean;junctionAt?:number|undefined}){
+function Title({label,right='',rightColor,width,active=false,junctionAt}:{label:string;right?:string;rightColor?:string|undefined;width:number;active?:boolean;junctionAt?:number|undefined}){
  const title=oneLine(label),status=oneLine(right);
  const lead=width>=8?'━━ ':'';
  const tail=width>=8?'━━':width>=5?'─':'';
@@ -156,7 +156,7 @@ function Title({label,right='',width,active=false,junctionAt}:{label:string;righ
   <Text color={palette.line}>{lead}</Text>
   <Text bold color={active?palette.accent:palette.muted}>{fit(title,titleWidth,false)}</Text>
   <Text color={palette.line}>{' '+joinedRule}</Text>
-  {hasStatus?<Text color={palette.muted}>{' '+fit(status,statusWidth,false)+' '}</Text>:null}
+  {hasStatus?<Text color={rightColor??palette.muted}>{' '+fit(status,statusWidth,false)+' '}</Text>:null}
   <Text color={palette.line}>{tail}</Text>
  </Box>;
 }
@@ -176,13 +176,60 @@ function RichCell({segments,width,selected=false}:{segments:Segment[];width:numb
   remaining-=used;
   if(cellWidth(raw)>used)break;
  }
- return <Text>{spans.map((part,index)=><Text key={index} color={selected&&part.tone==='default'?palette.accent:toneColor[part.tone]} bold={selected&&part.tone==='default'}>{part.text}</Text>)}{' '.repeat(remaining)+' '}</Text>;
+ return <Text>{spans.map((part,index)=><Text key={index} color={toneColor[part.tone]}>{part.text}</Text>)}{' '.repeat(remaining)+' '}</Text>;
 }
 
+/** Two-column form rendering: field labels, separator, and values use separate tones. */
+const DetailCell=React.memo(function DetailCell({item,width}:{item:DetailLine;width:number}){
+ if(item.section){
+  // Thin, full-width divider. The next line holds the section label,
+  // so section titles cannot be confused with focused pane headings.
+  return <Box height={1} flexShrink={0} width={width}>
+   <Text color={palette.line}>{'─'.repeat(Math.max(0,width))}</Text>
+  </Box>;
+ }
+ const text=item.text;
+ if(item.syntax){
+  return <Box height={1} flexShrink={0} width={width}>
+   <Text>{' '}</Text>
+   <Text>{item.syntax.map((segment,index)=><Text key={index} color={segment.color}>{segment.text}</Text>)}</Text>
+   <Text>{' '}</Text>
+  </Box>;
+ }
+ if(item.label){
+  const index=text.indexOf('│');
+  if(index>=0){
+   const prefix=text.slice(0,index),divider='│ ',value=text.slice(index+2);
+   const room=Math.max(0,width-2-cellWidth(prefix)-cellWidth(divider));
+   return <Box height={1} flexShrink={0} width={width}>
+    <Text>{' '}</Text>
+    <Text bold color="#FFFFFF">{prefix}</Text>
+    <Text color={palette.line}>{divider}</Text>
+    <Text color={item.tone&&item.tone!=='default'?toneColor[item.tone]:palette.muted} bold={item.bold===true} italic={item.italic===true}>{fit(value,room)}</Text>
+    <Text>{' '}</Text>
+   </Box>;
+  }
+ }
+ return <Box height={1} flexShrink={0} width={width}>
+  <Text>{' '}</Text>
+  <Text color={item.tone&&item.tone!=='default'?toneColor[item.tone]:item.bold?'#FFFFFF':palette.muted} bold={item.bold===true} italic={item.italic===true}>{fit(text,Math.max(0,width-2))}</Text>
+  <Text>{' '}</Text>
+ </Box>;
+});
+
+/** The running duration advances independently of costly DETAIL rendering. */
+function RunningDurationDetailCell({entry,item,width}:{entry:ActivityEntry;item:DetailLine;width:number}){
+ const [now,setNow]=useState(Date.now());
+ useEffect(()=>{
+  const timer=setInterval(()=>setNow(Date.now()),100);
+  return()=>clearInterval(timer);
+ },[]);
+ return <DetailCell item={{...item,text:item.text.replace(/│.*/, '│ '+activityPresentation(entry,now).elapsed)}} width={width}/>;
+}
 export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
  const demo=demoScenario!==undefined;
  const [demoStatus,setDemoStatus]=useState<DemoStatus|null>(()=>demoScenario?createDemoStatus(demoScenario):null);
- const {exit}=useApp(),{w,h}=useSize();
+ const {exit}=useApp(),{stdin}=useStdin(),{w,h}=useSize();
  const [liveStatus,setLiveStatus]=useState<Status|null>(null);
  const status:Status|null=demo?demoStatus:liveStatus;
  const [loadedActivity,setLoadedActivity]=useState<ActivityEntry[]>(()=>demoStatus?.activity??[]);
@@ -201,6 +248,9 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
  const [edit,setEdit]=useState<'command'|'search'|null>(null);
  const [text,setText]=useState(''),[query,setQuery]=useState('');
  const [notice,setNotice]=useState('');
+ const [exitArmedAt,setExitArmedAt]=useState(0);
+ const uptimeAnchorRef=useRef<{device:string;uptime:number;at:number}|null>(null);
+ useEffect(()=>{if(!notice)return;const timer=setTimeout(()=>setNotice(''),3200);return()=>clearTimeout(timer);},[notice]);
  const [confirm,setConfirm]=useState<string[]|null>(null);
  const [detailScroll,setDetailScroll]=useState(0);
  const [outputMode,setOutputMode]=useState(false);
@@ -208,16 +258,22 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
  const [offsets,setOffsets]=useState([0]);
  const [output,setOutput]=useState<OutputPage|null>(null);
  const [outputError,setOutputError]=useState('');
+ const [liveLog,setLiveLog]=useState('');
  const [refresh,setRefresh]=useState(0);
  const [pageHasMore,setPageHasMore]=useState(false);
  const [pageLoading,setPageLoading]=useState(false);
  const [pageTotal,setPageTotal]=useState(0);
+ // null means the attached Runtime predates database-wide daily aggregates.
+ const [dayStats,setDayStats]=useState<ActivityDayStats[]|null>(null);
  const [pageError,setPageError]=useState('');
  const activityCursorRef=useRef<string|null>(null);
  const activityQueryRef=useRef<string|null>(null);
  const activityPageCountRef=useRef(0);
  const pendingActivityIndexRef=useRef<number|null>(null);
  const pageLoadingRef=useRef(false);
+ const viewportStartRef=useRef(0);
+ const wheelHandlerRef=useRef<(direction:number,x:number,y:number)=>void>(()=>{});
+ const selectionIndexRef=useRef(0);
  const loadedActivityRef=useRef(loadedActivity);
  loadedActivityRef.current=loadedActivity;
  useEffect(()=>{
@@ -247,6 +303,7 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
    activityDeviceRef.current=status.deviceId;
    setLoadedActivity(status.activity??[]);
    setPageTotal((status.activity??[]).length);
+   setDayStats(null);
    setPageHasMore(false);
    return;
   }
@@ -262,6 +319,7 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
    setLoadedActivity([]);
    setPageHasMore(true);
    setPageTotal(0);
+   setDayStats(null);
    setSelectedId(null);
    setPinnedEntry(null);
    pendingActivityIndexRef.current=null;
@@ -291,6 +349,7 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
       setPageHasMore(page.hasMore);
      }
      setPageTotal(page.total);
+     setDayStats(compatibleDayStats(page.days));
      setPageError('');
     }).catch(error=>{
      if(!alive||generation!==activityLoadGenerationRef.current)return;
@@ -324,6 +383,7 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
     activityPageCountRef.current++;
     setPageHasMore(page.hasMore);
     setPageTotal(page.total);
+    setDayStats(compatibleDayStats(page.days));
     setPageError('');
    }).catch(error=>{
     if(generation===activityLoadGenerationRef.current)setPageError(safeText(String(error),120));
@@ -335,6 +395,7 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
  useEffect(()=>{if(selectedId&&currentSelection)setPinnedEntry(currentSelection);},[selectedId,currentSelection]);
  const selected=edit==='search'?activities[0]:selectedId?(currentSelection??(pinnedEntry?.id===selectedId?pinnedEntry:activities[0])):activities[0];
  const selectedIndex=activities.findIndex(a=>a.id===selected?.id);
+ selectionIndexRef.current=selectedIndex;
  const tasks:LocalTask[]=[...(status?.active??[]).filter(t=>t.kind==='background').map(t=>{
   const activity=loadedActivity.find(a=>a.id===t.id);
   return {id:t.id,title:t.description,start:t.start,kind:'background',entry:activity?{
@@ -360,7 +421,8 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
  const taskSlots=Math.min(tasks.length,h>=22?3:h>=16?2:1);
  const taskHeight=1+(tasks.length?taskSlots:0);
  const bodyHeight=Math.max(1,h-4-taskHeight-footerRows);
- const layout=paneLayout(w,bodyHeight,h);
+ const longestTime=activities.reduce((max,a)=>Math.max(max,cellWidth(activityTime(a.time,tick))),8);
+ const layout=paneLayout(w,bodyHeight,h,longestTime+1);
  const horizontal=layout.sideBySide,aw=layout.activityWidth,dw=layout.detailWidth;
  const tableRows=Math.max(1,layout.activityHeight-2);
  useEffect(()=>{
@@ -377,18 +439,40 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
    pendingActivityIndexRef.current=null;
   }
  },[activities.length,pageHasMore,pageLoading]);
- type ActivityRow=ActivityEntry|'divider'|{kind:'date';timestamp:number};
- const rows:ActivityRow[]=[];
- activities.forEach((a,index)=>{
-  const previous=activities[index-1];
-  if(index>0&&a.status!=='running'&&previous?.status==='running')rows.push('divider');
-  if(a.status!=='running'&&(!previous||dateKey(previous.time)!==dateKey(a.time)))rows.push({kind:'date',timestamp:a.time});
-  rows.push(a);
- });
- const selectedRow=Math.max(0,rows.findIndex(a=>a!=='divider'&&'id' in a&&a.id===selected?.id));
- const rowStart=Math.max(0,selectedRow-tableRows+1);
+ type ActivityRow=ActivityEntry|{kind:'date';timestamp:number};
+ // Keep pagination counts and day headers stable during every clock tick and wheel event.
+ const {rows,dailyCounts}=useMemo(()=>{
+  const counts=new Map<string,{total:number;success:number;failed:number;running:number}>();
+  const list:ActivityRow[]=[];
+  activities.forEach((a,index)=>{
+   const key=dateKey(a.time),v=counts.get(key)??{total:0,success:0,failed:0,running:0};
+   v.total++;
+   const state=activityPresentation(a,0).state;
+   if(state==='running')v.running++;
+   else if(state==='success')v.success++;
+   else v.failed++;
+   counts.set(key,v);
+   const previous=activities[index-1];
+   if(a.status!=='running'&&(!previous||previous.status==='running'||dateKey(previous.time)!==key))
+    list.push({kind:'date',timestamp:a.time});
+   list.push(a);
+  });
+  return {rows:list,dailyCounts:counts};
+ },[activities]);
+ const fullDayStats=new Map((dayStats??[]).map(day=>[day.date,day]));
+ const dailyLabel=(ts:number)=>{
+  const legacy=demo||dayStats===null;
+  const n=legacy?dailyCounts.get(dateKey(ts)):fullDayStats.get(dateKey(ts));
+  return dateDivider(ts,tick)+' · '+(n?.total??0)+(legacy?' 已载入':' OPS')+' · '+(n?.success??0)+' OK · '+(n?.failed??0)+' FAIL'+
+   (('interrupted' in (n??{}) && Number((n as ActivityDayStats).interrupted)>0)?' · '+(n as ActivityDayStats).interrupted+' INT':'')+
+   (n?.running?' · '+n.running+' RUN':'');
+ };
+ const selectedRow=Math.max(0,rows.findIndex(a=>!('kind' in a)&&a.id===selected?.id));
+ const viewport=viewportStartRef.current;
+ const rowStart=selectedId===null?0:selectedRow<viewport?selectedRow:selectedRow>=viewport+tableRows?selectedRow-tableRows+1:viewport;
+ viewportStartRef.current=Math.max(0,Math.min(rowStart,Math.max(0,rows.length-tableRows)));
  const visibleRows=rows.slice(rowStart,rowStart+tableRows);
- const columns=tableColumns(Math.max(1,aw-2));
+ const columns=tableColumns(Math.max(1,aw-2),longestTime+1,layout.detailGain);
  const detailRows=Math.max(1,layout.detailHeight-2);
  const pageOffset=offsets[offsets.length-1]??0;
  useEffect(()=>{
@@ -408,44 +492,87 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
    .catch(error=>{if(alive)setOutputError(safeText(String(error),200));});
   return()=>{alive=false;};
  },[demo,outputMode,entry?.id,stream,pageOffset,refresh]);
+ // Only local IPC is sampled at 100ms for a selected running command.
+ // WebSocket/DO is never polled by the preview.
+ useEffect(()=>{
+  if(demo||!entry||entry.status!=='running'||!['exec_foreground','exec_background'].includes(entry.tool)){
+   setLiveLog('');return;
+  }
+  let active=true,busy=false,totalBytes=0;
+  const currentStream=outputMode?stream:'stdout';
+  const poll=()=>{
+   if(busy)return;busy=true;
+   // Read the tail, not the first 8KB forever as output grows.
+   const byteOffset=Math.max(0,totalBytes-7000);
+   void requestIpc({action:'output',operationId:entry.id,stream:currentStream,byteOffset,maxBytes:8192},700)
+    .then((page:OutputPage)=>{if(active){
+      totalBytes=page.totalBytes;
+      const next=page.text?.slice(-3500)??'';
+      setLiveLog(previous=>previous===next?previous:next);
+      if(outputMode&&pageOffset===0)setOutput(previous=>previous?.text===page.text?previous:page);
+    }}).catch(()=>{}).finally(()=>{busy=false;});
+  };
+  poll();const timer=setInterval(poll,100);
+  return()=>{active=false;clearInterval(timer);};
+ },[demo,entry?.id,entry?.status,entry?.tool,outputMode,stream,pageOffset]);
+ const detailNow=entry?.status==='running'?Math.floor(tick/1000):0;
  const detail=useMemo(():DetailLine[]=>{
   const fromPlain=(lines:string[])=>wrapDetail(lines.map(text=>({text})),Math.max(1,dw-2));
-  if(view==='help')return fromPlain([
-   '键盘操作','↑↓ / j k 浏览活动；Home / f 跟随最新',
-   'PgUp / PgDn 翻页；End 定位最旧',
-   'Tab 切换活动、详情和后台任务焦点',
-   '/ 搜索全部历史 · > 命令面板 · ? 帮助',
-   'o 查看本地完整输出；e 切换 stdout / stderr',
-   '[ / ] 上一页 / 下一页输出；r 刷新输出',
-   'y 复制命令；x/X 停止进程（需确认）；q 退出',
-   ...(demo?demoHelp:[])]);
   if(view==='config')return fromPlain(['连接信息',status?.deviceName??'等待本地 Runtime',
    status?.server??'', '后台服务：deskbeacon service start / stop / restart']);
   if(!entry||!model)return fromPlain(['选择活动记录以查看参数与结果。']);
   if(outputMode)return fromPlain([model.tool+' · '+model.status,
    '本地日志 · '+stream+' · '+(output?output.totalBytes+' B · offset '+pageOffset:'读取中…'),
    ...(outputError?[outputError]:output?[(output.text||'(empty)')]:[])]);
-  return wrapDetail(detailPresentation(entry,tick),Math.max(1,dw-2));
- },[entry,model?.state,model?.elapsed,outputMode,output,outputError,pageOffset,view,dw,status?.deviceName,status?.server,demo,tick]);
+  const lines=detailPresentation(entry,tick);
+  if(liveLog&&entry.status==='running'){
+   const preview:DetailLine[]=[{text:'LIVE OUTPUT',section:'LIVE OUTPUT',tone:'muted',bold:true}];
+   for(const value of liveLog.replace(/\r\n?/g,'\n').split('\n').slice(-20))
+    preview.push({text:' '+safeText(value,240),tone:'muted'});
+   const trace=lines.findIndex(row=>row.section==='TRACE');
+   lines.splice(trace<0?lines.length:trace,0,...preview);
+  }
+  return wrapDetail(lines,Math.max(1,dw-2));
+ },[entry?.id,entry?.status,entry?.result,entry?.request_json,model?.state,detailNow,liveLog,outputMode,output,outputError,pageOffset,view,dw,status?.deviceName,status?.server,demo]);
  const scroll=Math.min(detailScroll,Math.max(0,detail.length-detailRows));
  const resetDetail=()=>{setDetailScroll(0);setOutputMode(false);setView('main');};
- const move=(delta:number,edge?:'first'|'last')=>{
-  if(focus==='detail'){
+ const move=(delta:number,edge?:'first'|'last',target:Focus=focus)=>{
+  if(target==='detail'){
    setDetailScroll(x=>edge==='first'?0:edge==='last'?Math.max(0,detail.length-detailRows):Math.max(0,Math.min(detail.length-detailRows,x+delta)));
-  }else if(focus==='tasks'){
+  }else if(target==='tasks'){
    const index=edge==='first'?0:edge==='last'?tasks.length-1:Math.max(0,Math.min(tasks.length-1,taskIndex+delta));
    setTaskId(tasks[index]?.id??null);setDetailTask(true);resetDetail();
   }else{
-   const requested=edge==='first'?0:edge==='last'?activities.length-1:Math.max(0,selectedIndex+delta);
+   const requested=edge==='first'?0:edge==='last'?activities.length-1:Math.max(0,selectionIndexRef.current+delta);
    if(pageHasMore&&(edge==='last'||requested>=activities.length)){
     if(requested>=activities.length)pendingActivityIndexRef.current=requested;
     loadNextPage();
    }
    const index=Math.max(0,Math.min(activities.length-1,requested));
+   selectionIndexRef.current=index;
    // Selecting the newest row in ACTIVITY enables continuous follow mode.
    setSelectedId(index===0&&!activeQuery?null:activities[index]?.id??null);setDetailTask(false);resetDetail();
   }
  };
+ wheelHandlerRef.current=(direction,x,y)=>{
+  if(edit||confirm)return;
+  if(y>=5&&y<5+bodyHeight){
+   if((horizontal&&x>aw)||(!horizontal&&y>5+layout.activityHeight)){
+    setFocus('detail');setDetailScroll(n=>Math.max(0,Math.min(Math.max(0,detail.length-detailRows),n+direction)));
+   }else{setFocus('activity');move(direction,undefined,'activity');}
+  }else if(tasks.length&&y>=5+bodyHeight&&y<5+bodyHeight+taskHeight){
+   setFocus('tasks');move(direction>0?1:-1,undefined,'tasks');
+  }
+ };
+ useEffect(()=>{
+  const listener=(chunk:Buffer|string)=>{
+   const source=chunk.toString(),matcher=/\x1b\[<6([45]);(\d+);(\d+)M/g;
+   for(const match of source.matchAll(matcher))
+    wheelHandlerRef.current(match[1]==='5'?1:-1,Number(match[2]),Number(match[3]));
+  };
+  stdin.on('data',listener);
+  return()=>{stdin.off('data',listener);};
+ },[stdin]);
  const stop=async(ids:string[])=>{
   setConfirm(null);
   if(demo){
@@ -458,12 +585,16 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
   setNotice('已发送停止信号 '+stopped+'/'+ids.length+(stopped<ids.length?' · 其余任务已结束或停止失败':''));
  };
  useInput((input,key)=>{
+  if(key.ctrl&&input==='c'){
+   if(Date.now()-exitArmedAt<2500){exit();return;}
+   setExitArmedAt(Date.now());setNotice('再次按 Ctrl+C 退出 · 2 秒内有效');return;
+  }
   if(edit){
    if(key.escape){setEdit(null);setText('');return;}
    if(key.return){
     const value=text.trim(),kind=edit;setEdit(null);setText('');
     if(kind==='search'){setQuery(value);setSelectedId(null);setDetailTask(false);setFocus('activity');resetDetail();return;}
-    if(value==='help'){setView('help');setFocus('detail');setDetailScroll(0);return;}
+    if(value==='help'){setNotice('↑↓ 浏览 · Tab 切换 · S 搜索 · / 指令 · f 最新 · o 输出');return;}
     if(value==='config'){setView('config');setFocus('detail');setDetailScroll(0);return;}
     if(value==='tasks'){
      if(tasks.length){setFocus('tasks');setDetailTask(true);resetDetail();}
@@ -472,7 +603,7 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
     }
     if(value==='clear'){setQuery('');setSelectedId(null);return;}
     if(value==='quit'||value==='exit'){exit();return;}
-    setNotice('可用命令：help · config · tasks · clear · quit');return;
+    setNotice('命令：config · tasks · clear · quit');return;
    }
    if(key.backspace||key.delete){setText(s=>Array.from(s).slice(0,-1).join(''));return;}
    if(input&&!key.ctrl&&!key.meta)setText(s=>(s+oneLine(input)).slice(0,256));
@@ -483,7 +614,7 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
    if(input==='n'||key.escape)setConfirm(null);
    return;
   }
-  if(input==='q'||(key.ctrl&&input==='c')){exit();return;}
+  if(input==='q'){exit();return;}
   if(key.escape){
    if(view!=='main'||outputMode){resetDetail();return;}
    if(query){setQuery('');setSelectedId(null);return;}
@@ -492,9 +623,9 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
   if(demo&&/^[0-9]$/.test(input)){
    setDemoStatus(prev=>prev?advanceDemo(prev,input):prev);setNotice('DEMO · 场景 '+input);return;
   }
-  if(input==='/'||input==='s'){setEdit('search');setText(query);setNotice('');return;}
-  if(input==='>'){setEdit('command');setText('');setNotice('');return;}
-  if(input==='?'){setView(v=>v==='help'?'main':'help');setFocus('detail');setDetailScroll(0);return;}
+  if(input==='s'||input==='S'){setEdit('search');setText(query);setNotice('');return;}
+  if(input==='/'||input===':'||input==='>'){setEdit('command');setText('');setNotice('');return;}
+  if(input==='?'){setNotice('↑↓ 浏览 · Tab 切换 · S 搜索 · / 指令 · f 最新 · o 输出 · y 复制');return;}
   if(key.tab){
    const order:Focus[]=tasks.length?['activity','detail','tasks']:['activity','detail'];
    const index=order.indexOf(focus),delta=key.shift?-1:1;
@@ -534,18 +665,17 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
   if(input==='r'&&outputMode){setRefresh(x=>x+1);return;}
  });
  const connected=status?.state==='connected',connecting=!status||status.state==='connecting';
- const connection=connected?'connected':connecting?'connecting':'offline';
+ const connection=connected?'CONNECTED':connecting?'CONNECTING':'OFFLINE';
  const headerTheme=connected?barTheme.connected:connecting?barTheme.connecting:barTheme.disconnected;
  const host=(()=>{try{return new URL(status?.server??'').host;}catch{return status?.deviceName??'local runtime';}})();
  const taskStart=Math.max(0,taskIndex-taskSlots+1);
  const activityPane=<Box flexDirection="column" width={aw} height={layout.activityHeight} overflow="hidden">
   <Title label={'ACTIVITY '+(demo?activities.length:pageTotal)} width={aw}
-   right={(pageLoading?'加载中 · ':'')+(selectedId===null?'● live':selectedIndex<0?'历史快照':(selectedIndex+1)+' / '+pageTotal)} active={focus==='activity'}/>
-  <Box height={1} paddingX={1} flexShrink={0}><Text color={palette.muted}>{'  '+columns.map(c=>fit(c.title,c.width-1)+' ').join('')}</Text></Box>
-  {visibleRows.length?visibleRows.map(row=>row==='divider'?
-    <Line key="divider" width={aw} text=" ┄ 以上运行中 · 以下为历史 ┄" color={palette.line}/>:
-    'kind' in row&&row.kind==='date'?
-    <Line key={'day-'+row.timestamp} width={aw} text={' ┄ '+dateDivider(row.timestamp,tick)+' ┄'} color={palette.line}/>:(()=>{
+   right={(pageLoading?'加载中 · ':'')+(selectedId===null?'● LIVE':selectedIndex<0?'历史快照':(selectedIndex+1)+' / '+pageTotal)}
+   rightColor={selectedId===null?stateColor.success:undefined} active={focus==='activity'}/>
+  <Box height={1} paddingX={1} flexShrink={0}><Text color={palette.muted}>{'  '+columns.map(c=>(c.key==='elapsed'?rightFit(c.title,c.width-1):fit(c.title,c.width-1))+' ').join('')}</Text></Box>
+  {visibleRows.length?visibleRows.map(row=>'kind' in row&&row.kind==='date'?
+    <Line key={'day-'+row.timestamp} width={aw} text={' ┄ '+dailyLabel(row.timestamp)+' ┄'} color={palette.line}/>:(()=>{
    const record=row as ActivityEntry;
    const a=activityPresentation(record,tick),visual=toolRow(record),isSelected=record.id===selected?.id;
    return <Box key={record.id} height={1} flexShrink={0} paddingX={1} backgroundColor={isSelected?palette.selection:undefined}>
@@ -553,7 +683,7 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
     {columns.map(c=>{
      const width=c.width-1;
      if(c.key==='action'||c.key==='result')return <RichCell key={c.key}
-      segments={c.key==='action'?visual.action:visual.result} width={width} selected={isSelected}/>;
+      segments={c.key==='action'?visual.action:visual.result} width={width} />;
      const color=c.key==='state'?stateColor[a.state]:c.key==='elapsed'||c.key==='time'?palette.muted:palette.text;
      if(c.key==='state'&&a.state==='running')return <SpinnerCell key={c.key} color={color}/>;
      if(c.key==='elapsed'&&a.state==='running')return <RunningElapsedCell key={c.key} entry={record}
@@ -567,14 +697,13 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
   })()):<Line width={aw} text={pageError?' 历史读取失败 · '+pageError:pageLoading?' 正在加载活动…':activeQuery?' 没有匹配记录 · Esc 清除筛选':' 暂无操作，等待 Agent 请求'} color={palette.muted}/>}
  </Box>;
  const detailPane=<Box flexDirection="column" width={dw} height={layout.detailHeight} overflow="hidden">
-  <Title label={view==='help'?'HELP':view==='config'?'CONNECTION':outputMode?'LOCAL OUTPUT':'DETAIL'} width={dw} active={focus==='detail'}
-   right={detail.length>detailRows?(scroll+1)+' / '+detail.length:''}/>
-  <Box flexDirection="column" paddingX={1} height={detailRows} overflow="hidden">
-   {detail.slice(scroll,scroll+detailRows).map((line,i)=>{
-    const index=scroll+i;
-    return <Line key={index} text={line.text} width={Math.max(1,dw-2)}
-     color={line.tone?toneColor[line.tone]:palette.text} bold={line.bold===true}/>;
-   })}
+  <Title label={view==='config'?'CONNECTION':outputMode?'LOCAL OUTPUT':'DETAIL'} width={dw} active={focus==='detail'}
+   right={detailScrollStatus(detail.length,detailRows,scroll)}/>
+  <Box flexDirection="column" height={detailRows} overflow="hidden">
+   {detail.slice(scroll,scroll+detailRows).map((item,i)=>
+    entry?.status==='running'&&item.label==='DUR'
+     ?<RunningDurationDetailCell key={entry.id+'-dur'} entry={entry} item={item} width={dw}/>
+     :<DetailCell key={scroll+i} item={item} width={dw}/>)}
   </Box>
   <Line width={dw} text={outputMode?' [ ] 翻页 · e 切换流 · r 刷新 · Esc 返回':' y 复制预览 · o 本地输出 · ↑↓ 滚动'} color={palette.muted}/>
  </Box>;
@@ -582,17 +711,21 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
  const ramUsedBytes=Math.max(0,ramTotalBytes-(status?.availableMemoryBytes??0));
  const ramText=ramTotalBytes>0?(ramUsedBytes/1073741824).toFixed(1)+'/'+
   (ramTotalBytes/1073741824).toFixed(1)+'GB':'—/—GB';
- const uptimeMs=(status?.uptimeMs??0)+(demo?Math.max(0,tick-mountedAt):0);
- const metrics='CPU '+(status?.cpuPercent??0).toFixed(1)+'% · RAM '+ramText+' · '+(status?.operationsTotal??0)+' ops · up '+duration(uptimeMs);
+ if(status&&(!uptimeAnchorRef.current||uptimeAnchorRef.current.device!==status.deviceId||status.uptimeMs<uptimeAnchorRef.current.uptime-2000))
+  uptimeAnchorRef.current={device:status.deviceId,uptime:status.uptimeMs,at:Date.now()};
+ const anchor=uptimeAnchorRef.current;
+ const uptimeMs=demo?(status?.uptimeMs??0)+Math.max(0,tick-mountedAt):(anchor?.uptime??0)+Math.max(0,tick-(anchor?.at??tick));
+ const runMode=demo?'DEMO':status?.runtimeMode==='service'?'SERVICE':status?.runtimeMode==='background'?'SERVICE':'FOREGROUND';
+ const metrics=runMode+' · CPU '+(status?.cpuPercent??0).toFixed(1)+'% · RAM '+ramText+' · '+(status?.operationsTotal??0)+' OPS · UP '+duration(uptimeMs);
  const compactHeader=w<56;
  const headerBrand=compactHeader?' DeskBeacon':' ((·)) DeskBeacon'+(demo&&w>=65?' · DEMO':'');
  const headerLeftWidth=Math.min(w,compactHeader?12:demo&&w>=65?34:26);
  const headerRightWidth=Math.max(0,w-headerLeftWidth);
  const footerPrompt=confirm?
   '停止 '+confirm.length+' 个进程及其子进程？ y / Enter 确认 · n / Esc 返回':
-  notice||(pageError?'活动读取失败 · '+pageError:w<64?'↑↓ 选择 · Tab 切换 · / 搜索 · q 退出':'↑↓ 选择 · Tab 切换 · / 搜索 · x 停止 · ? 帮助 · q 退出');
+  notice||(pageError?'活动读取失败 · '+pageError:w<64?'↑↓ 选择 · Tab 切换 · S 搜索 · / 指令 · q 退出':'↑↓ 选择 · Tab 切换 · S 搜索 · / 指令 · x 停止 · q 退出');
  const compactMetrics=w<40?'CPU '+(status?.cpuPercent??0).toFixed(1)+'% · RAM '+ramText:
-  w<72?'CPU '+(status?.cpuPercent??0).toFixed(1)+'% · RAM '+ramText+' · '+(status?.operationsTotal??0)+' ops':metrics;
+  w<72?'CPU '+(status?.cpuPercent??0).toFixed(1)+'% · RAM '+ramText+' · '+(status?.operationsTotal??0)+' OPS':metrics;
  const footerRightWidth=wideFooter?Math.min(64,Math.max(48,Math.floor(w*.48))):0;
  const footerLeftWidth=wideFooter?w-footerRightWidth:w;
  if(w<24||h<12)return <Box width={w} height={h} flexDirection="column" overflow="hidden">
@@ -601,15 +734,15 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
  return <Box flexDirection="column" width={w} height={h} overflow="hidden">
   <Box height={1} flexShrink={0} width={w} backgroundColor={headerTheme.background} justifyContent="space-between">
    <Text bold color={headerTheme.foreground}>{fit(headerBrand,headerLeftWidth)}</Text>
-   <Text color={headerTheme.foreground}>{fit('● '+connection+' · '+(status?.latencyMs??'—')+' ms · '+host,headerRightWidth,false)}</Text>
+   <Text color={headerTheme.foreground}>{rightFit('● '+connection+' · '+(status?.latencyMs??'—')+' MS · '+host,Math.max(0,headerRightWidth-1))+' '}</Text>
   </Box>
   <Box height={3} flexShrink={0} borderStyle="single" borderColor={edit?palette.accent:palette.line} paddingX={1}>
    <Text color={edit?palette.accent:palette.muted}>{fit(edit?(edit==='search'?'⌕ ':'> ')+text+'▏':
-    query?'⌕ '+query+' · '+activities.length+' matches · Esc 清除':'⌕ / 搜索事件 · > 命令 · ? 帮助',Math.max(1,w-4))}</Text>
+    query?'⌕ '+query+' · '+activities.length+' matches · Esc 清除':'⌕ S 搜索 · / 指令 · f 最新',Math.max(1,w-4))}</Text>
   </Box>
   <Box width={w} height={bodyHeight} flexShrink={0} flexDirection={horizontal?'row':'column'} overflow="hidden">
    {activityPane}
-   {horizontal?<Box width={1} height={bodyHeight}><Text color={palette.line}>{Array.from({length:bodyHeight},(_,i)=>i===0?'┯':'│').join('\n')}</Text></Box>:
+   {horizontal?<Box width={1} height={bodyHeight}><Text color={palette.line}>{Array.from({length:bodyHeight},(_,i)=>i===0?'┯':detail[scroll+i-1]?.section?'├':'│').join('\n')}</Text></Box>:
     <Line text={'─'.repeat(w)} width={w} color={palette.line}/>}
    {detailPane}
   </Box>
@@ -636,11 +769,11 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
 }
 
 export async function showTui(demoScenario?:DemoScenario){
- if(process.stdout.isTTY)process.stdout.write('\x1b[?1049h');
+ if(process.stdout.isTTY)process.stdout.write('\x1b[?1049h\x1b[?1000h\x1b[?1006h');
  try{
-  const app=render(demoScenario?<App demoScenario={demoScenario}/>:<App/>,{interactive:process.stdout.isTTY===true});
+  const app=render(demoScenario?<App demoScenario={demoScenario}/>:<App/>,{interactive:process.stdout.isTTY===true,exitOnCtrlC:false});
   await app.waitUntilExit();
  }finally{
-  if(process.stdout.isTTY)process.stdout.write('\x1b[?1049l');
+  if(process.stdout.isTTY)process.stdout.write('\x1b[?1006l\x1b[?1000l\x1b[?1049l');
  }
 }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {DatabaseSync} from 'node:sqlite';
-import {activityPage,sortActivityRows} from '../dist/activity-query.js';
+import {activityPage,sortActivityRows,compatibleDayStats} from '../dist/activity-query.js';
 import {activityPresentation,detailLines} from '../dist/presenter.js';
 
 const db=new DatabaseSync(':memory:');
@@ -23,6 +23,9 @@ try{
   if(!firstPage)firstPage=page;
   assert.ok(page.rows.length<=50,'the database must only return one bounded page');
   assert.equal(page.total,173);
+  assert.equal(page.days.reduce((n,d)=>n+d.total,0),173,'day aggregates must include all 173 rows, not only the current 50');
+  assert.equal(page.days.reduce((n,d)=>n+d.failed,0),1,'nonzero exit code is a failed operation even when persisted as completed');
+  assert.equal(page.days.reduce((n,d)=>n+d.running,0),2);
   assert.equal(page.updates.length,0);
   rows.push(...page.rows);
   cursor=page.nextCursor??undefined;
@@ -45,6 +48,11 @@ try{
  assert.ok(detailLines(failing).some(line=>line.includes('BUILD_FAILED')),
   'details must be available directly from the page record');
 
+ assert.equal(compatibleDayStats(undefined),null,'old IPC pages without days must fall back, not throw');
+ assert.equal(compatibleDayStats({}),null);
+ assert.equal(compatibleDayStats([{date:'bad',total:3}]),null,'incomplete aggregation cannot masquerade as full');
+ assert.deepEqual(compatibleDayStats(firstPage.days),firstPage.days);
+ console.log('PASS new TUI safely accepts legacy Runtime pages without the days field');
  const filtered=activityPage(db,{query:'special-old-module'});
  assert.equal(filtered.total,1,'search must find old records outside the initial page');
  assert.equal(filtered.rows[0].id,'op-110');

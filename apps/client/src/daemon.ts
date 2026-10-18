@@ -53,9 +53,8 @@ export class ClientDaemon extends EventEmitter {
   private handshakeTimer:NodeJS.Timeout|undefined;
   private reconnectTimer:NodeJS.Timeout|undefined;
   private connecting=false;
-  // Reconnection is intentionally rate-limited; only a healthy, sustained session resets the budget.
-  private reconnectAttempts=0;
-  private readonly reconnectDelaysMs=[3_000,8_000,20_000,30_000];
+  // Retry fast only when disconnected. An established connection never polls for reconnection.
+  private readonly reconnectDelayMs=1_000;
   private readonly startedAt=Date.now();
   private activityRevision=0;
   private heartbeatSentAt=0;
@@ -152,12 +151,7 @@ export class ClientDaemon extends EventEmitter {
   }
   private scheduleReconnect(){
     if(this.stopped||this.reconnectTimer)return;
-    const activeForeground=this.supervisor.active().some(task=>task.kind==='foreground');
-    const unacked=Number((this.db.prepare('SELECT COUNT(*) AS total FROM unacked_results').get() as {total:number}).total);
-    // Only an active command/result warrants a fast retry. Idle devices back off.
-    const urgent=activeForeground||unacked>0;
-    const delay=urgent?3_000:this.reconnectDelaysMs[Math.min(this.reconnectAttempts,this.reconnectDelaysMs.length-1)]!;
-    this.reconnectAttempts++;
+    const delay=this.reconnectDelayMs;
     this.recordConnection('reconnect_scheduled','delayMs='+delay);
     this.reconnectTimer=setTimeout(()=>{
       this.reconnectTimer=undefined;
@@ -214,9 +208,9 @@ export class ClientDaemon extends EventEmitter {
         this.heartbeatAwaiting=true;
         socket.send('ping');
       };
-      // Some intermediate links terminate an idle WebSocket after ~20 seconds.
-      // Send keepalives well before that deadline, not exactly at it.
-      this.keepaliveTimer=setInterval(heartbeat,5_000);
+      // The observed upstream idle cutoff is ~19 seconds: one auto-response ping
+      // every 10 seconds stays below it without frequent application-level traffic.
+      this.keepaliveTimer=setInterval(heartbeat,10_000);
       this.keepaliveTimer.unref();
     });
     socket.on('message',raw=>{void this.message(raw.toString()).catch(e=>{console.error('Remote message:',err(e));});});
@@ -303,7 +297,6 @@ export class ClientDaemon extends EventEmitter {
       if(this.heartbeatAwaiting){
         this.latencyMs=Math.round(performance.now()-this.heartbeatSentAt);
         this.lastHeartbeatAt=Date.now();
-        if(Date.now()-this.socketOpenedAt>=120_000)this.reconnectAttempts=0;
         this.heartbeatAwaiting=false;this.heartbeatMisses=0;
         if(++this.heartbeatReplies===1)this.recordConnection('first_pong','rttMs='+this.latencyMs);
         this.emit('change');
@@ -369,6 +362,7 @@ export class ClientDaemon extends EventEmitter {
     const description=String(input.description??tool);
     const privateKey=/token|secret|password|cookie|authorization|api[_-]?key|private[_-]?key/i;
     const redact=(key:string,value:any)=>{
+      if(key==='content'&&tool==='fs_write'&&typeof value==='string')return value.slice(0,8000);
       if(['content','dataBase64','env'].includes(key)||privateKey.test(key))return '[redacted]';
       if(typeof value==='string'&&value.length>4000)return value.slice(0,4000)+' [truncated]';
       if(Array.isArray(value)&&value.length>80)return [...value.slice(0,80),'[truncated]'];
@@ -383,7 +377,7 @@ export class ClientDaemon extends EventEmitter {
     const requestPreview=JSON.stringify(safeInput);
     this.db.prepare('INSERT OR REPLACE INTO activity(id,grant_id,actor_name,tool,description,status,time,cwd,request_json) VALUES(?,?,?,?,?,?,?,?,?)')
       .run(opId,m.grantId,actorName,tool,description,'running',started,cwd,
-        requestPreview.length>6000?JSON.stringify({summary:'参数过大，详情已省略'}):requestPreview);
+        requestPreview.length>(tool==='fs_write'?12000:6000)?JSON.stringify({summary:'参数过大，详情已省略'}):requestPreview);
     this.activityRevision++;
     this.emit('change');
     // Acceptance is already persisted locally. A disconnect during the ACK
@@ -396,12 +390,17 @@ export class ClientDaemon extends EventEmitter {
       const result=await this.execute(tool,input,opId,m.grantId);
       this.supervisor.record(opId,'completed',result);
       const safeResult=JSON.stringify(result,(key,value)=>{
+        // File reads belong to this local user's history: retain a bounded
+        // preview, not a blanket '[redacted]' placeholder.
+        if(key==='content'&&(tool==='fs_read'||tool==='fs_read_many')&&typeof value==='string')
+          return value.slice(0,10000);
         if(['content','dataBase64','env'].includes(key)||privateKey.test(key))return '[redacted]';
         if(typeof value==='string'&&value.length>3000)return value.slice(0,3000)+' [truncated]';
         if(Array.isArray(value)&&value.length>40)return [...value.slice(0,40),'[truncated]'];
         return value;
       });
-      const resultPreview=safeResult.length>6000?JSON.stringify({summary:'结果过大，请查看操作日志'}):safeResult;
+      const resultPreview=safeResult.length>(tool==='fs_read'||tool==='fs_read_many'?20000:6000)
+        ?JSON.stringify({summary:'结果过大，请查看操作日志'}):safeResult;
       this.db.prepare('UPDATE activity SET status=?,result=?,finished_at=?,duration_ms=? WHERE id=?')
         .run('completed',resultPreview,Date.now(),Date.now()-started,opId);
       this.activityRevision++;

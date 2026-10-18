@@ -14,28 +14,15 @@ const daemon=new ClientDaemon(config);
 try{
  await daemon.connect();
  assert.match((await daemon.status()).state,/^error:/);
- const deadline=Date.now()+5200;
- while(attempts<2&&Date.now()<deadline)await new Promise(r=>setTimeout(r,100));
- assert.ok(attempts>=2,'failed refresh should retry after the initial three-second delay');
- const first=daemon.db.prepare("SELECT detail FROM connection_events WHERE kind='reconnect_scheduled' ORDER BY id DESC LIMIT 2").all();
- assert.deepEqual(first.map(v=>v.detail),['delayMs=8000','delayMs=3000']);
- // Sample later backoff stages without waiting for a prolonged artificial outage.
+ const deadline=Date.now()+3600;
+ while(attempts<3&&Date.now()<deadline)await new Promise(r=>setTimeout(r,80));
+ assert.ok(attempts>=3,'failed OAuth refresh should retry at a fixed one-second interval');
+ const first=daemon.db.prepare("SELECT detail FROM connection_events WHERE kind='reconnect_scheduled' ORDER BY id DESC LIMIT 3").all();
+ assert.ok(first.every(v=>v.detail==='delayMs=1000'),'all disconnected retries use one second');
  clearTimeout(daemon.reconnectTimer);daemon.reconnectTimer=undefined;
  daemon.scheduleReconnect();
- clearTimeout(daemon.reconnectTimer);daemon.reconnectTimer=undefined;
- daemon.scheduleReconnect();
- const later=daemon.db.prepare("SELECT detail FROM connection_events WHERE kind='reconnect_scheduled' ORDER BY id DESC LIMIT 4").all();
- assert.deepEqual(later.map(v=>v.detail),['delayMs=30000','delayMs=20000','delayMs=8000','delayMs=3000']);
- console.log('PASS 3/8/20/30s bounded reconnect policy and connection event diagnostics');
- clearTimeout(daemon.reconnectTimer);daemon.reconnectTimer=undefined;
- const originalActive=daemon.supervisor.active.bind(daemon.supervisor);
- daemon.supervisor.active=()=>[{id:'in-flight-test',kind:'foreground'}];
- try{
-  daemon.scheduleReconnect();
-  const urgent=daemon.db.prepare("SELECT detail FROM connection_events WHERE kind='reconnect_scheduled' ORDER BY id DESC LIMIT 1").get();
-  assert.equal(urgent.detail,'delayMs=3000','only live foreground work should override idle backoff');
- }finally{clearTimeout(daemon.reconnectTimer);daemon.reconnectTimer=undefined;daemon.supervisor.active=originalActive;}
- console.log('PASS active foreground command receives priority reconnect without idle reconnect spam');
+ assert.equal(daemon.db.prepare("SELECT detail FROM connection_events WHERE kind='reconnect_scheduled' ORDER BY id DESC LIMIT 1").get().detail,'delayMs=1000');
+ console.log('PASS fixed fast reconnect, no backoff and no duplicate reconnect timers');
  assert.match((await daemon.status()).state,/^error:/);
  console.log('PASS client automatically retries failed OAuth refresh after temporary disconnection');
  const ports=await daemon.execute('net_ports',{protocol:'tcp',state:'listen',limit:1},'local-netports-test','test-agent');

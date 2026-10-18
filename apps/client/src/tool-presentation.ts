@@ -2,7 +2,7 @@ import type {ToolName} from '@deskbeacon/protocol';
 import type {ActivityEntry} from './presenter.js';
 
 /** One explicit presentation contract per MCP tool. No raw request bodies or secrets in table cells. */
-export type Tone='default'|'muted'|'success'|'danger'|'warning';
+export type Tone='default'|'muted'|'success'|'danger'|'warning'|'accent';
 export type Segment={text:string;tone?:Tone};
 export type ToolRow={toolLabel:string;action:Segment[];result:Segment[]};
 type Fields=Record<string,any>;
@@ -77,10 +77,12 @@ function editResult(r:Fields):Segment[]{
  const add=count(r.addedLines),remove=count(r.removedLines);
  if(add!==undefined&&remove!==undefined){
   const parts:Segment[]=[];
-  if(add>0)parts.push({text:'+'+add+' 行',tone:'success'});
-  if(add>0&&remove>0)parts.push({text:'  '});
-  if(remove>0)parts.push({text:'−'+remove+' 行',tone:'danger'});
-  return parts.length?parts:part('无行变化');
+  parts.push({text:'+'+add,tone:'success'});
+  parts.push({text:', ',tone:'muted'});
+  parts.push({text:'-'+remove,tone:'danger'});
+  const size=count(r.bytes??r.writtenBytes);
+  if(size!==undefined)parts.push({text:', '+bytes(size).replace(' ','') ,tone:'muted'});
+  return parts;
  }
  const replacements=count(r.replacements);
  if(replacements!==undefined)return part((r.changed===false?'无变化 · ':'已更新 · ')+replacements+' 处');
@@ -95,7 +97,7 @@ const templates:Record<ToolName,Template>={
  workspace_cd:{label:'切换目录',action:i=>'切换目录 → '+clean(i.cwd??i.path),result:r=>part('已切换'+(r.version!==undefined?' · v'+r.version:''))},
  fs_list:{label:'目录列表',action:i=>'列出 '+(path(i)||'当前目录')+' · 深度 '+(count(i.depth)??1),result:r=>part(qty(r.entries?.length??r.items?.length,'项')+(r.truncated?' · 已截断':''))},
  fs_stat:{label:'文件属性',action:i=>'检查 '+qty(i.paths?.length,'个路径')+' · '+filename(i.paths?.[0]),result:r=>part(qty(r.entries?.length??r.results?.length??r.files?.length??r.paths?.length,'项属性'))},
- fs_read:{label:'文件读取',action:i=>'读取 '+filename(i.path)+(i.lineOffset!==undefined?' · 第 '+(Number(i.lineOffset)+1)+' 行起':''),result:r=>part((r.linesRead!==undefined?qty(r.linesRead,'行')+' · ':'')+bytes(r.readBytes)+(r.truncated?' · 未完':''))},
+ fs_read:{label:'文件读取',action:i=>'读取 '+filename(i.path)+(i.lineOffset!==undefined?' · 第 '+(Number(i.lineOffset)+1)+' 行起':''),result:r=>part((r.linesRead!==undefined?qty(r.linesRead,'行')+' · ':'')+bytes(r.readBytes))},
  fs_read_many:{label:'批量读取',action:i=>'读取 '+qty(i.files?.length,'个文件')+' · '+filename(first(i.files).path),result:r=>part((count(r.successCount)??r.files?.length??0)+' 成功'+(r.failureCount?' · '+r.failureCount+' 失败':'')+(r.bytesUsed?' · '+bytes(r.bytesUsed):''))},
  fs_find:{label:'文件查找',action:i=>'查找 '+clean(i.pattern??'*')+' · '+(path(i)||'当前目录'),result:r=>listResult(r,'paths','个文件')},
  fs_grep:{label:'内容搜索',action:i=>'搜索 '+clean(i.pattern)+' · '+(path(i)||'当前目录'),result:r=>listResult(r,'matches','处匹配')},
@@ -139,5 +141,11 @@ export function toolRow(a:ActivityEntry):ToolRow{
  else if(a.status==='interrupted')result=part('执行中断 · 结果未知','warning');
  else if(a.status==='failed'||r.isError===true||r.error||r.spawnError)result=part(clean(r.error?.message??r.error??r.message??r.spawnError??'执行失败'),'danger');
  else{try{result=template.result(r,i);}catch{result=part('已完成');}}
- return {toolLabel:template.label,action:part(action||'—','default'),result:result.map(seg=>({...seg,text:clean(seg.text,250)}))};
+ // Main ACTION text remains foreground; dot-separated qualifiers are metadata.
+ const cut=action.indexOf(' · ');
+ const actionSegments:Segment[]=cut<0?[{text:action||'—',tone:'default'}]:[
+  {text:action.slice(0,cut),tone:'default'},
+  {text:action.slice(cut),tone:'muted'}
+ ];
+ return {toolLabel:template.label,action:actionSegments,result:result.map(seg=>({...seg,text:clean(seg.text,250)}))};
 }
