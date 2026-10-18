@@ -48,7 +48,7 @@ export async function dispatchTool(env: Env, name: ToolName, input: unknown, gra
         }
       })));
     }
-    return { devices: updated, onlineStatus: "checked on request" };
+    return { devices: updated, onlineStatus: "checked on request", offlineHint: "Offline only means no active device WebSocket. Start deskbeacon or deskbeacon service start on that computer; if unreachable, check power and network." };
   }
   const deviceId = data.deviceId as string;
   const stub = env.DEVICE_SESSIONS.get(env.DEVICE_SESSIONS.idFromName(deviceId));
@@ -57,6 +57,9 @@ export async function dispatchTool(env: Env, name: ToolName, input: unknown, gra
     body: JSON.stringify({ name, input: data, grantId, actorName, operationId: crypto.randomUUID() }),
   });
   const body = await result.json() as Record<string, unknown>;
+  if (body.isError === true && body.code === "DEVICE_OFFLINE") {
+    return { ...body, nextStep: "The target device has no active WebSocket. On that computer, launch deskbeacon (foreground) or deskbeacon service start (background). Confirm network and power; then retry device_list before retrying the operation." };
+  }
   return body;
 }
 
@@ -87,6 +90,38 @@ export function makeMcpServer(env: Env, grantId: string, actorName?: string): Mc
 }
 
 const descriptions: Record<string,string> = {
+  device_list: "Find paired devices and their current live online/offline state. Call first when deviceId is unknown; records may remain listed while computers are powered off. Do not interpret lastSeenAt as continuous availability.",
+  device_info: "Get a live device capability snapshot, current OS, supported shells, and default working directory. Requires an online device.",
+  workspace_open: "Create an Agent-scoped working directory context for subsequent file and command tools. Returns workspaceId; shell cd commands do NOT update this context.",
+  workspace_info: "Read Agent-scoped workspace cwd, shell profile and version. Requires workspaceId returned from workspace_open.",
+  workspace_cd: "Change Agent-scoped workspace cwd with optional expectedVersion compare-and-swap. This affects subsequent workspace-aware operations, not the computer's global cwd.",
+  fs_list: "List a bounded directory tree with depth/limit/cursor, sorting and hidden-file options. Prefer it over shell ls for ordinary filesystem discovery.",
+  fs_stat: "Stat up to 100 explicit paths and optionally calculate file hashes. Use before edit when checking for concurrent changes.",
+  fs_read: "Read a bounded file range; prefer lineOffset/maxLines for source code and byteOffset/maxBytes for binary. Returned ranges can be paged; never assume a preview is the complete file.",
+  fs_write: "Create, rewrite or append file content with optional expectedHash and overwrite protection. Prefer expectedHash for sensitive concurrent edits.",
+  fs_edit: "Apply an exact text replacement or a patch to a file; use expectedHash to avoid overwriting concurrent changes. Do not submit raw JSON patches as file text.",
+  fs_manage: "Create directories, copy, move, rename or remove files; destructive actions are explicit. Do not use for archive extraction.",
+  fs_archive: "Create, list or extract ZIP/TAR archives on the selected device. Specify paths and operation explicitly; archive data remains on that device.",
+  exec_foreground: "Run a finite command and WAIT for its final exit, stdout, stderr and exit code in the SAME MCP call. Description is mandatory; use program+args to avoid shell escaping. Timeout is separate from front-end wait. No automatic background.",
+  exec_batch: "Run multiple finite commands in serial stages, with optional parallel commands per stage. Wait synchronously for every stage. One foreground slot is held for the device.",
+  exec_background: "EXPLICITLY start a long-running process, get backgroundTaskId, then poll its output using cursor and stop when done. Never use for ordinary short commands.",
+  background_list: "List local background process records and statuses, including exited tasks.",
+  background_get: "Inspect a specific background task by backgroundTaskId.",
+  background_output: "Retrieve incremental persisted stdout/stderr by cursor without replaying earlier data. Suitable for development server logs.",
+  background_input: "Write input to a running background task, close stdin or send Ctrl+C. Does not spawn a new process.",
+  background_stop: "Stop one specific background task/process tree. Safe to retry; requires backgroundTaskId.",
+  operation_get: "Read metadata and result of a prior foreground operation from bounded durable history; requires operationId.",
+  operation_output: "Page text stdout/stderr from a prior foreground operation by offset. Use when outputPreview is truncated or more detail is needed.",
+  transfer_upload: "Transfer actual bytes supplied by the MCP host from Agent to device. Small inline transfers only unless the Host supports streaming; this tool does NOT fetch arbitrary URLs.",
+  transfer_download: "Return actual device file bytes to requesting Agent; inline transfers are bounded. A URL string alone is not a downloaded file.",
+  transfer_status: "Get status of a specific transferId. Inline transfers may have completed immediately.",
+  transfer_cancel: "Cancel a currently active transfer when supported. Returns a clear reason if no active stream exists.",
+  net_ports: "Inspect local listening ports or connections and owning PIDs on the selected device.",
+  net_probe: "Test DNS, TCP or TLS connectivity FROM the selected device. Use to debug development endpoints or network reachability.",
+  http_request: "Issue bounded HTTP requests FROM the device, including localhost-only APIs. Observe status/headers/body limits. Never send secrets in URL query strings.",
+  system_snapshot: "Read CPU, memory, filesystem, and network system information without mutating the device.",
+  system_processes: "List matching system processes by name or PID; read-only, not a process kill tool.",
+  screen_capture: "Capture the current screen and return image content when desktop permissions permit. Use sparingly and avoid sensitive screens.",
   exec_foreground: "Execute a single finite command synchronously on the selected device; waits until command exits, is cancelled, or times out. Never runs in background. A short human-readable description is mandatory.",
   exec_batch: "Execute staged commands synchronously; serial stages and parallel commands inside a stage. One foreground slot per device. All managed processes end before response.",
   exec_background: "Explicitly create a long-running process; returns a background task ID. Use background_* tools to manage it.",

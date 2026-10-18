@@ -10,6 +10,7 @@ import { existsSync } from 'node:fs';
 import { configPath, loadConfig, saveConfig, ClientDaemon } from './daemon.js';
 import { requestIpc, startIpc } from './ipc.js';
 import { showTui } from './tui.js';
+import {demoScenarios, type DemoScenario} from './demo.js';
 
 const url64=(value:Buffer)=>value.toString('base64url');
 const sleep=(ms:number)=>new Promise(resolve=>setTimeout(resolve,ms));
@@ -148,6 +149,7 @@ const usage=()=>{
   '  (no command)            Open full-screen DeskBeacon. Own the Runtime unless',
   '                          an existing background service is running.',
   '  setup [--url URL]       Pair this device using OAuth (prompts for URL).',
+  '  demo [scenario]        Offline, interactive TUI preview (for development).',
   '  service start           Start the Runtime in the background (no TUI).',
   '  service stop            Stop the running Runtime.',
   '  service restart         Restart the background service.',
@@ -174,6 +176,15 @@ async function main(){
  if(action==='help'||action==='-h'||action==='--help'){usage();return;}
  if(action==='version'||action==='-v'||action==='--version'){console.log(pkg.version);return;}
  if(action==='update'){await updateCli();return;}
+ if(action==='demo'){
+   if(!process.stdin.isTTY||!process.stdout.isTTY)
+     throw Error('Demo preview requires an interactive terminal.');
+   const scenario=args[0]??'connected';
+   if(!demoScenarios.includes(scenario as DemoScenario))
+     throw Error('Unknown demo scenario. Options: '+demoScenarios.join(', '));
+   await showTui(scenario as DemoScenario);
+   return;
+ }
  if(action==='setup'){
    const index=args.indexOf('--url');
    await setup(index>=0&&args[index+1]?args[index+1]!:await promptUrl());

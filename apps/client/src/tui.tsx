@@ -2,9 +2,10 @@ import React, {useEffect, useMemo, useState} from 'react';
 import {render, Box, Text, useInput, useApp, useStdout} from 'ink';
 import {requestIpc, subscribeIpc} from './ipc.js';
 import {actionLabel, argumentLines, resultLines, safeText, duration, type ActivityEntry} from './presenter.js';
+import {createDemoStatus, advanceDemo, demoHelp, type DemoScenario, type DemoStatus} from './demo.js';
 
 type Task={id:string;description:string;start:number;kind:'foreground'|'background'};
-type Transfer={id:string;status:string;bytes:number;path:string;totalBytes?:number};
+type Transfer={id:string;status:string;bytes:number;path:string;totalBytes?:number;start?:number};
 type Status={
  state:string;deviceName:string;deviceId:string;uptimeMs:number;
  memoryBytes:number;cpuPercent:number;latencyMs:number|null;operationsTotal:number;
@@ -24,9 +25,13 @@ function useSize(){
  return size;
 }
 const clock=(time:number)=>new Date(time).toLocaleTimeString('zh-CN',{hour12:false});
-export function App(){
+export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
+ const demo=demoScenario!==undefined;
+ const [demoStatus,setDemoStatus]=useState<DemoStatus|null>(()=>
+   demoScenario?createDemoStatus(demoScenario):null);
  const {exit}=useApp(),{w,h}=useSize();
- const [status,setStatus]=useState<Status|null>(null);
+ const [liveStatus,setLiveStatus]=useState<Status|null>(null);
+ const status:Status|null=demo?demoStatus:liveStatus;
  const [tick,setTick]=useState(Date.now());
  const [focus,setFocus]=useState<'activity'|'tasks'>('activity');
  const [cursor,setCursor]=useState(0),[taskCursor,setTaskCursor]=useState(0);
@@ -37,25 +42,26 @@ export function App(){
  const [notice,setNotice]=useState(''),[confirm,setConfirm]=useState<string|null>(null);
  const [expandedTasks,setExpandedTasks]=useState(false);
  useEffect(()=>{
+   if(demo)return;
    let alive=true,unsubscribe=()=>{};let retry:ReturnType<typeof setTimeout>|undefined;
    const listen=()=>{unsubscribe=subscribeIpc(next=>{
-     if(alive){setStatus(next as Status);setNotice('');}
+     if(alive){setLiveStatus(next as Status);setNotice('');}
    },()=>{if(alive){setNotice('正在恢复本地连接…');retry=setTimeout(listen,2000);}});
    };
    listen();
    const tickTimer=setInterval(()=>setTick(Date.now()),1000);
    const sampleTimer=setInterval(()=>{
-     void requestIpc({action:'status'},2000).then(next=>{if(alive)setStatus(next as Status);}).catch(()=>{});
+     void requestIpc({action:'status'},2000).then(next=>{if(alive)setLiveStatus(next as Status);}).catch(()=>{});
    },12000);
    return()=>{alive=false;unsubscribe();if(retry)clearTimeout(retry);clearInterval(tickTimer);clearInterval(sampleTimer);};
- },[]);
+ },[demo]);
  const activities=useMemo(()=>(status?.activity??[]).filter(a=>
    !query||(a.tool+' '+a.description+' '+a.cwd+' '+a.grant_id).toLowerCase().includes(query.toLowerCase())),
    [status?.activity,query]);
  const jobs=(status?.active??[]).filter(t=>t.kind==='background');
  const transfers=(status?.transfers??[]).filter(t=>t.status==='running');
  const tasks=[...jobs.map(t=>({...t,title:t.description})),
-   ...transfers.map(t=>({...t,title:t.path,start:tick,kind:'transfer'}))];
+   ...transfers.map(t=>({...t,title:t.path,start:t.start??tick,kind:'transfer'}))];
  const maxTasks=Math.min(tasks.length,5);
  const displayedTasks=tasks.length>5?tasks.slice(0,4):tasks.slice(0,maxTasks);
  const omitted=tasks.length>5?tasks.length-4:0;
@@ -70,10 +76,16 @@ export function App(){
  const [bg,fg]=colors[key] as [string,string];
  const logo=connected?'((·))':connecting?'((!))':'((x))';
  const info=connected?'已连接':connecting?'正在连接':'等待重连';
- const ping=connected?'连接成功 · '+(status?.latencyMs??'—')+' ms':
+ const ping=demo?'DEMO · '+(status?.latencyMs??'—')+' ms':connected?'连接成功 · '+(status?.latencyMs??'—')+' ms':
    connecting?'正在建立连接':'WebSocket 已断开';
  const lineWidth=Math.max(25,w-6);
- const stop=(id:string)=>{void requestIpc({action:'stop',taskId:id}).then(()=>{
+ const stop=(id:string)=>{
+   if(demo){
+     setDemoStatus(prev=>prev?{...prev,active:prev.active.filter(t=>t.id!==id),
+       transfers:prev.transfers.filter(t=>t.id!==id)}:prev);
+     setConfirm(null);setNotice('DEMO · 模拟停止 '+id.slice(0,8));return;
+   }
+   void requestIpc({action:'stop',taskId:id}).then(()=>{
    setConfirm(null);setNotice('已停止任务 '+id.slice(0,8));
  }).catch(e=>setNotice(safeText(String(e),70)));};
  useInput((input,key)=>{
@@ -95,6 +107,11 @@ export function App(){
      return;
    }
    if(view!=='main'){if(key.escape||input==='q')setView('main');return;}
+   if(demo&&!confirm&&/^[0-9]$/.test(input)){
+     setDemoStatus(prev=>prev?advanceDemo(prev,input):prev);
+     setNotice('DEMO · 已切换预览状态 ('+input+')');
+     return;
+   }
    if(confirm){
      if(input==='y'||key.return){stop(confirm);return;}
      if(input==='n'||key.escape){setConfirm(null);return;}
@@ -174,14 +191,15 @@ export function App(){
        <Text bold color="cyan">快捷键</Text>
        {['↑↓ / j k    选择上一条、下一条','Tab          切换操作和长期任务',
          'Enter        展开记录或选择任务','s            搜索操作历史',
-         '/            输入命令','x            终止任务（需确认）','?            帮助','q            关闭窗口','Esc          返回'].map(x=><Text key={x}>{x}</Text>)}
+         '/            输入命令','x            终止任务（需确认）','?            帮助','q            关闭窗口','Esc          返回',
+         ...(demo?demoHelp:[])].map(x=><Text key={x}>{x}</Text>)}
      </Box>:view==='config'?<Box flexDirection="column">
        <Text bold color="cyan">设置 /config</Text>
        <Text>当前连接: {status?.deviceName||'未配置'}</Text>
        <Text>后台服务: deskbeacon service start / stop / restart</Text>
        <Text dimColor>开机自启和运行模式切换稍后在此开放。</Text>
      </Box>:<>
-       <Text dimColor>{query?'搜索 '+safeText(query)+' · ':''}{focus==='activity'?'ACTIVITY':'TASKS'} · {activities.length} 项 · ? 帮助</Text>
+       <Text dimColor>{demo?'[DEMO] · ':''}{query?'搜索 '+safeText(query)+' · ':''}{focus==='activity'?'ACTIVITY':'TASKS'} · {activities.length} 项 · ? 帮助</Text>
        {page.length?page.map(entry):<Text dimColor>暂无操作记录</Text>}
      </>}
    </Box>
@@ -190,7 +208,11 @@ export function App(){
        <Text bold={focus==='tasks'&&taskCursor===i} color={focus==='tasks'&&taskCursor===i?'cyan':'white'}>
          {focus==='tasks'&&taskCursor===i?'> ':'  '}{safeText(task.title,Math.max(16,w-20))}
        </Text>
-       <Text color="gray">{duration(tick-task.start)} {'[x]'}</Text>
+       <Text color="gray">{task.kind==='transfer' && 'totalBytes' in task && task.totalBytes>0?
+         '['+'#'.repeat(Math.max(0,Math.min(10,Math.round(task.bytes/task.totalBytes*10))))+
+         '-'.repeat(Math.max(0,10-Math.min(10,Math.round(task.bytes/task.totalBytes*10))))+
+         '] '+Math.round(task.bytes/task.totalBytes*100)+'%':
+         duration(tick-task.start)} {'[x]'}</Text>
      </Box>)}
      {omitted>0?<Text color="gray">{'  ... 另外 '+omitted+' 个任务 · Enter 展开'}</Text>:null}
    </Box>:null}
@@ -204,10 +226,10 @@ export function App(){
    </Box>
  </Box>;
 }
-export async function showTui(){
+export async function showTui(demoScenario?:DemoScenario){
  if(process.stdout.isTTY)process.stdout.write('\x1b[?1049h');
  try{
-   const app=render(<App/>);
+   const app=render(demoScenario?<App demoScenario={demoScenario}/>:<App/>);
    await app.waitUntilExit();
  }finally{
    if(process.stdout.isTTY)process.stdout.write('\x1b[?1049l');

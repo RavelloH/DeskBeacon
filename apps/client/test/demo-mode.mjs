@@ -1,0 +1,40 @@
+import assert from 'node:assert/strict';
+import {createDemoStatus,advanceDemo,demoScenarios,demoHelp} from '../dist/demo.js';
+import {actionLabel,argumentLines,resultLines} from '../dist/presenter.js';
+
+for(const scenario of demoScenarios){
+ const s=createDemoStatus(scenario,1720000000000);
+ assert.equal(s.runtimeMode,'demo');
+ assert.equal(s.deviceId,'demo-offline-device');
+ assert.ok(s.activity.length>=5);
+ assert.ok(s.operationsTotal>=s.activity.length);
+}
+const now=1720000000000;
+const base=createDemoStatus('connected',now);
+assert.equal(base.state,'connected');
+assert.equal(advanceDemo(base,'2',now).state,'connecting');
+assert.equal(advanceDemo(base,'3',now).state,'disconnected');
+assert.equal(advanceDemo(base,'1',now).latencyMs,52);
+const failure=advanceDemo(base,'4',now);
+assert.equal(failure.activity[0].status,'failed');
+assert.match(actionLabel(failure.activity[0]),/失败/);
+const ongoing=advanceDemo(base,'5',now);
+assert.equal(ongoing.activity[0].status,'running');
+assert.match(actionLabel(ongoing.activity[0]),/中/);
+const success=advanceDemo(base,'6',now);
+assert.equal(success.activity[0].status,'completed');
+assert.match(argumentLines(success.activity[0]).join(' '),/pnpm/);
+assert.ok(resultLines(success.activity[0]).length>0);
+const few=advanceDemo(base,'7',now);
+const many=advanceDemo(few,'7',now);
+const none=advanceDemo(many,'7',now);
+assert.equal(few.active.length,2);
+assert.equal(many.active.length,9);
+assert.equal(none.active.length,0);
+const transfer=advanceDemo(base,'8',now);
+const progressed=advanceDemo(transfer,'8',now);
+assert.ok(progressed.transfers[0].bytes>transfer.transfers[0].bytes);
+assert.equal(advanceDemo(many,'0',now).active.length,0);
+assert.notDeepEqual(advanceDemo(base,'9',now).cpuPercent,base.cpuPercent);
+assert.ok(demoHelp.length>=5);
+console.log('PASS offline development scenario fixtures, transitions, localized presentation and transfer progress');
