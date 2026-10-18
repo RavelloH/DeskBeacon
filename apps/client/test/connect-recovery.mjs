@@ -14,9 +14,12 @@ const daemon=new ClientDaemon(config);
 try{
  await daemon.connect();
  assert.match((await daemon.status()).state,/^error:/);
- const deadline=Date.now()+6000;
- while(attempts<2&&Date.now()<deadline)await new Promise(r=>setTimeout(r,100));
- assert.ok(attempts>=2,'refresh errors must schedule reconnect without manual restart');
+ const deadline=Date.now()+5200;
+ while(attempts<3&&Date.now()<deadline)await new Promise(r=>setTimeout(r,100));
+ assert.ok(attempts>=3,'failed refresh should retry every second, with no exponential backoff');
+ const recent=daemon.db.prepare("SELECT detail FROM connection_events WHERE kind='reconnect_scheduled' ORDER BY id DESC LIMIT 3").all();
+ assert.ok(recent.length>=2&&recent.every(e=>e.detail==='delayMs=1000'),'all retries must use a fixed one-second interval');
+ console.log('PASS fixed 1s reconnect retries and persisted connection event diagnostics');
  assert.match((await daemon.status()).state,/^error:/);
  console.log('PASS client automatically retries failed OAuth refresh after temporary disconnection');
  const ports=await daemon.execute('net_ports',{protocol:'tcp',state:'listen',limit:1},'local-netports-test','test-agent');

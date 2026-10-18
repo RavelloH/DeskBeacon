@@ -51,7 +51,7 @@ export class ClientDaemon extends EventEmitter {
   private handshakeTimer:NodeJS.Timeout|undefined;
   private reconnectTimer:NodeJS.Timeout|undefined;
   private connecting=false;
-  private reconnectDelayMs=1500;
+  private readonly reconnectIntervalMs=1_000;
   private readonly startedAt=Date.now();
   private activityRevision=0;
   private heartbeatSentAt=0;
@@ -98,6 +98,7 @@ export class ClientDaemon extends EventEmitter {
     mkdirSync(dataDir,{recursive:true});
     this.db=new DatabaseSync(join(dataDir,'state.sqlite'));
     this.db.exec('PRAGMA journal_mode=WAL');
+    this.db.exec('CREATE TABLE IF NOT EXISTS connection_events (id INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL, kind TEXT NOT NULL, detail TEXT NOT NULL)');
     this.db.exec('CREATE TABLE IF NOT EXISTS activity (id TEXT PRIMARY KEY, grant_id TEXT, tool TEXT, description TEXT, status TEXT, time INTEGER, result TEXT)');
     for(const column of ['request_json TEXT','finished_at INTEGER','duration_ms INTEGER','cwd TEXT','actor_name TEXT']){
       try{this.db.exec('ALTER TABLE activity ADD COLUMN '+column);}catch{}
@@ -138,10 +139,16 @@ export class ClientDaemon extends EventEmitter {
   activityList(options:ActivityPageOptions={}){
     return activityPage(this.db,options);
   }
+  private recordConnection(kind:string,detail=''){
+    if(this.stopped)return;
+    this.db.prepare('INSERT INTO connection_events(time,kind,detail) VALUES(?,?,?)').run(Date.now(),kind,detail.slice(0,160));
+    this.db.exec('DELETE FROM connection_events WHERE id NOT IN (SELECT id FROM connection_events ORDER BY id DESC LIMIT 250)');
+  }
   private scheduleReconnect(){
     if(this.stopped||this.reconnectTimer)return;
-    const delay=this.reconnectDelayMs;
-    this.reconnectDelayMs=Math.min(this.reconnectDelayMs*2,30_000);
+    // Single-user device: retry at a fixed, short interval instead of exponential backoff.
+    const delay=this.reconnectIntervalMs;
+    this.recordConnection('reconnect_scheduled','delayMs='+delay);
     this.reconnectTimer=setTimeout(()=>{
       this.reconnectTimer=undefined;
       void this.connect();
@@ -149,12 +156,14 @@ export class ClientDaemon extends EventEmitter {
     this.reconnectTimer.unref();
   }
   async connect(){
-    if(this.stopped||this.connecting||this.ws?.readyState===WebSocket.OPEN)return;
+    if(this.stopped||this.connecting||this.ws?.readyState===WebSocket.OPEN||this.ws?.readyState===WebSocket.CONNECTING)return;
     this.connecting=true;
+    this.recordConnection('connecting');
     this.state='connecting';this.emit('change');
     try{await this.refreshAccessToken();}catch(e){
       this.connecting=false;
       this.state='error: '+err(e);this.emit('change');
+      this.recordConnection('token_refresh_failed',err(e));
       console.error('DeskBeacon token refresh:',err(e));
       this.scheduleReconnect();
       return;
@@ -167,11 +176,13 @@ export class ClientDaemon extends EventEmitter {
     this.handshakeTimer=setTimeout(()=>{
       if(this.ws===socket&&!this.ready){
         this.state='error: device handshake timeout';
+        this.recordConnection('handshake_timeout','elapsedMs=10000');
         socket.terminate();
       }
-    },15_000);
+    },10_000);
     this.handshakeTimer.unref();
     socket.on('open',()=>{
+      this.recordConnection('websocket_open');
       this.state='connected';this.emit('change');
       // Cloudflare DO replies using WebSocket auto-response without waking its handler.
       const heartbeat=()=>{
@@ -179,6 +190,7 @@ export class ClientDaemon extends EventEmitter {
         if(this.heartbeatAwaiting){
           this.heartbeatMisses++;
           if(this.heartbeatMisses>=3){
+            this.recordConnection('heartbeat_timeout','misses='+this.heartbeatMisses);
             this.state='disconnected';socket.terminate();return;
           }
         }
@@ -186,7 +198,8 @@ export class ClientDaemon extends EventEmitter {
         this.heartbeatAwaiting=true;
         socket.send('ping');
       };
-      this.keepaliveTimer=setInterval(heartbeat,60_000);
+      // Keep proxy/NAT idle connections alive and detect silent half-open sockets sooner.
+      this.keepaliveTimer=setInterval(heartbeat,20_000);
       this.keepaliveTimer.unref();
     });
     socket.on('message',raw=>{void this.message(raw.toString()).catch(e=>{console.error('Remote message:',err(e));});});
@@ -194,11 +207,13 @@ export class ClientDaemon extends EventEmitter {
       if(this.ws!==socket)return;
       if(this.handshakeTimer){clearTimeout(this.handshakeTimer);this.handshakeTimer=undefined;}
       if(this.keepaliveTimer){clearInterval(this.keepaliveTimer);this.keepaliveTimer=undefined;}
+      this.recordConnection('websocket_closed','code='+code+' reason='+reason.toString());
       console.error('DeskBeacon WebSocket closed:',code,reason.toString());this.ready=false;this.state='disconnected';
       this.heartbeatAwaiting=false;this.latencyMs=null;this.emit('change');
       if(this.disconnectTimer)clearTimeout(this.disconnectTimer);
       this.disconnectTimer=setTimeout(()=>{
         if(this.ready||this.stopped)return;
+        this.recordConnection('disconnect_grace_expired','foreground cancellation');
         for(const task of this.supervisor.active().filter(x=>x.kind==='foreground')){
           void this.supervisor.stop(task.id).catch(e=>console.error('Disconnected foreground stop:',err(e)));
         }
@@ -206,7 +221,10 @@ export class ClientDaemon extends EventEmitter {
       this.scheduleReconnect();
     });
     socket.on('unexpected-response',(_req,response)=>{if(response.statusCode===401)this.forceRefresh=true;});
-    socket.on('error',e=>{this.state='error: '+err(e);console.error('DeskBeacon WebSocket:',err(e));});
+    socket.on('error',e=>{
+      this.recordConnection('websocket_error',err(e));
+      this.state='error: '+err(e);console.error('DeskBeacon WebSocket:',err(e));
+    });
   }
   stop(){
     if(this.stopped)return;
@@ -276,8 +294,8 @@ export class ClientDaemon extends EventEmitter {
     const m=msg.data;
     if(m.type==='device.ready'){
       this.epoch=m.connectionEpoch;this.ready=true;
+      this.recordConnection('device_ready','epoch='+this.epoch);
       this.state='connected';this.emit('change');
-      this.reconnectDelayMs=1500;
       if(this.handshakeTimer){clearTimeout(this.handshakeTimer);this.handshakeTimer=undefined;}
       if(this.disconnectTimer){clearTimeout(this.disconnectTimer);this.disconnectTimer=undefined;}
       this.send({type:'device.hello',payload:{deviceName:this.config.deviceName,platform:platform(),clientVersion:'0.1.0',protocolVersion:PROTOCOL_VERSION}});

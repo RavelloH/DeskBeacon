@@ -13,8 +13,10 @@ export const LIMITS = {
   operationTtlMs: 24 * 60 * 60 * 1000,
   maxForegroundTimeoutMs: 300_000,
   defaultForegroundTimeoutMs: 120_000,
-  shortDisconnectGraceMs: 5_000,
-  queueTtlMs: 10_000,
+  // Tolerate transient outages while the client retries on its fixed one-second schedule.
+  shortDisconnectGraceMs: 60_000,
+  // A queued command may be behind one foreground call lasting the full 300s maximum.
+  queueTtlMs: 330_000,
 } as const;
 
 export const ERROR_CODES = [

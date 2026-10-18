@@ -237,6 +237,29 @@ try{
  assert.ok(concurrent[0].outputPreview.includes('1111'));assert.ok(concurrent[1].outputPreview.includes('2222'));
  assert.ok(peak<=1,'foreground overlap: '+peak);assert.ok(Date.now()-concurrentStart>=1250,'operations did not serialize');
  console.log('PASS concurrent Agent foreground calls serialize per device; max active='+peak);
+ // A queued foreground request must survive waiting beyond the former 10s deadline.
+ const queuedLong=invoke('exec_foreground',{description:'E2E queue first lasting 11.5s',
+  command:{mode:'program',program:'node',args:['-e','setTimeout(()=>console.log(811811),11500)']},timeoutMs:18000},440);
+ await new Promise(r=>setTimeout(r,350));
+ const queuedBehind=invoke('exec_foreground',{description:'E2E queued successor',
+  command:{mode:'program',program:'node',args:['-e','console.log(822822)']},timeoutMs:7000},441);
+ const [longResult,queuedResult]=await Promise.all([queuedLong,queuedBehind]);
+ assert.ok(longResult.outputPreview.includes('811811'));
+ assert.ok(queuedResult.outputPreview.includes('822822'));
+ console.log('PASS 11.5s queued foreground wait does not time out');
+
+ const inFlightKey='e2e-inflight-'+Date.now();
+ const sameInput={description:'E2E live idempotency reattach',command:{mode:'program',program:'node',
+  args:['-e','setTimeout(()=>console.log(833833),2400)']},timeoutMs:8000,idempotencyKey:inFlightKey};
+ const firstWait=invoke('exec_foreground',sameInput,442);
+ await new Promise(r=>setTimeout(r,650));
+ const secondWait=invoke('exec_foreground',sameInput,443);
+ const [firstReply,secondReply]=await Promise.all([firstWait,secondWait]);
+ assert.equal(firstReply.operationId,secondReply.operationId);
+ assert.ok(firstReply.outputPreview.includes('833833'));
+ assert.ok(secondReply.outputPreview.includes('833833'));
+ console.log('PASS idempotent in-flight request rejoins the original operation');
+
  const idempotentKey='e2e-idempotent-'+Date.now();
  const one=await invoke('exec_foreground',{description:'E2E idempotent foreground',command:{mode:'program',program:'node',args:['-e','console.log(424242)']},timeoutMs:4000,idempotencyKey:idempotentKey},33);
  const two=await invoke('exec_foreground',{description:'E2E idempotent foreground',command:{mode:'program',program:'node',args:['-e','console.log(424242)']},timeoutMs:4000,idempotencyKey:idempotentKey},34);
@@ -259,6 +282,27 @@ try{
  daemon.ws.terminate();
  const recovery=await resumed;
  assert.equal(recovery.data.exitCode,0);assert.ok(recovery.outputPreview.includes('987654'));
+ // Simulate a 7-second outage, longer than the previous 5s grace. The command
+ // must keep running and its original HTTP waiter must survive without replay.
+ const recovering=invoke('exec_foreground',{description:'E2E reconnect after >5s',
+  command:{mode:'program',program:'node',args:['-e','setTimeout(()=>console.log(844844),10500)']},
+  timeoutMs:16000},444);
+ await new Promise(r=>setTimeout(r,700));
+ const originalSchedule=daemon.scheduleReconnect;
+ daemon.scheduleReconnect=()=>{};
+ try{
+  assert.equal(daemon.ws?.readyState,1);
+  daemon.ws.terminate();
+  await new Promise(r=>setTimeout(r,6700));
+ }finally{
+  daemon.scheduleReconnect=originalSchedule;
+  await daemon.connect();
+ }
+ const resultAfterOutage=await recovering;
+ assert.equal(resultAfterOutage.data.exitCode,0);
+ assert.ok(resultAfterOutage.outputPreview.includes('844844'));
+ console.log('PASS active foreground result survives >5s disconnect and reconnect');
+
  console.log('PASS foreground MCP synchronous wait survives short WebSocket disconnect and reconnect');
  await new Promise(r=>setTimeout(r,300));
  const unacked=daemon.db.prepare('SELECT COUNT(*) AS n FROM unacked_results').get();

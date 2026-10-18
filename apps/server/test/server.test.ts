@@ -1,7 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { TOOL_NAMES, toolInputSchemas } from '@deskbeacon/protocol';
-const wrangler=JSON.parse(readFileSync(new URL('../wrangler.jsonc', import.meta.url),'utf8'));
+import ts from 'typescript';
+const parsed=ts.parseConfigFileTextToJson('wrangler.jsonc',readFileSync(new URL('../wrangler.jsonc',import.meta.url),'utf8'));
+if(parsed.error)throw Error(ts.flattenDiagnosticMessageText(parsed.error.messageText,'\n'));
+const wrangler=parsed.config;
 describe('Server static contract',()=>{
  it('declares only OAuth KV and per-device Durable Object bindings',()=>{
   expect(wrangler.kv_namespaces).toHaveLength(1);

@@ -2,7 +2,7 @@
 import { LIMITS, PROTOCOL_VERSION, ProtocolMessageSchema, type ProtocolMessage } from "@deskbeacon/protocol";
 import type { Env } from "./env.js";
 
-type Waiter = { resolve: (value: Record<string, unknown>) => void; timer: ReturnType<typeof setTimeout>; disconnectTimer?: ReturnType<typeof setTimeout> };
+type Waiter = { resolve: (value: Record<string, unknown>) => void; subscribers: Set<(value: Record<string, unknown>) => void>; timer: ReturnType<typeof setTimeout>; disconnectTimer?: ReturnType<typeof setTimeout> };
 type Rpc = { name: string; input: Record<string, unknown>; grantId: string; actorName?: string; operationId: string };
 type Row = Record<string, any>;
 const FG = new Set(["exec_foreground"]);
@@ -29,15 +29,33 @@ export class DeviceSession extends DurableObject<Env> {
     try{ctx.storage.sql.exec("ALTER TABLE ops ADD COLUMN request_hash TEXT");}catch{}
     ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS fg_queue(id TEXT PRIMARY KEY,grant_id TEXT NOT NULL,enqueued INTEGER NOT NULL,deadline INTEGER NOT NULL,status TEXT NOT NULL)");
     ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS fg_queue_deadline ON fg_queue(deadline)");
+    // Memory-only pending HTTP promises cannot survive a DO reconstruction.
+    // Preserve the audit record as unknown, but never redispatch those side effects.
+    ctx.storage.sql.exec("UPDATE fg_queue SET status='unknown' WHERE status IN ('queued','dispatched')");
+    ctx.storage.sql.exec("DELETE FROM fg_queue WHERE deadline<?",Date.now()-LIMITS.operationTtlMs);
     try{ctx.storage.sql.exec("ALTER TABLE ops ADD COLUMN history_evicted INTEGER DEFAULT 0");}catch{}
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping","pong"));
   }
 
   private currentSocket(): WebSocket | null {
-    return this.ctx.getWebSockets().find(ws => ws.readyState === WebSocket.OPEN) ?? null;
+    // A previous epoch may still briefly report OPEN while being replaced.
+    const epoch=this.epoch();
+    return this.ctx.getWebSockets().find(ws =>
+      ws.readyState===WebSocket.OPEN &&
+      (ws.deserializeAttachment() as {epoch?:number}|null)?.epoch===epoch)??null;
   }
   private epoch(): number {
     return Number((this.ctx.storage.sql.exec("SELECT value FROM state WHERE key='epoch'").toArray()[0] as Row | undefined)?.value ?? 0);
+  }
+  /** Keep queued operations waiting through a short connection loss, without redispatching any work. */
+  private async waitForSocket(maxWaitMs:number):Promise<WebSocket|null>{
+    const until=Date.now()+Math.max(0,maxWaitMs);
+    let socket=this.currentSocket();
+    while(!socket&&Date.now()<until){
+      await new Promise(resolve=>setTimeout(resolve,Math.min(250,until-Date.now())));
+      socket=this.currentSocket();
+    }
+    return socket;
   }
   private lookup(id: string): Row | undefined {
     return this.ctx.storage.sql.exec("SELECT * FROM ops WHERE id=?", id).toArray()[0] as Row | undefined;
@@ -93,6 +111,11 @@ export class DeviceSession extends DurableObject<Env> {
         return json(failure("INVALID_INPUT","Invalid RPC message"),400);
       if(HISTORY.has(body.name)) return json(this.readHistory(body));
       if(FG.has(body.name)) {
+        // A caller with the same idempotency key can rejoin an existing operation
+        // without waiting behind the command queue or replaying side effects.
+        const key=typeof body.input.idempotencyKey==="string" ? body.grantId+":"+body.input.idempotencyKey : null;
+        if(key && this.ctx.storage.sql.exec("SELECT 1 FROM ops WHERE idem=?",key).toArray().length)
+          return json(await this.dispatch(body));
         if(!this.currentSocket())return json(failure("DEVICE_OFFLINE","Device has no active WebSocket",body.operationId));
         const now=Date.now(), deadline=now+LIMITS.queueTtlMs;
         // This queue is for *live synchronous* MCP calls. On DO restart abandoned queue records
@@ -111,7 +134,10 @@ export class DeviceSession extends DurableObject<Env> {
             this.ctx.storage.sql.exec("UPDATE fg_queue SET status='timedout' WHERE id=?",body.operationId);
             return json(failure("QUEUE_TIMEOUT","Foreground queue timeout. Operation was never dispatched",body.operationId));
           }
-          if(!this.currentSocket())return json(failure("DEVICE_OFFLINE","Device went offline before dispatch",body.operationId));
+          // The device may have disconnected while this request waited behind a long command.
+          // Wait for the same connection to recover, but never execute more than once.
+          const socket=await this.waitForSocket(Math.min(LIMITS.shortDisconnectGraceMs,Math.max(0,deadline-Date.now())));
+          if(!socket)return json(failure("DEVICE_OFFLINE","Device did not reconnect before the queue's dispatch deadline",body.operationId));
           this.ctx.storage.sql.exec("UPDATE fg_queue SET status='dispatched' WHERE id=?",body.operationId);
           return json(await this.dispatch(body));
         } finally {
@@ -169,9 +195,16 @@ export class DeviceSession extends DurableObject<Env> {
     if(existingKey) {
       const prev=this.ctx.storage.sql.exec("SELECT id,status,result,request_hash FROM ops WHERE idem=?",existingKey).toArray()[0] as Row|undefined;
       if(prev && prev.request_hash!==requestHash) return failure("DUPLICATE_OPERATION","Idempotency key already used with different tool parameters",prev.id);
-      if(prev) return prev.result && prev.status==="completed"
-        ? {operationId:prev.id,...JSON.parse(prev.result)}
-        : failure("OPERATION_UNKNOWN","Idempotent operation is still active or its final state is uncertain",prev.id);
+      if(prev){
+        if(prev.result && ["completed","failed","cancelled"].includes(prev.status))
+          return {operationId:prev.id,...JSON.parse(prev.result)};
+        const waiter=this.waiters.get(prev.id);
+        if(waiter){
+          // Rejoin the same in-flight operation; never dispatch the command again.
+          return await new Promise<Record<string,unknown>>(resolve=>waiter.subscribers.add(resolve));
+        }
+        return failure("OPERATION_UNKNOWN","Idempotent operation has no live waiter; inspect operation history before retry",prev.id);
+      }
     }
     if(!this.currentSocket()) return failure("DEVICE_OFFLINE","Device has no active WebSocket",body.operationId);
     const opId=body.operationId;
@@ -184,15 +217,21 @@ export class DeviceSession extends DurableObject<Env> {
     const epoch=(socket.deserializeAttachment() as {epoch?:number}|null)?.epoch??this.epoch();
     const response=new Promise<Record<string,unknown>>(resolve=>{
       const timer=setTimeout(()=>{
+        const expired=this.waiters.get(opId);
         this.waiters.delete(opId);
         this.ctx.storage.sql.exec("UPDATE ops SET status='unknown' WHERE id=? AND status NOT IN ('completed','failed')",opId);
-        if(isFg && socket.readyState===WebSocket.OPEN) socket.send(JSON.stringify({
-          version:PROTOCOL_VERSION,type:"foreground.cancel",messageId:crypto.randomUUID(),
-          deviceId:"self",connectionEpoch:epoch,operationId:opId,payload:{reason:"server timeout"}
-        }));
-        resolve(failure("OPERATION_TIMEOUT","Operation deadline exceeded; execution state may be unknown",opId));
+        const cancelSocket=this.currentSocket();
+        if(isFg && cancelSocket){
+          try{cancelSocket.send(JSON.stringify({
+            version:PROTOCOL_VERSION,type:"foreground.cancel",messageId:crypto.randomUUID(),
+            deviceId:"self",connectionEpoch:this.epoch(),operationId:opId,payload:{reason:"server timeout"}
+          }));}catch{}
+        }
+        const value=failure("OPERATION_TIMEOUT","Operation deadline exceeded; execution state may be unknown",opId);
+        for(const subscriber of expired?.subscribers??[])subscriber(value);
+        resolve(value);
       },timeout+5_000);
-      this.waiters.set(opId,{resolve,timer});
+      this.waiters.set(opId,{resolve,timer,subscribers:new Set()});
     });
     try {
       socket.send(JSON.stringify({version:PROTOCOL_VERSION,type:"operation.dispatch",messageId:crypto.randomUUID(),
@@ -213,7 +252,14 @@ export class DeviceSession extends DurableObject<Env> {
     const persist=fg ? result : (status==="completed"?{status:"completed"}:result);
     this.saveStatus(id,status,persist);
     const waiter=this.waiters.get(id);
-    if(waiter){clearTimeout(waiter.timer);if(waiter.disconnectTimer)clearTimeout(waiter.disconnectTimer);this.waiters.delete(id);waiter.resolve({operationId:id,...result});}
+    if(waiter){
+      clearTimeout(waiter.timer);
+      if(waiter.disconnectTimer)clearTimeout(waiter.disconnectTimer);
+      this.waiters.delete(id);
+      const value={operationId:id,...result};
+      waiter.resolve(value);
+      for(const subscriber of waiter.subscribers)subscriber(value);
+    }
     void this.scheduleRetention();
   }
 
