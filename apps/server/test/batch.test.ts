@@ -8,10 +8,10 @@ function parse(stages:unknown,maxResultBytes?:number){
    stages,...(maxResultBytes?{maxResultBytes}:{})});
 }
 describe('General-purpose MCP batch',()=>{
- it('exposes a genuine batch tool while keeping exec_batch as compatibility entry',()=>{
+ it('exposes only the universal batch tool alongside foreground commands',()=>{
    expect(TOOL_NAMES).toContain('batch');
    expect(TOOL_NAMES).toContain('exec_foreground');
-   expect(TOOL_NAMES).toContain('exec_batch');
+   expect(TOOL_NAMES).not.toContain('exec_batch');
  });
  it('disallows recursive batches, duplicate IDs and unsafe parallel mutation',()=>{
    const stage=(calls:any[],parallel=false)=>[{parallel,calls}];

@@ -5,7 +5,7 @@ import type { Env } from "./env.js";
 type Waiter = { resolve: (value: Record<string, unknown>) => void; timer: ReturnType<typeof setTimeout>; disconnectTimer?: ReturnType<typeof setTimeout> };
 type Rpc = { name: string; input: Record<string, unknown>; grantId: string; actorName?: string; operationId: string };
 type Row = Record<string, any>;
-const FG = new Set(["exec_foreground", "exec_batch"]);
+const FG = new Set(["exec_foreground"]);
 const HISTORY = new Set(["operation_get", "operation_output"]);
 
 function failure(code: string, message: string, operationId?: string): Record<string, unknown> {

@@ -46,7 +46,7 @@ No OAuth, server, WebSocket, IPC or command execution is involved. All data is s
 
 Improvements prompted by inspection:
 - Return actionable recovery advice on DEVICE_OFFLINE rather than exposing only an opaque failure.
-- Write descriptions for all 34 MCP tools, especially command versus background, workspace cwd semantics, paging, and transfer limits.
+- Write descriptions for the MCP tool catalog, especially command versus background, workspace cwd semantics, paging, and transfer limits.
 - Keep UI demo completely isolated from production credentials.
 - Fix the transfer presentation to use the task's actual start time and show a bounded progress percentage.
 
@@ -55,7 +55,7 @@ Next device-online dogfood exercise (do not operate on repository production fil
 
 ## 2026-10-18 — Real Agent work session
 
-Connected through the actual ChatGPT DeskBeacon tools and worked in an isolated Node.js test project in the ignored `.test-data` directory, not via Remote Commander. Verified `fs_manage`, `fs_write`, `workspace_open`, `fs_grep`, `fs_stat`, compare-and-swap `fs_edit`, a deliberately failing test, a corrected implementation, and parallel `exec_batch` producing three passing tests. A background local HTTP server was launched through `exec_background`; logs were inspected with `background_output`, localhost JSON was retrieved through `http_request`, and stdin was written with `background_input`.
+Connected through the actual ChatGPT DeskBeacon tools and worked in an isolated Node.js test project in the ignored `.test-data` directory, not via Remote Commander. Verified `fs_manage`, `fs_write`, `workspace_open`, `fs_grep`, `fs_stat`, compare-and-swap `fs_edit`, a deliberately failing test, a corrected implementation, and parallel legacy command-batch execution producing three passing tests (subsequently removed). A background local HTTP server was launched through `exec_background`; logs were inspected with `background_output`, localhost JSON was retrieved through `http_request`, and stdin was written with `background_input`.
 
 Agent UX friction verified: failed TCP probes surfaced as an opaque tool error instead of a negative network result. Fixed TCP/TLS probes to return `connected:false` with `errorCode`, `errorMessage`, and timing. `background_output.maxLines` was ignored by the daemon dispatcher; fixed forwarding and exposed `nextCursor` or per-stream `nextOffsets`. Also confirmed that sending an application-level `quit` command can close its TCP listening socket without exiting the process if it retains a stdin listener; this is not a supervisor state bug. Use EOF or explicit stop, and do not infer process exit from port closure.
 

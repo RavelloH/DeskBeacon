@@ -14,6 +14,23 @@ DeskBeacon 是一个开源、自托管的远程设备 MCP 服务，让 AI Agent 
 - **本地终端界面**：查看 Agent 操作历史、命令输出与后台任务，必要时手动停止运行中的任务。
 - **多设备与 OAuth 授权**：使用自己的 Cloudflare 服务连接多台设备，并分别授权 Agent 和设备。
 
+## MCP 工具
+
+DeskBeacon 当前提供 **35 个 MCP 工具**，按功能划分如下。完整参数和输入 Schema 可通过 MCP `tools/list` 获取。
+
+| 类别 | MCP 工具 |
+| --- | --- |
+| 设备与工作区 | `device_list`、`device_info`、`workspace_open`、`workspace_info`、`workspace_cd` |
+| 文件与归档 | `fs_list`、`fs_stat`、`fs_read`、`fs_read_many`、`fs_find`、`fs_grep`、`fs_write`、`fs_edit`、`fs_manage`、`fs_archive` |
+| 命令与批处理 | `exec_foreground`、`batch`、`exec_background` |
+| 后台任务 | `background_list`、`background_get`、`background_output`、`background_input`、`background_stop` |
+| 操作历史 | `operation_get`、`operation_output` |
+| 文件传输 | `transfer_upload`、`transfer_download`、`transfer_status`、`transfer_cancel` |
+| 网络诊断 | `net_ports`、`net_probe`、`http_request` |
+| 系统观测 | `system_snapshot`、`system_processes`、`screen_capture` |
+
+`batch` 支持在同一设备上组合多个工具：最多 6 个阶段、每阶段 6 次调用、总计最多 16 次调用；阶段顺序执行，只读工具可在同一阶段并行（最多 4 次同时进行）。写入和执行命令须使用串行阶段。批处理不会自动回滚，也不支持跨设备操作或自动传递上一步的输出。
+
 ## 部署
 
 ### 准备工作

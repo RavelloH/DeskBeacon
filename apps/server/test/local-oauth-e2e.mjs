@@ -95,6 +95,8 @@ try{
  r=await mcp(agent.access_token,'tools/list',{},2);
  console.log('tools/list',r.status,r.raw.slice(0,200));assert.equal(r.status,200);
  assert.ok(r.raw.includes('exec_foreground'));
+ assert.ok(r.raw.includes('"name":"batch"'));
+ assert.ok(!r.raw.includes('"name":"exec_batch"'),'Removed legacy tool must not be exposed');
  r=await mcp(agent.access_token,'tools/call',{name:'device_info',arguments:{deviceId:device.clientId}},3);
  console.log('device_info',r.status,r.raw.slice(0,650));assert.equal(r.status,200);
  assert.ok(r.raw.includes('E2E test device'));
@@ -156,8 +158,6 @@ try{
  const dataBase64=Buffer.from('Agent->Desk test file','utf8').toString('base64');
  const upload=await invoke('transfer_upload',{description:'E2E upload',targetPath:'E:/DeskBeacon/.test-data/agent-file.txt',dataBase64,overwrite:true},10);assert.equal(upload.data.status,'completed');
  const download=await invoke('transfer_download',{description:'E2E download',sourcePath:'E:/DeskBeacon/.test-data/agent-file.txt',maxBytes:1024},11);assert.equal(Buffer.from(download.data.dataBase64,'base64').toString(),'Agent->Desk test file');console.log('PASS inline upload and download');
- const batch=await invoke('exec_batch',{description:'E2E multi-command batch',timeoutMs:15000,stages:[{parallel:true,commands:[{commandId:'a',mode:'program',program:'node',args:['-e','console.log(101)']},{commandId:'b',mode:'program',program:'node',args:['-e','console.log(202)']}]}]},12);
- assert.equal(batch.data.exitCode,0);assert.equal(batch.data.stages[0].results.length,2);console.log('PASS exec_batch parallel stage');
  const task=await invoke('exec_background',{description:'E2E background process',command:{mode:'program',program:'node',args:['-e','console.log(303);setInterval(()=>{},1000)']}},13);
  assert.ok(task.data.backgroundTaskId);console.log('PASS exec_background');
  await new Promise(r=>setTimeout(r,350));

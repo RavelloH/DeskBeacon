@@ -14,7 +14,7 @@ const verbs:Record<string,[string,string]>={
  fs_grep:['搜索内容中','搜索了内容'],fs_write:['写入文件中','写入了文件'],
  fs_edit:['编辑文件中','编辑了文件'],fs_manage:['管理文件中','管理了文件'],
  fs_archive:['处理归档中','处理了归档'],
- exec_foreground:['执行命令中','执行了命令'],exec_batch:['执行批量命令中','执行了批量命令'],
+ exec_foreground:['执行命令中','执行了命令'],
  exec_background:['启动后台任务中','启动了后台任务'],
  background_list:['查询后台任务中','查询了后台任务'],background_get:['检查后台任务中','检查了后台任务'],
  background_output:['读取任务输出中','读取了任务输出'],
@@ -52,11 +52,10 @@ export function argumentLines(a:ActivityEntry):string[]{
  const lines:string[]=[];
  if(dir)lines.push(dir);
  if(a.tool.startsWith('exec_')){
-   const c=a.tool==='exec_batch'?i.stages?.[0]?.commands?.[0]:command;
+   const c=command;
    if(c){const program=c.program||c.script||c.command||'';
      const text=[program,...(Array.isArray(c.args)?c.args:[])].map((v:any)=>safeText(String(v),250)).join(' ');
      if(text)lines.push(text);}
-   if(a.tool==='exec_batch')lines.push(String(i.stages?.length??0)+' 个执行阶段');
  }else if(a.tool==='fs_grep'||a.tool==='fs_find'){
    if(i.pattern)lines.push('搜索: '+safeText(String(i.pattern)));
  }else if(a.tool==='http_request')lines.push(String(i.method??'GET')+' '+safeText(String(i.url??'')));

@@ -9,17 +9,16 @@ const testDir=mkdtempSync(join(tmpdir(),'deskbeacon-supervisor-'));
 const db=new DatabaseSync(join(testDir,'state.sqlite'));
 const manager=new TaskSupervisor(db,join(testDir,'output'));
 try{
- const id='test-batch-stop';
- const command=(name)=>({commandId:name,mode:'program',program:'node',args:['-e','setInterval(()=>{},1000)']});
- const pending=manager.batch(id,'Cancellation regression',[{parallel:true,commands:[command('a'),command('b')]},
-  {parallel:false,commands:[{commandId:'never',mode:'program',program:'node',args:['-e','console.log("SHOULD NOT RUN")']}]}],15000);
+ const id='test-foreground-stop';
+ const pending=manager.foreground(id,'Cancellation regression',
+  {mode:'program',program:'node',args:['-e','setInterval(()=>{},1000)']},15000);
  await new Promise(resolve=>setTimeout(resolve,450));
  const cancelled=await manager.stop(id);
- assert.equal(cancelled.processesSignalled,2);
- const result=await Promise.race([pending,new Promise((_,reject)=>setTimeout(()=>reject(Error('Batch did not stop')),8000))]);
- assert.equal(result.stages.length,1,'Cancelled batch must not run later stage');
- assert.equal(manager.active().length,0,'All foreground child tasks must be reaped');
- console.log('PASS Batch cancel cascades to two subprocesses; no later stage');
+ assert.equal(cancelled.processesSignalled,1);
+ const result=await Promise.race([pending,new Promise((_,reject)=>setTimeout(()=>reject(Error('Foreground did not stop')),8000))]);
+ assert.equal(result.cancelled,true,'Stopped command must report cancellation');
+ assert.equal(manager.active().length,0,'Foreground process must be reaped');
+ console.log('PASS Foreground cancellation reaps managed process');
  const started=Date.now();
  const timedOut=await manager.foreground('test-timeout','Finite foreground timeout',
   {mode:'program',program:'node',args:['-e','setInterval(()=>{},1000)']},350);

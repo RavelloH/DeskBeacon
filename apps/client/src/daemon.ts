@@ -323,7 +323,7 @@ export class ClientDaemon extends EventEmitter {
     }
   }
   private async final(id:string,tool:string,result:any){
-    if(tool==='exec_foreground'||tool==='exec_batch'){
+    if(tool==='exec_foreground'){
       const stdout=String(result.stdout??''),stderr=String(result.stderr??'');
       const stdoutBytes=Buffer.byteLength(stdout),stderrBytes=Buffer.byteLength(stderr);
       if(stdoutBytes+stderrBytes>LIMITS.operationOutputBytes){
@@ -382,12 +382,6 @@ export class ClientDaemon extends EventEmitter {
     if(tool==='exec_foreground'){
       const command={...input.command,cwd:input.command.cwd??workspace??process.cwd(),shellProfile:input.command.shellProfile??profile};
       return await this.supervisor.foreground(operationId,input.description,command,input.timeoutMs);
-    }
-    if(tool==='exec_batch'){
-      const stages=input.stages.map((s:any)=>({...s,commands:s.commands.map((c:any)=>({
-        ...c,cwd:c.cwd??input.cwd??workspace??process.cwd(),shellProfile:c.shellProfile??profile
-      }))}));
-      return await this.supervisor.batch(operationId,input.description,stages,input.timeoutMs);
     }
     if(tool==='exec_background'){
       const cmd={...input.command,cwd:input.command.cwd??workspace??process.cwd(),shellProfile:input.command.shellProfile??profile};

@@ -9,8 +9,8 @@ import {
 } from '../src/index.js';
 
 describe('protocol schemas', () => {
-  it('registers the 36 MCP tools including universal batch', () => {
-    expect(Object.keys(toolInputSchemas)).toHaveLength(36);
+  it('registers the 35 MCP tools with only universal batch', () => {
+    expect(Object.keys(toolInputSchemas)).toHaveLength(35);
   });
 
   it('round-trips a versioned operation dispatch message', () => {

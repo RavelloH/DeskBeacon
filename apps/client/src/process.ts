@@ -65,27 +65,6 @@ export class TaskSupervisor{
    try{return await this.runProcess(id,description,command,Math.max(1,deadlineMs),true);}
    finally{this.fgActive=false;this.cancelled.delete(id);}
  }
- async batch(id:string,description:string,stages:Input[],deadlineMs:number){
-   const began=Date.now();
-   while(this.fgActive){if(Date.now()-began>10_000)throw Error('FOREGROUND_BUSY');await new Promise(r=>setTimeout(r,50));}
-   this.fgActive=true;
-   const stagesResult:any[]=[];
-   try{
-     for(let i=0;i<stages.length;i++){
-       if(this.cancelled.has(id))break;
-       const stage=stages[i]!;
-       const run=async(c:Input,j:number)=>this.runProcess(id+':'+i+':'+j,description+' / '+c.commandId,c,Math.max(1,deadlineMs-(Date.now()-began)),true);
-       const results=stage.parallel?await Promise.all(stage.commands.map(run)):
-         await stage.commands.reduce(async(p:Promise<any[]>,c:Input,j:number)=>[...await p,await run(c,j)],Promise.resolve([]));
-       stagesResult.push({index:i,results});
-       if(this.cancelled.has(id)||results.some((x:any)=>x.exitCode!==0||x.timedOut||x.outputLimit||x.cancelled))break;
-     }
-     return {stages:stagesResult,exitCode:stagesResult.flatMap(x=>x.results).some(x=>x.exitCode!==0)?1:0,
-       durationMs:Date.now()-began,
-       stdout:stagesResult.flatMap(x=>x.results.map((r:any)=>r.stdout)).join('\n'),
-       stderr:stagesResult.flatMap(x=>x.results.map((r:any)=>r.stderr)).join('\n')};
-   }finally{this.fgActive=false;this.cancelled.delete(id);}
- }
  async runProcess(id:string,description:string,c:Input,timeoutMs:number,fg:boolean){
    const p=shellPlan(c);let child:ChildProcessWithoutNullStreams;
    const jobManaged=process.platform==='win32';

@@ -15,9 +15,6 @@ export const LIMITS = {
   defaultForegroundTimeoutMs: 120_000,
   shortDisconnectGraceMs: 5_000,
   queueTtlMs: 10_000,
-  maxBatchStages: 16,
-  maxBatchCommands: 64,
-  maxParallelCommands: 8,
 } as const;
 
 export const ERROR_CODES = [
