@@ -69,7 +69,7 @@ async function setup(base:string) {
    console.log('DeskBeacon device paired. Device ID: '+client.client_id);
  }finally{callback.close();}
 }
-const pkg={version:'0.1.0'};
+const pkg={version:'0.2.0'};
 const entry=fileURLToPath(import.meta.url);
 async function promptUrl():Promise<string>{
   if(!process.stdin.isTTY)throw Error('Run deskbeacon setup --url https://your-worker.example from a terminal');

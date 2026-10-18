@@ -1,0 +1,23 @@
+{
+  "name": "@deskbeacon/win32-x64",
+  "version": "0.2.0",
+  "description": "Windows x64 native Job Object process supervisor for DeskBeacon",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RavelloH/DeskBeacon.git",
+    "directory": "packages/win32-x64"
+  },
+  "files": [
+    "deskbeacon-job.exe"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

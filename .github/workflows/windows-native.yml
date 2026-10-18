@@ -1,4 +1,4 @@
-name: DeskBeacon Windows native validation
+name: DeskBeacon native C packages / Windows lifecycle
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
     paths:
       - 'apps/client/**'
       - 'apps/server/**'
-      - 'packages/protocol/**'
+      - 'packages/**'
       - '.github/workflows/windows-native.yml'
       - 'package.json'
       - 'pnpm-lock.yaml'
@@ -15,20 +15,17 @@ on:
     paths:
       - 'apps/client/**'
       - 'apps/server/**'
-      - 'packages/protocol/**'
+      - 'packages/**'
       - '.github/workflows/windows-native.yml'
 
 jobs:
-  win-x64:
-    name: Windows x64 / NativeAOT / MCP tests
-    runs-on: windows-latest
+  cross-build:
+    name: LLVM-mingw / x64 + ARM64 / npm pack
+    runs-on: ubuntu-22.04
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '10.0.x'
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -39,30 +36,97 @@ jobs:
       - run: pnpm test
       - run: pnpm check
       - run: pnpm build
-      - name: Build native Windows Job Object supervisor
-        shell: pwsh
-        run: >
-          dotnet publish apps/client/native/win-job/deskbeacon-job.csproj
-          --configuration Release
-          --runtime win-x64
-          --self-contained true
-          --output apps/client/dist/native/win-x64
-          -p:PublishAot=true
-          -p:StripSymbols=true
-      - name: Verify the self-contained native executable
-        run: node apps/client/scripts/verify-native.mjs win-x64
-      - name: Test foreground, IPC, detached children and daemon crash cleanup
-        run: pnpm test:local
-      - name: Stage truly standalone npm package (bundle unpublished protocol)
-        run: node apps/client/scripts/stage-npm.mjs win-x64
-      - name: Pack staged CLI; do not publish
-        shell: pwsh
+      - name: Install pinned LLVM-mingw UCRT cross toolchain
+        shell: bash
         run: |
-          New-Item -Type Directory -Force packed | Out-Null
-          npm pack apps/client/dist/npm --pack-destination packed
-          Get-ChildItem packed
+          set -euo pipefail
+          mkdir -p .toolchains
+          curl --fail --location --retry 5 --retry-all-errors --connect-timeout 20 \
+            -o .toolchains/llvm-mingw.tar.xz \
+            https://github.com/mstorsjo/llvm-mingw/releases/download/20261006/llvm-mingw-20261006-ucrt-ubuntu-22.04-x86_64.tar.xz
+          tar -xf .toolchains/llvm-mingw.tar.xz -C .toolchains
+          echo "LLVM_MINGW_ROOT=$GITHUB_WORKSPACE/.toolchains/llvm-mingw-20261006-ucrt-ubuntu-22.04-x86_64" >> "$GITHUB_ENV"
+      - name: Compile both native C helpers with the same toolchain
+        run: |
+          node apps/client/scripts/build-native.mjs win32-x64
+          node apps/client/scripts/build-native.mjs win32-arm64
+      - name: Stage main package without unpublished protocol dependency
+        run: node apps/client/scripts/stage-npm.mjs
+      - name: Pack all three independently versioned npm packages (no publish)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p packed
+          npm pack ./packages/win32-x64 --pack-destination packed
+          npm pack ./packages/win32-arm64 --pack-destination packed
+          npm pack ./apps/client/dist/npm --pack-destination packed
+          ls -lh packed
       - uses: actions/upload-artifact@v4
         with:
-          name: deskbeacon-windows-native-alpha
+          name: deskbeacon-npm-0.2.0
           path: packed/*.tgz
           retention-days: 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deskbeacon-native-c-binaries
+          path: |
+            packages/win32-x64/deskbeacon-job.exe
+            packages/win32-arm64/deskbeacon-job.exe
+          retention-days: 7
+
+  windows-x64:
+    name: Windows x64 / full lifecycle regression
+    needs: cross-build
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '11.1.3'
+      - uses: actions/download-artifact@v4
+        with:
+          name: deskbeacon-native-c-binaries
+          path: .
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check
+      - run: pnpm build
+      - run: node apps/client/scripts/verify-native.mjs win32-x64
+      - name: Execute all IPC/TUI + Job Object tests against C helper
+        shell: pwsh
+        run: |
+          $env:DESKBEACON_JOB_BINARY = (Resolve-Path packages/win32-x64/deskbeacon-job.exe).Path
+          pnpm test:local
+
+  windows-arm64:
+    name: Windows ARM64 / native execution + Job Object cleanup
+    needs: cross-build
+    runs-on: windows-11-arm
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '11.1.3'
+      - uses: actions/download-artifact@v4
+        with:
+          name: deskbeacon-native-c-binaries
+          path: .
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @deskbeacon/protocol build
+      - run: pnpm --filter deskbeacon build
+      - run: node apps/client/scripts/verify-native.mjs win32-arm64
+      - name: Verify ARM64 process tree and daemon crash cleanup
+        shell: pwsh
+        run: |
+          $env:DESKBEACON_JOB_BINARY = (Resolve-Path packages/win32-arm64/deskbeacon-job.exe).Path
+          node apps/client/test/job-tree.mjs
+          node apps/client/test/job-daemon-crash.mjs

@@ -76,7 +76,7 @@ pnpm exec wrangler deploy
 
 ### 2. 安装并连接设备
 
-在需要远程控制的电脑上安装客户端。**npm 分发包不需要 pnpm、.NET SDK 或源码仓库**；要求 Node.js 24 或更新版本。首个发布版本已针对 Windows x64 验证，Windows ARM64 原生进程监督程序尚未提供。
+在需要远程控制的电脑上安装客户端。**npm 分发包不需要 pnpm、.NET SDK 或源码仓库**；要求 Node.js 24 或更新版本。当前开发版本通过 `@deskbeacon/win32-x64` / `@deskbeacon/win32-arm64` 按平台安装原生辅助程序；npm 上的 0.1.0 仍是旧版一体式 NativeAOT 包。
 
 通过 npm 安装：
 
@@ -96,10 +96,11 @@ pnpm --filter @deskbeacon/protocol build
 pnpm --filter deskbeacon build
 ```
 
-Windows 从源码运行还需要 .NET 10 SDK 与 Visual Studio C++ Build Tools，以生成 NativeAOT 原生进程监督组件：
+Windows 命令执行使用独立的 C / Win32 Job Object 辅助程序，不需要 .NET。Windows x64 与 ARM64 的平台 npm 包通过 `optionalDependencies` 按架构安装。源码构建需要 LLVM-mingw 交叉编译工具链（支持在同一 runner 生成两种架构），或 x64 本机的兼容 MinGW 编译器：
 
 ```bash
 pnpm --filter deskbeacon build:native:win-x64
+# 需要 ARM64 时：pnpm --filter deskbeacon build:native:win-arm64
 node apps/client/dist/index.js setup --url https://your-worker.example
 node apps/client/dist/index.js
 ```

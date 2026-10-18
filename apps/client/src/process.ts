@@ -4,6 +4,7 @@ import spawn from 'cross-spawn';
 import { mkdirSync, createWriteStream, existsSync, openSync, closeSync, readSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import { platform, tmpdir } from 'node:os';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { DatabaseSync } from 'node:sqlite';
@@ -12,7 +13,23 @@ export type Input = Record<string,any>;
 type Running = { proc: ChildProcessWithoutNullStreams; id:string; description:string; since:number; out:string; err:string; jobManaged:boolean };
 const outputLimit=16*1024*1024;
 const backgroundFileLimit=64*1024*1024;
-const jobBinary=join(dirname(fileURLToPath(import.meta.url)),'native',process.arch==='arm64'?'win-arm64':'win-x64','deskbeacon-job.exe');
+const resolveNativeRequire=createRequire(import.meta.url);
+export function resolveWindowsJobBinary(platform=process.platform,arch=process.arch):string{
+ if(platform!=='win32')throw Error('WINDOWS_JOB_HELPER_MISSING: Win32 Job Object helper is Windows-only');
+ const name=arch==='x64'?'@deskbeacon/win32-x64':arch==='arm64'?'@deskbeacon/win32-arm64':null;
+ if(!name)throw Error('WINDOWS_JOB_HELPER_MISSING: Unsupported Windows architecture '+arch);
+ // Tests may use a separate, freshly compiled helper without touching the running Service.
+ if(process.env.DESKBEACON_JOB_BINARY){
+  if(existsSync(process.env.DESKBEACON_JOB_BINARY))return process.env.DESKBEACON_JOB_BINARY;
+  throw Error('WINDOWS_JOB_HELPER_MISSING: Native executable not found at '+process.env.DESKBEACON_JOB_BINARY);
+ }
+ try{
+  const exe=resolveNativeRequire.resolve(name+'/deskbeacon-job.exe');
+  if(existsSync(exe))return exe;
+ }catch{}
+ throw Error('WINDOWS_JOB_HELPER_MISSING: Install the optional native package '+name+
+  ' (check npm install --omit=optional and architecture); refusing uncontained execution');
+}
 function stopTree(proc:ChildProcessWithoutNullStreams,jobManaged=false):Promise<void>{
   return new Promise(resolve=>{
     if(!proc.pid) return resolve();
@@ -73,8 +90,7 @@ export class TaskSupervisor{
  async runProcess(id:string,description:string,c:Input,timeoutMs:number,fg:boolean){
    const p=shellPlan(c);let child:ChildProcessWithoutNullStreams;
    const jobManaged=process.platform==='win32';
-   if(jobManaged&&!existsSync(jobBinary))throw Error('WINDOWS_JOB_HELPER_MISSING: native win-job helper must be bundled; refusing uncontained execution: '+jobBinary);
-   const exe=jobManaged?jobBinary:p.exe;
+   const exe=jobManaged?resolveWindowsJobBinary():p.exe;
    const args=jobManaged?[Buffer.from(JSON.stringify({File:p.exe,Args:p.args,Cwd:p.cwd,ParentPid:process.pid}),'utf8').toString('base64')]:p.args;
    try{child=spawn(exe,args,{cwd:p.cwd,env:{...process.env,...c.env},windowsHide:true,detached:process.platform!=='win32',stdio:'pipe'}) as ChildProcessWithoutNullStreams;}
    catch(e){throw Error('SPAWN_FAILED: '+String(e));}

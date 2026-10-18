@@ -87,6 +87,13 @@ importers:
       typescript:
         specifier: ^6.0.0
         version: 6.0.3
+    optionalDependencies:
+      '@deskbeacon/win32-arm64':
+        specifier: workspace:*
+        version: link:../../packages/win32-arm64
+      '@deskbeacon/win32-x64':
+        specifier: workspace:*
+        version: link:../../packages/win32-x64
 
   apps/server:
     dependencies:
@@ -131,6 +138,10 @@ importers:
       vitest:
         specifier: ^4.1.0
         version: 4.1.12(@types/node@26.6.5)(vite@8.3.4(@types/node@26.6.5)(esbuild@0.28.2))
+
+  packages/win32-arm64: {}
+
+  packages/win32-x64: {}
 
 packages:
 

@@ -16,6 +16,8 @@ Thumbs.db
 
 apps/client/native/win-job/bin/
 apps/client/native/win-job/obj/
+packages/win32-*/deskbeacon-job.exe
+.toolchains/
 
 .agent/
 AGENTS.md
