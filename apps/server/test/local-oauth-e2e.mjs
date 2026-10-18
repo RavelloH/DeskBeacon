@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomBytes, createHash } from 'node:crypto';
 import { ClientDaemon } from '../../client/dist/daemon.js';
-const base='http://localhost:8787';
+const base='http://127.0.0.1:8787';
 const cookies=new Map();
 function takeCookies(r){for(const h of r.headers.getSetCookie()){const part=h.split(';')[0];const p=part.indexOf('=');if(p>0)cookies.set(part.slice(0,p),part.slice(p+1));}}
 async function req(path,opts={}){
@@ -27,7 +27,7 @@ async function oauth(scope){
  const auth="/authorize?"+new URLSearchParams({client_id:client.client_id,scope,response_type:"code",redirect_uri:redirect,
    state:"test-state",code_challenge:challenge,code_challenge_method:"S256",resource:base});
  let r=await req(auth);
- if(r.status!==200)throw Error("Authorize GET "+r.status+" "+await r.text());
+ if(r.status!==200){const loc=r.headers.get("location");const next=loc?new URL(loc,base):null;throw Error("Authorize GET "+r.status+" redirectPath="+(next?.pathname??"none")+" error="+(next?.searchParams.get("error")??"none"));}
  const screen=await r.text();
  assert.ok(screen.includes("name=\"secret\""),"Upstream-style secret field required");
  assert.ok(!screen.includes("name=\"username\""),"Custom username login must not return");
@@ -101,6 +101,34 @@ try{
  console.log('PASS device_info Worker -> DO -> Node');
  const decode=(answer)=>{const line=answer.raw.split('\n').find(x=>x.startsWith('data: '));if(!line)throw Error('missing SSE data '+answer.raw.slice(0,200));return JSON.parse(line.slice(6)).result?.structuredContent;};
  const invoke=async(name,args,n)=>{const result=await mcp(agent.access_token,'tools/call',{name,arguments:{deviceId:device.clientId,...args}},n);assert.equal(result.status,200,name+' HTTP');const data=decode(result);if(!data)throw Error('No structured data '+name);if(data.isError)throw Error(name+' ERROR '+JSON.stringify(data));return data;};
+ const combinedBatch=await invoke('batch',{description:'E2E mixed tool batch',stages:[
+   {parallel:true,calls:[
+     {id:'read-project',tool:'fs_read',input:{path:'E:/DeskBeacon/package.json',maxBytes:900}},
+     {id:'stat-project',tool:'fs_stat',input:{paths:['E:/DeskBeacon/package.json'],hash:false}}
+   ]},
+   {calls:[{id:'run-node',tool:'exec_foreground',input:{
+     description:'E2E batch Node echo',
+     command:{mode:'program',program:'node',args:['-e',"console.log('batch-ok')"],cwd:'E:/DeskBeacon'},
+     timeoutMs:10000
+   }}]}
+ ]},401);
+ assert.equal(combinedBatch.completed,3);
+ assert.equal(combinedBatch.failed,0);
+ assert.equal(combinedBatch.stages.length,2);
+ assert.equal(combinedBatch.stages[1].results[0].result.data.exitCode,0);
+ assert.ok(combinedBatch.stages[0].results[0].result.data.content.includes('deskbeacon'));
+ console.log('PASS universal batch mixed read-only parallel stage and serial exec_foreground');
+ const failedBatch=await invoke('batch',{description:'E2E mixed tool failure policy',stages:[
+   {calls:[
+     {id:'missing',tool:'fs_read',input:{path:'E:/DeskBeacon/not-present-batch-e2e.txt'}},
+     {id:'never',tool:'device_info',input:{}}
+   ]},
+   {calls:[{id:'late',tool:'device_info',input:{}}]}
+ ]},402);
+ assert.equal(failedBatch.failed,1);
+ assert.equal(failedBatch.skipped,2);
+ assert.equal(failedBatch.stoppedEarly,true);
+ console.log('PASS universal batch failFast stops later tools safely');
  const foreground=await invoke("exec_foreground",{description:"E2E isolated Node echo",command:{mode:"program",program:"node",args:["-e","console.log(123)"],cwd:"E:/DeskBeacon"},timeoutMs:10000},4);
  console.log('FOREGROUND',JSON.stringify(foreground).slice(0,450));assert.equal(foreground.data.exitCode,0);assert.ok(foreground.outputPreview.includes('123'));
  const history=await invoke('operation_output',{operationId:foreground.operationId,stream:'stdout',maxBytes:4096},5);assert.ok(history.output.includes('123'));console.log('PASS exec_foreground + DO output history');

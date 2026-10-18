@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { LIMITS } from './constants.js';
+import { batchInputSchema } from './batch.js';
 
 const DeviceId = z.string().trim().min(1).max(128);
 const WorkspaceId = z.string().trim().min(1).max(128);
@@ -67,6 +68,7 @@ export const toolInputSchemas = {
   ]),
   fs_manage: z.object({ ...CommonDevice, action: z.enum(['mkdir', 'copy', 'move', 'rename', 'remove']), path: Path, destination: Path.optional(), recursive: z.boolean().default(false), overwrite: z.boolean().default(false), workspaceId: WorkspaceId.optional() }).strict(),
   exec_foreground: z.object({ ...CommonDevice, description: Description, command: CommandSchema, timeoutMs: z.number().int().min(1).max(LIMITS.maxForegroundTimeoutMs).default(LIMITS.defaultForegroundTimeoutMs), idempotencyKey: z.string().min(1).max(128).optional() }).strict(),
+  batch: batchInputSchema,
   exec_batch: z.object({ ...CommonDevice, description: Description, cwd: Path.optional(), workspaceId: WorkspaceId.optional(), timeoutMs: z.number().int().min(1).max(LIMITS.maxForegroundTimeoutMs).default(LIMITS.defaultForegroundTimeoutMs), idempotencyKey: z.string().min(1).max(128).optional(), stages: z.array(z.object({ parallel: z.boolean().default(false), failFast: z.boolean().default(true), commands: z.array(CommandSchema.and(z.object({ commandId: z.string().min(1).max(128) }))).min(1).max(LIMITS.maxParallelCommands) }).strict()).min(1).max(LIMITS.maxBatchStages) }).strict(),
   exec_background: z.object({ ...CommonDevice, description: Description, command: CommandSchema, terminal: z.enum(['pipe', 'pty']).default('pipe'), idempotencyKey: z.string().min(1).max(128).optional() }).strict(),
   background_list: z.object({ ...CommonDevice, state: z.enum(['running', 'exited', 'detached', 'all']).default('all'), limit: z.number().int().min(1).max(500).default(100), cursor: Cursor }).strict(),

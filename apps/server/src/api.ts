@@ -2,6 +2,8 @@ import { createMcpHandler } from "@modelcontextprotocol/server";
 import { McpServer } from "@modelcontextprotocol/server";
 import { toolInputSchemas, TOOL_NAMES, type ToolName } from "@deskbeacon/protocol";
 import type { Env, GrantProps, DeviceRecord } from "./env.js";
+import { executeToolBatch } from "./batch.js";
+import type { BatchInput } from "@deskbeacon/protocol";
 
 type ApiCtx = ExecutionContext & { props?: GrantProps; auth?: { scope?: string[] } };
 const scopeAgent = "deskbeacon:agent", scopeDevice = "deskbeacon:device";
@@ -24,11 +26,15 @@ function secureError(code: string, message: string, operationId?: string): Recor
   return { isError: true, code, message, ...(operationId ? { operationId } : {}) };
 }
 
-export async function dispatchTool(env: Env, name: ToolName, input: unknown, grantId: string, actorName?: string) {
+export async function dispatchTool(env: Env, name: ToolName, input: unknown, grantId: string, actorName?: string): Promise<Record<string,unknown>> {
   const schema = toolInputSchemas[name];
   const validated = schema.safeParse(input);
   if (!validated.success) return secureError("INVALID_INPUT", validated.error.message.slice(0, 1500));
   const data = validated.data as Record<string, unknown>;
+  if (name === "batch") {
+    return executeToolBatch(data as unknown as BatchInput,
+      (tool,subInput) => dispatchTool(env,tool,subInput,grantId,actorName));
+  }
   if (name === "device_list") {
     const records = await registry(env);
     // Check live DO WebSocket state only on Agent demand, never by polling.
@@ -104,7 +110,8 @@ const descriptions: Record<string,string> = {
   fs_manage: "Create directories, copy, move, rename or remove files; destructive actions are explicit. Do not use for archive extraction.",
   fs_archive: "Create, list or extract ZIP/TAR archives on the selected device. Specify paths and operation explicitly; archive data remains on that device.",
   exec_foreground: "Run a finite command and WAIT for its final exit, stdout, stderr and exit code in the SAME MCP call. Description is mandatory; use program+args to avoid shell escaping. Timeout is separate from front-end wait. No automatic background.",
-  exec_batch: "Run multiple finite commands in serial stages, with optional parallel commands per stage. Wait synchronously for every stage. One foreground slot is held for the device.",
+  batch: "Compose multiple DeskBeacon tools on ONE device in serial stages or parallel read-only stages. Supports fs_read, fs_edit, exec_foreground, net_probe, etc. Use unique call ids; each input matches the standalone tool schema WITHOUT deviceId. Parallel stages permit read-only tools only. Per-call success, errors, and bounded result previews are returned; failFast stops subsequent stages. Outputs are not automatically passed as inputs to later calls. Use batch with serial exec_foreground calls instead of exec_batch.",
+  exec_batch: "DEPRECATED compatibility tool: staged commands only. Prefer batch with serial exec_foreground calls (or call exec_foreground directly).",
   exec_background: "EXPLICITLY start a long-running process, get backgroundTaskId, then poll its output using cursor and stop when done. Never use for ordinary short commands.",
   background_list: "List local background process records and statuses, including exited tasks.",
   background_get: "Inspect a specific background task by backgroundTaskId.",
