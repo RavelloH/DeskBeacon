@@ -48,6 +48,20 @@ export function oauthResourcesFor(env: Env, request: Request) {
     handler
   });
 
+  // ChatGPT may retain an existing OAuth client registered with resource=origin.
+  // This separately validates that audience without rewriting a token's audience
+  // or allowing Device grants to access MCP operations.
+  const legacyAgentServer = new OAuthResourceServer<Env, GrantProps>({
+    resourceMetadata: {
+      resource: origin,
+      authorization_servers: [origin],
+      resource_name: "DeskBeacon MCP (legacy Agent audience)"
+    },
+    requiredScopes: ["deskbeacon:agent"],
+    validateToken,
+    handler
+  });
+
   const deviceServer = new OAuthResourceServer<Env, GrantProps>({
     resourceMetadata: {
       resource: origin,
@@ -58,13 +72,13 @@ export function oauthResourcesFor(env: Env, request: Request) {
     validateToken,
     handler
   });
-  return { origin, mcpResource, authorizationServer, mcpServer, deviceServer };
+  return { origin, mcpResource, authorizationServer, mcpServer, legacyAgentServer, deviceServer };
 }
 
 export default {
-  fetch(request: Request, env: Env, ctx: ExecutionContext) {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     const url = new URL(request.url);
-    const { authorizationServer, mcpServer, deviceServer } = oauthResourcesFor(env, request);
+    const { origin, authorizationServer, mcpServer, legacyAgentServer, deviceServer } = oauthResourcesFor(env, request);
 
     if (url.pathname === "/health" && request.method === "GET") {
       return Response.json({ status: "ok", service: "deskbeacon-server" });
@@ -74,7 +88,21 @@ export default {
     }
     // Route resource discovery explicitly: the legacy root metadata and
     // the /mcp metadata are separate documents with separate token audiences.
-    if (url.pathname === "/.well-known/oauth-protected-resource/mcp" || url.pathname === "/mcp") {
+    if (url.pathname === "/.well-known/oauth-protected-resource/mcp") {
+      return mcpServer.fetch(request, env, ctx);
+    }
+    if (url.pathname === "/mcp") {
+      // A previously registered ChatGPT OAuth client still asks for resource=origin.
+      // Keep accepting *only* valid Agent tokens bound to that canonical origin.
+      // Tokens bound to /mcp follow the strict, original resource-server path.
+      const match = /^Bearer\s+([^\s]+)$/i.exec(request.headers.get("authorization") ?? "");
+      const bearerToken = match?.[1];
+      if (bearerToken) {
+        const legacyGrant = await authorizationServer.validateToken(origin, bearerToken, env);
+        if (legacyGrant?.props?.kind === "agent" && legacyGrant.scope?.includes("deskbeacon:agent")) {
+          return legacyAgentServer.fetch(request, env, ctx);
+        }
+      }
       return mcpServer.fetch(request, env, ctx);
     }
     if (url.pathname === "/.well-known/oauth-protected-resource" || url.pathname.startsWith("/device/")) {

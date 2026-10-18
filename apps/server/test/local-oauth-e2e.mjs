@@ -91,6 +91,19 @@ Object.assign(device,await legacyRefresh.json());
 const oldDeviceEndpoint=await req('/device/info',{headers:{authorization:'Bearer '+device.access_token}});
 assert.equal(oldDeviceEndpoint.status,200);
 console.log('PASS legacy Device token audience and refresh remain valid');
+// ChatGPT preserves resource=origin for previously registered OAuth clients.
+// This is a real PKCE + token exchange, not a mocked bearer token.
+const registeredChatgptAgent=await oauth('deskbeacon:agent deskbeacon:device',base);
+assert.equal(registeredChatgptAgent.scope,'deskbeacon:agent');
+const chatgptInit=await mcp(registeredChatgptAgent.access_token,'initialize',{
+ protocolVersion:'2025-06-18',capabilities:{},clientInfo:{name:'ChatGPT existing registration',version:'1.0'}
+},90);
+assert.equal(chatgptInit.status,200,'Root-resource Agent token must connect to /mcp');
+const chatgptTools=await mcp(registeredChatgptAgent.access_token,'tools/list',{},91);
+assert.equal(chatgptTools.status,200,'Root-resource Agent must enumerate MCP tools');
+const rootAgentDevice=await fetch(base+'/device/info',{headers:{authorization:'Bearer '+registeredChatgptAgent.access_token}});
+assert.equal(rootAgentDevice.status,403,'Root-resource Agent must never become a Device');
+console.log('PASS existing ChatGPT root-resource OAuth Client remains authorized for MCP only');
 const agent=await oauth('deskbeacon:agent deskbeacon:device',base+'/mcp');
 assert.equal(agent.scope,'deskbeacon:agent','Combined scope request must never grant Device privileges');
 console.log('PASS ChatGPT-style combined scope authorizes Agent ONLY');
