@@ -50,6 +50,7 @@ async function setup(base:string) {
    const authorize=new URL('/authorize',base);
    authorize.searchParams.set('response_type','code');authorize.searchParams.set('client_id',client.client_id);
    authorize.searchParams.set('redirect_uri',redirect);authorize.searchParams.set('scope','deskbeacon:device');
+   authorize.searchParams.set('resource',base); // Explicit legacy Device audience; older installed clients may still omit it.
    authorize.searchParams.set('state',state);authorize.searchParams.set('code_challenge',challenge);
    authorize.searchParams.set('code_challenge_method','S256');
    console.log('Open the authorization page and enter your OAuth authorization secret:\n'+authorize.href);

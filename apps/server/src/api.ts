@@ -5,6 +5,7 @@ import type { Env, GrantProps, DeviceRecord } from "./env.js";
 import { executeToolBatch } from "./batch.js";
 import type { BatchInput } from "@deskbeacon/protocol";
 import { resolveActorName } from "./oauth-actor.js";
+import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 
 type ApiCtx = ExecutionContext & { props?: GrantProps; auth?: { scope?: string[]; clientId?: string } };
 const scopeAgent = "deskbeacon:agent", scopeDevice = "deskbeacon:device";
@@ -134,14 +135,14 @@ const descriptions: Record<string,string> = {
   fs_grep: "Fast content grep via ripgrep with bounded structured results and truncation metadata.",
 };
 
-export async function handleApiRequest(request: Request, env: Env, ctx: ApiCtx): Promise<Response> {
+export async function handleApiRequest(request: Request, env: Env, ctx: ApiCtx, oauth: Pick<OAuthHelpers, "lookupClient">): Promise<Response> {
   const pathname = new URL(request.url).pathname;
   const props = ctx.props;
   const scopes = ctx.auth?.scope ?? [];
   if (pathname === "/mcp") {
     if (props?.kind !== "agent" || !scopes.includes(scopeAgent)) return Response.json({ error: "FORBIDDEN" }, { status: 403 });
     const grantId = props.grantId;
-    const actorName = await resolveActorName(env, props.actorName, ctx.auth?.clientId);
+    const actorName = await resolveActorName(oauth, props.actorName, ctx.auth?.clientId);
     const handler = createMcpHandler(() => makeMcpServer(env, grantId, actorName), { legacy: "stateless" });
     return handler.fetch(request);
   }

@@ -13,7 +13,7 @@ const field=(html,name)=>{
  const m=html.match(new RegExp('name="'+name+'"[^>]*value="([^"]+)"'));
  if(!m)throw Error('Missing '+name+': '+html.slice(0,200));return m[1];
 };
-async function oauth(scope){
+async function oauth(scope,resource){
  cookies.clear();
  const verifier=randomBytes(32).toString("base64url");
  const challenge=createHash("sha256").update(verifier).digest("base64url");
@@ -25,7 +25,7 @@ async function oauth(scope){
  if(registration.status!==201)throw Error("Registration "+registration.status+" "+await registration.text());
  const client=await registration.json();
  const auth="/authorize?"+new URLSearchParams({client_id:client.client_id,scope,response_type:"code",redirect_uri:redirect,
-   state:"test-state",code_challenge:challenge,code_challenge_method:"S256",resource:base});
+   state:"test-state",code_challenge:challenge,code_challenge_method:"S256",...(resource?{resource}:{})});
  let r=await req(auth);
  if(r.status!==200){const loc=r.headers.get("location");const next=loc?new URL(loc,base):null;throw Error("Authorize GET "+r.status+" redirectPath="+(next?.pathname??"none")+" error="+(next?.searchParams.get("error")??"none"));}
  const screen=await r.text();
@@ -61,26 +61,54 @@ async function mcp(token,method,params,id){
    body:JSON.stringify({jsonrpc:'2.0',id,method,params})});
  const raw=await r.text();return {status:r.status,raw};
 }
+const [mcpMetadata, legacyMetadata, authMetadata] = await Promise.all([
+  req('/.well-known/oauth-protected-resource/mcp'),
+  req('/.well-known/oauth-protected-resource'),
+  req('/.well-known/oauth-authorization-server')
+]);
+assert.equal(mcpMetadata.status,200);
+assert.equal((await mcpMetadata.json()).resource,base+'/mcp');
+assert.equal(legacyMetadata.status,200);
+assert.equal((await legacyMetadata.json()).resource,base);
+assert.equal(authMetadata.status,200);
+const advertised=await authMetadata.json();
+assert.ok(advertised.protected_resources.includes(base+'/mcp'));
+assert.ok(advertised.protected_resources.includes(base));
+assert.equal(advertised.registration_endpoint,base+'/oauth/register');
+console.log('PASS separate MCP and legacy Device resource discovery');
 const device=await oauth('deskbeacon:device');
 assert.equal(device.scope,'deskbeacon:device');console.log('PASS device-only OAuth grant');
-const agent=await oauth('deskbeacon:agent deskbeacon:device');
+const wrongAudienceRefresh=await req('/oauth/token',{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({
+ grant_type:'refresh_token',client_id:device.clientId,refresh_token:device.refresh_token,resource:base+'/mcp'
+})});
+assert.equal(wrongAudienceRefresh.status,400,'Refresh must not retarget a legacy Device grant');
+assert.equal((await wrongAudienceRefresh.json()).error,'invalid_target');
+const legacyRefresh=await req('/oauth/token',{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({
+ grant_type:'refresh_token',client_id:device.clientId,refresh_token:device.refresh_token
+})});
+assert.equal(legacyRefresh.status,200,'Old Device refresh must inherit the root resource');
+Object.assign(device,await legacyRefresh.json());
+const oldDeviceEndpoint=await req('/device/info',{headers:{authorization:'Bearer '+device.access_token}});
+assert.equal(oldDeviceEndpoint.status,200);
+console.log('PASS legacy Device token audience and refresh remain valid');
+const agent=await oauth('deskbeacon:agent deskbeacon:device',base+'/mcp');
 assert.equal(agent.scope,'deskbeacon:agent','Combined scope request must never grant Device privileges');
 console.log('PASS ChatGPT-style combined scope authorizes Agent ONLY');
-const agentSingle=await oauth('deskbeacon:agent');
+const agentSingle=await oauth('deskbeacon:agent',base+'/mcp');
 assert.equal(agentSingle.scope,'deskbeacon:agent');
 console.log('PASS agent-only OAuth grant');
 const deniedDevice=await fetch(base+'/device/info',{headers:{Authorization:'Bearer '+agent.access_token}});
-assert.equal(deniedDevice.status,403,'Combined-scope Agent must not become a Device');
+assert.equal(deniedDevice.status,401,'Combined-scope Agent must not become a Device');
 const deniedMcp=await mcp(device.access_token,'initialize',{protocolVersion:'2025-06-18',capabilities:{},clientInfo:{name:'Device token denial',version:'0.1.0'}},99);
-assert.equal(deniedMcp.status,403,'Device token must not become Agent');
+assert.equal(deniedMcp.status,401,'Device token must not become Agent');
 console.log('PASS Agent and Device bearer tokens cannot cross privileges');
 const daemon=new ClientDaemon({url:base,deviceId:device.clientId,clientId:device.clientId,deviceName:'E2E test device',
  accessToken:device.access_token,refreshToken:device.refresh_token});
 try{
  await daemon.connect();
- for(let i=0;i<70&&daemon.status().state!=='connected';i++)await new Promise(r=>setTimeout(r,100));
- console.log('Device connection:',daemon.status().state);
- assert.equal(daemon.status().state,'connected');
+ for(let i=0;i<70&&(await daemon.status()).state!=='connected';i++)await new Promise(r=>setTimeout(r,100));
+ console.log('Device connection:',(await daemon.status()).state);
+ assert.equal((await daemon.status()).state,'connected');
  await new Promise((resolve,reject)=>{
    const timeout=setTimeout(()=>reject(Error('DO hibernation ping timeout')),2000);
    daemon.ws.once('message',raw=>{clearTimeout(timeout);
@@ -208,7 +236,7 @@ try{
  const duplicateState=await invoke('operation_get',{operationId:one.operationId},37);
  assert.equal(duplicateState.status,'completed');
  console.log('PASS duplicate result commit cannot corrupt a completed foreground operation');
- const secondAgent=await oauth('deskbeacon:agent');
+ const secondAgent=await oauth('deskbeacon:agent',base+'/mcp');
  const wrong=await mcp(secondAgent.access_token,'tools/call',{name:'operation_get',arguments:{deviceId:device.clientId,operationId:one.operationId}},35);
  assert.equal(wrong.status,200);assert.ok(wrong.raw.includes('OPERATION_UNKNOWN'));
  console.log('PASS result history grant isolation between two Agent OAuth grants');

@@ -1,4 +1,4 @@
-import { AuthorizationError, CimdFetchError } from "@cloudflare/workers-oauth-provider";
+import { AuthorizationError, CimdFetchError, type OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import type { Env, GrantProps } from "./env.js";
 import { normalizeActorName } from "./oauth-actor.js";
 
@@ -39,10 +39,10 @@ async function rateLimitKey(request: Request): Promise<string> {
 	return `auth-fail:${btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "")}`;
 }
 
-export async function handleAuthorize(request: Request, env: Env): Promise<Response> {
+export async function handleAuthorize(request: Request, env: Env, oauth: OAuthHelpers): Promise<Response> {
 	if (request.method !== "GET" && request.method !== "POST") return new Response("Method not allowed", { status: 405, headers: { allow: "GET, POST" } });
 	if (!env.MCP_AUTH_SECRET) return new Response("MCP_AUTH_SECRET is not configured", { status: 503 });
-	const oauth = env.OAUTH_PROVIDER;
+
 	if (request.method === "GET") {
 		try {
 			const authRequest = await oauth.parseAuthRequest(request);

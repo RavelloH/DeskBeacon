@@ -137,4 +137,14 @@ https://your-worker.example/mcp
 
 按照客户端提示打开 OAuth 授权页面，输入相同的授权密码，完成 Agent 授权。
 
+#### OAuth 资源与旧设备兼容
+
+从 2026-10-18 起，MCP Agent 使用 `https://your-worker.example/mcp` 作为独立 OAuth 资源（RFC 8707）；设备端继续使用部署 Origin 作为兼容资源，不改变已有 Client/Grant/Refresh Token。原有 KV Namespace、Durable Object、Secret、域名、Worker 和环境变量都不需要重新创建。
+
+- 已配对的设备不需要重新配对，旧客户端可以继续不发送 `resource`；新版本 setup 会明确请求 Origin。
+- 已授权的旧 Agent 令牌只绑定 Origin，因此升级服务端后，Agent 可能需要删除旧 OAuth 授权缓存并重新授权一次；不要删除设备配对信息或清空 KV。
+- OAuth 受保护资源元数据：Agent 使用 `/.well-known/oauth-protected-resource/mcp`；设备使用 `/.well-known/oauth-protected-resource`。
+- 部署不增加环境变量。若之前配置过 `MCP_BASE_URL`，请保持原来的公开域名 Origin。已开启 `global_fetch_strictly_public` 用于支持 CIMD 客户端。
+- 升级部署前建议备份 KV，回滚时也应保留原 Namespace。旧设备授权有效性的本地 E2E 已通过，但仍应在生产环境进行一次设备刷新和 Agent 重授权冒烟验证。
+
 连接成功后，Agent 即可使用 DeskBeacon 的设备管理、命令执行、文件操作和系统工具。远程命令以设备上运行 DeskBeacon 的系统用户权限执行，建议使用专门的非管理员账户。

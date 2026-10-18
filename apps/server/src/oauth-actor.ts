@@ -1,4 +1,4 @@
-import type { Env } from "./env.js";
+import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 
 export const DEFAULT_AGENT_NAME = "Agent";
 
@@ -25,7 +25,7 @@ export function normalizeActorName(value: unknown): string | undefined {
  * Metadata failures must not make an otherwise valid MCP request fail.
  */
 export async function resolveActorName(
-	env: Pick<Env, "OAUTH_PROVIDER">,
+	oauth: Pick<OAuthHelpers, "lookupClient">,
 	storedActorName: unknown,
 	authenticatedClientId: unknown,
 ): Promise<string> {
@@ -36,7 +36,7 @@ export async function resolveActorName(
 	if (typeof authenticatedClientId !== "string" || !authenticatedClientId.trim()) return DEFAULT_AGENT_NAME;
 
 	try {
-		const client = await env.OAUTH_PROVIDER.lookupClient(authenticatedClientId);
+		const client = await oauth.lookupClient(authenticatedClientId);
 		if (client?.clientId !== authenticatedClientId) return DEFAULT_AGENT_NAME;
 		return normalizeActorName(client.clientName) ?? DEFAULT_AGENT_NAME;
 	} catch {

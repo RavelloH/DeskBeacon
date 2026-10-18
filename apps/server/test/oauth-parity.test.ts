@@ -9,7 +9,7 @@ const client = readFileSync(new URL('../../client/src/index.ts', import.meta.url
 describe('upstream cf-browser-mcp OAuth contract', () => {
   it('uses one upstream-style secret consent and KV rate limiting', () => {
     expect(auth).toContain('env.MCP_AUTH_SECRET');
-    expect(auth).toContain('env.OAUTH_PROVIDER');
+    expect(entry).toContain('authorizationServer.getOAuthApi(env)');
     expect(auth).toContain('oauth.parseAuthRequest(request)');
     expect(auth).toContain('oauth.describeConsent(authRequest)');
     expect(auth).toContain('oauth.beginConsent(authRequest)');
@@ -27,10 +27,12 @@ describe('upstream cf-browser-mcp OAuth contract', () => {
   });
   it('uses upstream OAuth endpoint paths for both worker and device client', () => {
     expect(entry).toContain('"/authorize"');
-    expect(entry).toContain('"/oauth/token"');
-    expect(entry).toContain('"/oauth/register"');
+    expect(entry).toContain('authorizationServer.fetch(request, env, ctx)');
+    expect(entry).toContain('resources: [origin, mcpResource]');
     expect(entry).toContain('refreshTokenIdleTTL: 30 * 24 * 60 * 60');
     expect(entry).toContain('clientIdMetadataDocumentEnabled: true');
+    expect(entry).toContain('legacyGrantResource: origin');
+    expect(entry).toContain('requiredScopes: ["deskbeacon:agent"]');
     expect(client).toContain("base+'/oauth/register'");
     expect(client).toContain("base+'/oauth/token'");
   });

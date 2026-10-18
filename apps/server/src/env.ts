@@ -1,7 +1,7 @@
 export interface Env {
   OAUTH_KV: KVNamespace;
   DEVICE_SESSIONS: DurableObjectNamespace;
-  OAUTH_PROVIDER: import("@cloudflare/workers-oauth-provider").OAuthHelpers;
+
   MCP_BASE_URL?: string;
   MCP_AUTH_SECRET: string;
 }

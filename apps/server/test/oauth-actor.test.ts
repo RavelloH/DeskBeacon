@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { resolveActorName } from "../src/oauth-actor.js";
 
 function envWithLookup(lookupClient: (clientId: string) => Promise<unknown>) {
-	return { OAUTH_PROVIDER: { lookupClient: vi.fn(lookupClient) } } as any;
+	return { lookupClient: vi.fn(lookupClient) } as any;
 }
 
 describe("OAuth Agent display name", () => {
@@ -10,7 +10,7 @@ describe("OAuth Agent display name", () => {
 		const env = envWithLookup(async () => { throw new Error("should not be called"); });
 
 		await expect(resolveActorName(env, "Claude", "authenticated-client-id")).resolves.toBe("Claude");
-		expect(env.OAUTH_PROVIDER.lookupClient).not.toHaveBeenCalled();
+		expect(env.lookupClient).not.toHaveBeenCalled();
 	});
 
 	it("recovers a legacy grant name from the authenticated OAuth client registration", async () => {
@@ -37,7 +37,7 @@ describe("OAuth Agent display name", () => {
 
 		await expect(resolveActorName(env, undefined, "registered-client-id")).resolves.toBe("Agent");
 		await expect(resolveActorName(env, " \r\n ", undefined)).resolves.toBe("Agent");
-		expect(env.OAUTH_PROVIDER.lookupClient).toHaveBeenCalledOnce();
+		expect(env.lookupClient).toHaveBeenCalledOnce();
 	});
 
 	it("sanitizes malicious display metadata and rejects a mismatched client record", async () => {
