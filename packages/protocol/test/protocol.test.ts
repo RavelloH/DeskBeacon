@@ -9,8 +9,8 @@ import {
 } from '../src/index.js';
 
 describe('protocol schemas', () => {
-  it('registers exactly the planned 34 MCP tools', () => {
-    expect(Object.keys(toolInputSchemas)).toHaveLength(34);
+  it('registers exactly the planned 35 MCP tools', () => {
+    expect(Object.keys(toolInputSchemas)).toHaveLength(35);
   });
 
   it('round-trips a versioned operation dispatch message', () => {

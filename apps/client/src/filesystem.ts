@@ -12,6 +12,11 @@ import * as tar from 'tar';
 type Input=Record<string,any>;
 const utf8=(s:string)=>Buffer.from(s,'utf8');
 const hash=(b:Buffer)=>createHash('sha256').update(b).digest('hex');
+async function fileHash(path:string){
+ const digest=createHash('sha256');
+ for await(const chunk of createReadStream(path))digest.update(chunk as Buffer);
+ return digest.digest('hex');
+}
 async function atomicWrite(path:string,data:Buffer,overwrite=true){
  const temp=path+'.deskbeacon-'+crypto.randomUUID()+'.tmp';
  await fs.mkdir(dirname(path),{recursive:true});
@@ -25,7 +30,7 @@ function location(p:string,root?:string){return isAbsolute(p)?resolve(p):resolve
 async function statOne(path:string,includeHash=false){
  const s=await fs.lstat(path);return {path,kind:s.isFile()?'file':s.isDirectory()?'directory':s.isSymbolicLink()?'symlink':'other',
  size:s.size,createdAt:s.birthtime.toISOString(),modifiedAt:s.mtime.toISOString(),
- ...(includeHash&&s.isFile()?{sha256:hash(await fs.readFile(path))}:{})};
+ ...(includeHash&&s.isFile()?{sha256:await fileHash(path)}:{})};
 }
 async function search(name:string,input:Input,path:string){
  const args:string[]=[];
@@ -146,6 +151,33 @@ async function archive(i:Input) {
 export async function fileTool(tool:string,input:Input,workspace?:string):Promise<any>{
  const path=input.path?location(input.path,workspace):'';
  switch(tool){
+ case 'fs_read_many':{
+   const budget=Math.min(65_536,input.maxTotalBytes??32_768);
+   const results:any[]=[];
+   let bytesUsed=0;
+   for(const item of input.files as Input[]){
+     const resolved=location(item.path,workspace);
+     const remaining=budget-bytesUsed;
+     if(remaining<=0){
+       results.push({path:resolved,error:'BATCH_BUDGET_EXHAUSTED',truncated:true});
+       continue;
+     }
+     try{
+       const read=await fileTool('fs_read',{
+         ...item,maxBytes:Math.min(item.maxBytes??4_096,8_192,remaining),
+       },workspace);
+       bytesUsed+=read.readBytes??0;
+       if(input.includeHash)read.sha256=await fileHash(resolved);
+       results.push(read);
+     }catch(error){
+       results.push({path:resolved,error:error instanceof Error?error.message:String(error)});
+     }
+   }
+   return{files:results,bytesUsed,maxTotalBytes:budget,
+     successCount:results.filter(x=>!x.error).length,
+     failureCount:results.filter(x=>x.error).length,
+     truncated:results.some(x=>x.truncated)};
+ }
  case 'fs_stat':return{entries:await Promise.all(input.paths.map(async(p:string)=>{const resolved=location(p,workspace);try{return await statOne(resolved,input.hash);}catch(e:any){return{path:resolved,error:e.message};}}))};
  case 'fs_list':{
    const max=input.limit??200,queue=[{dir:path,depth:0}],entries:any[]=[];

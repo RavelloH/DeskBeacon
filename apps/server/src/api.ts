@@ -98,6 +98,7 @@ const descriptions: Record<string,string> = {
   fs_list: "List a bounded directory tree with depth/limit/cursor, sorting and hidden-file options. Prefer it over shell ls for ordinary filesystem discovery.",
   fs_stat: "Stat up to 100 explicit paths and optionally calculate file hashes. Use before edit when checking for concurrent changes.",
   fs_read: "Read a bounded file range; prefer lineOffset/maxLines for source code and byteOffset/maxBytes for binary. Returned ranges can be paged; never assume a preview is the complete file.",
+  fs_read_many: "Read up to 8 source files in one MCP request, with per-file line/byte bounds, per-file errors and continuations, optional SHA-256 and a strict aggregate response budget. Prefer this for multi-file code context instead of many separate fs_read calls.",
   fs_write: "Create, rewrite or append file content with optional expectedHash and overwrite protection. Prefer expectedHash for sensitive concurrent edits.",
   fs_edit: "Apply an exact text replacement or a patch to a file; use expectedHash to avoid overwriting concurrent changes. Do not submit raw JSON patches as file text.",
   fs_manage: "Create directories, copy, move, rename or remove files; destructive actions are explicit. Do not use for archive extraction.",

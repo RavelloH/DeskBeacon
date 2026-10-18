@@ -105,6 +105,20 @@ try{
  console.log('FOREGROUND',JSON.stringify(foreground).slice(0,450));assert.equal(foreground.data.exitCode,0);assert.ok(foreground.outputPreview.includes('123'));
  const history=await invoke('operation_output',{operationId:foreground.operationId,stream:'stdout',maxBytes:4096},5);assert.ok(history.output.includes('123'));console.log('PASS exec_foreground + DO output history');
  const fsread=await invoke('fs_read',{path:'E:/DeskBeacon/package.json',maxBytes:2000},6);assert.ok(fsread.data.content.includes('deskbeacon-monorepo'));console.log('PASS fs_read');
+ const multiRead=await invoke('fs_read_many',{
+   files:[
+     {path:'E:/DeskBeacon/package.json',maxBytes:1200},
+     {path:'E:/DeskBeacon/packages/protocol/src/constants.ts',lineOffset:0,maxLines:4,maxBytes:500},
+     {path:'E:/DeskBeacon/missing-agentux-e2e.txt',maxBytes:200}
+   ],maxTotalBytes:3000,includeHash:true
+ },89);
+ assert.equal(multiRead.data.files.length,3);
+ assert.equal(multiRead.data.successCount,2);
+ assert.equal(multiRead.data.failureCount,1);
+ assert.ok(multiRead.data.files[0].sha256);
+ assert.ok(multiRead.data.files[1].content.includes('PROTOCOL_VERSION'));
+ assert.ok(multiRead.data.files[2].error);
+ console.log('PASS fs_read_many through Worker/DO with independent file errors');
  const grep=await invoke('fs_grep',{path:'E:/DeskBeacon/packages/protocol/src',pattern:'PROTOCOL_VERSION',maxResults:10,maxBytes:40000,timeoutMs:5000},7);assert.ok(grep.data.matches.length>0);console.log('PASS ripgrep fs_grep');
  const found=await invoke('fs_find',{path:'E:/DeskBeacon/packages/protocol/src',pattern:'tools.ts',maxResults:20},26);
  assert.ok(found.data.paths.some(p=>p.endsWith('tools.ts')),'fs_find pattern should match tools.ts');

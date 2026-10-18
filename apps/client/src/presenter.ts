@@ -10,7 +10,7 @@ const verbs:Record<string,[string,string]>={
  workspace_open:['创建工作区中','创建了工作区'],workspace_info:['读取工作区中','读取了工作区'],
  workspace_cd:['切换目录中','切换了工作目录'],
  fs_list:['列出文件中','列出了文件'],fs_stat:['检查文件中','检查了文件'],
- fs_read:['读取文件中','读取了文件'],fs_find:['查找文件中','查找了文件'],
+ fs_read:['读取文件中','读取了文件'],fs_read_many:['批量读取文件中','批量读取了文件'],fs_find:['查找文件中','查找了文件'],
  fs_grep:['搜索内容中','搜索了内容'],fs_write:['写入文件中','写入了文件'],
  fs_edit:['编辑文件中','编辑了文件'],fs_manage:['管理文件中','管理了文件'],
  fs_archive:['处理归档中','处理了归档'],
@@ -85,7 +85,7 @@ export function resultLines(a:ActivityEntry):string[]{
  if(typeof r.writtenBytes==='number')lines.push('写入 '+r.writtenBytes+' 字节');
  if(typeof r.bytes==='number')lines.push('传输 '+r.bytes+' 字节');
  if(Array.isArray(r.entries))lines.push('包含 '+r.entries.length+' 项');
- if(Array.isArray(r.files))lines.push('文件 '+r.files.length+' 项');
+ if(Array.isArray(r.files))lines.push('文件 '+r.files.length+' 项'+(typeof r.failureCount==='number'?' · 失败 '+r.failureCount+' 项':''));
  if(Array.isArray(r.matches))lines.push('匹配 '+r.matches.length+' 项');
  for(const key of ['stdout','stderr']){
    if(typeof r[key]==='string'&&r[key]){

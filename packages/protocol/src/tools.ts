@@ -44,6 +44,20 @@ export const toolInputSchemas = {
   fs_list: z.object({ ...CommonDevice, path: Path, depth: z.number().int().min(0).max(32).default(1), limit: z.number().int().min(1).max(2_000).default(200), cursor: Cursor, sortBy: z.enum(['name', 'size', 'modified']).default('name'), includeHidden: z.boolean().default(false), followSymlinks: z.boolean().default(false), workspaceId: WorkspaceId.optional() }).strict(),
   fs_stat: z.object({ ...CommonDevice, paths: z.array(Path).min(1).max(100), hash: z.boolean().default(false), workspaceId: WorkspaceId.optional() }).strict(),
   fs_read: z.object({ ...CommonDevice, path: Path, encoding: z.enum(['utf8', 'utf16le', 'base64']).default('utf8'), byteOffset: z.number().int().nonnegative().default(0), maxBytes: z.number().int().min(1).max(1_048_576).default(65_536), lineOffset: z.number().int().nonnegative().optional(), maxLines: z.number().int().min(1).max(10_000).optional(), workspaceId: WorkspaceId.optional() }).strict(),
+  // Efficient context gathering: bounded per-file reads and a hard aggregate response budget.
+  fs_read_many: z.object({
+    ...CommonDevice, workspaceId: WorkspaceId.optional(),
+    files: z.array(z.object({
+      path: Path,
+      encoding: z.enum(['utf8', 'utf16le']).default('utf8'),
+      lineOffset: z.number().int().nonnegative().optional(),
+      maxLines: z.number().int().min(1).max(2_000).optional(),
+      byteOffset: z.number().int().nonnegative().optional(),
+      maxBytes: z.number().int().min(1).max(8_192).default(4_096),
+    }).strict()).min(1).max(8),
+    maxTotalBytes: z.number().int().min(1_024).max(65_536).default(32_768),
+    includeHash: z.boolean().default(false),
+  }).strict(),
   fs_find: z.object({ ...CommonDevice, path: Path, pattern: z.string().max(2_048).optional(), glob: z.array(z.string().max(512)).max(64).default([]), includeHidden: z.boolean().default(false), respectIgnore: z.boolean().default(true), maxResults: z.number().int().min(1).max(20_000).default(1_000), cursor: Cursor, workspaceId: WorkspaceId.optional() }).strict(),
   fs_grep: z.object({ ...CommonDevice, path: Path, pattern: z.string().min(1).max(16_384), literal: z.boolean().default(false), caseSensitive: z.boolean().default(false), glob: z.array(z.string().max(512)).max(64).default([]), contextLines: z.number().int().min(0).max(20).default(0), maxResults: z.number().int().min(1).max(10_000).default(500), maxBytes: z.number().int().min(1).max(8_388_608).default(1_048_576), timeoutMs: z.number().int().min(1).max(120_000).default(30_000), cursor: Cursor, workspaceId: WorkspaceId.optional() }).strict(),
   fs_write: z.object({ ...CommonDevice, path: Path, mode: z.enum(['create', 'rewrite', 'append']), content: z.string().max(1_048_576), encoding: z.enum(['utf8', 'base64']).default('utf8'), expectedHash: z.string().regex(/^[a-f0-9]{64}$/i).optional(), overwrite: z.boolean().default(false), workspaceId: WorkspaceId.optional() }).strict(),

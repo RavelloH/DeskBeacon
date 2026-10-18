@@ -76,3 +76,13 @@ Keep the initial v1 scope and avoid automatically exposing general-purpose destr
 ### Follow-up: file ranges
 
 A real `fs_read(lineOffset:10,maxLines:8)` returned only the requested lines but reported `readBytes` equal to the entire source and `truncated:false`. More seriously, code beyond the initial byte window could not be read by line number. Replaced post-read string slicing with a bounded streaming line reader that scans from file start to the requested line, produces at most `maxBytes` of result text, and reports `linesRead`, `nextLineOffset`, `truncated`, and available `totalLines`. Byte-mode reads return `nextByteOffset`. Reject incompatible binary/line or simultaneous byte/line offsets. Added tests for large UTF-8 (including Chinese), UTF-16LE, EOF and too-small output budgets. Large line-offset scans are O(file prefix size); future indexing could optimize repeated deep jumps.
+
+## 2026-10-18 — Agent context gathering: fs_read_many
+
+Added `fs_read_many` as the 35th MCP tool. Input is `{deviceId, files:[{path, encoding?, byteOffset?, maxBytes?, lineOffset?, maxLines?}], maxTotalBytes?, includeHash?, workspaceId?}`, with at most 8 files, at most 8 KiB per file and at most 64 KiB per batch (32 KiB default). Each item returns the existing `fs_read` continuation metadata and optional streamed SHA-256. Per-file errors do not abort the request; the budget is enforced cumulatively and exhausted entries explicitly report `BATCH_BUDGET_EXHAUSTED`. The tool also uses the grant-scoped workspace directory when provided.
+
+Dogfood and verification: all edits and checks were made through the already-connected DeskBeacon MCP service in a dedicated `feature/fs-read-many-agentux` worktree. Monorepo TypeScript checks, Worker dry run, protocol/server unit tests, full Windows local client tests, independent multi-read fixtures, and the complete local OAuth -> MCP -> Durable Object -> Node daemon E2E suite passed. The E2E additionally invokes `fs_read_many` with two readable source files and one absent file, asserting success count 2, failure count 1, SHA-256 and source contents.
+
+Local Wrangler requires `MCP_BASE_URL=http://localhost:8787` in its isolated test-only .dev.vars to ensure the resource name matches the OAuth consent flow. This is a development configuration, not a production change. No runtime was restarted in the user's main terminal during the implementation.
+
+Further Agent UX improvements to consider: a bounded readiness/wait tool for background processes, structured Git working tree inspection, and atomic compare-and-swap multi-file edits. Prioritize measured reduction in tool calls over adding many overlapping tools.

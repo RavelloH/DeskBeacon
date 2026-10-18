@@ -10,9 +10,10 @@ describe('Server static contract',()=>{
   expect(wrangler.d1_databases).toBeUndefined();
   expect(wrangler.r2_buckets).toBeUndefined();
  });
- it('defines 34 MCP tools',()=>{
-  expect(TOOL_NAMES).toHaveLength(34);
+ it('defines 35 MCP tools',()=>{
+  expect(TOOL_NAMES).toHaveLength(35);
   expect(TOOL_NAMES).toContain('fs_archive');
+  expect(TOOL_NAMES).toContain('fs_read_many');
   expect(TOOL_NAMES).toContain('net_probe');
   expect(TOOL_NAMES).toContain('screen_capture');
  });
