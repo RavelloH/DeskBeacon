@@ -27,6 +27,9 @@ export class DeviceSession extends DurableObject<Env> {
     ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS chunks(op_id TEXT NOT NULL, stream TEXT NOT NULL, idx INTEGER NOT NULL, content TEXT NOT NULL, PRIMARY KEY(op_id,stream,idx))");
     ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS ops_expires ON ops(expires)");
     try{ctx.storage.sql.exec("ALTER TABLE ops ADD COLUMN request_hash TEXT");}catch{}
+    try{ctx.storage.sql.exec("ALTER TABLE ops ADD COLUMN dispatch_attempts INTEGER DEFAULT 0");}catch{}
+    try{ctx.storage.sql.exec("ALTER TABLE ops ADD COLUMN accepted_at INTEGER");}catch{}
+    try{ctx.storage.sql.exec("ALTER TABLE ops ADD COLUMN started_at INTEGER");}catch{}
     ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS fg_queue(id TEXT PRIMARY KEY,grant_id TEXT NOT NULL,enqueued INTEGER NOT NULL,deadline INTEGER NOT NULL,status TEXT NOT NULL)");
     ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS fg_queue_deadline ON fg_queue(deadline)");
     // Memory-only pending HTTP promises cannot survive a DO reconstruction.
@@ -116,7 +119,8 @@ export class DeviceSession extends DurableObject<Env> {
         const key=typeof body.input.idempotencyKey==="string" ? body.grantId+":"+body.input.idempotencyKey : null;
         if(key && this.ctx.storage.sql.exec("SELECT 1 FROM ops WHERE idem=?",key).toArray().length)
           return json(await this.dispatch(body));
-        if(!this.currentSocket())return json(failure("DEVICE_OFFLINE","Device has no active WebSocket",body.operationId));
+        if(!this.currentSocket()&&!await this.waitForSocket(5_000))
+          return json(failure("DEVICE_OFFLINE","Device did not reconnect within 5s",body.operationId));
         const now=Date.now(), deadline=now+LIMITS.queueTtlMs;
         // This queue is for *live synchronous* MCP calls. On DO restart abandoned queue records
         // become unknown; DO must never silently replay a potentially side-effecting operation.
@@ -156,7 +160,9 @@ export class DeviceSession extends DurableObject<Env> {
     const row=this.lookup(opId);
     if(!row || row.grant_id!==body.grantId) return failure("OPERATION_UNKNOWN","Operation not found or expired",opId);
     if(body.name==="operation_get")
-      return { operationId:opId,status:row.status,tool:row.tool,createdAt:row.created,historyEvicted:Boolean(row.history_evicted),
+      return { operationId:opId,status:row.status,tool:row.tool,createdAt:row.created,
+        dispatchAttempts:Number(row.dispatch_attempts??0),acceptedAt:row.accepted_at??null,startedAt:row.started_at??null,
+        historyEvicted:Boolean(row.history_evicted),
         stdoutBytes:row.stdout_bytes,stderrBytes:row.stderr_bytes,
         result:row.result?JSON.parse(row.result):null };
     if(row.history_evicted)return failure("HISTORY_EVICTED","Foreground text history was evicted to honor the per-device storage budget",opId);
@@ -206,7 +212,8 @@ export class DeviceSession extends DurableObject<Env> {
         return failure("OPERATION_UNKNOWN","Idempotent operation has no live waiter; inspect operation history before retry",prev.id);
       }
     }
-    if(!this.currentSocket()) return failure("DEVICE_OFFLINE","Device has no active WebSocket",body.operationId);
+    if(!this.currentSocket()&&!await this.waitForSocket(5_000))
+      return failure("DEVICE_OFFLINE","Device did not reconnect within 5s",body.operationId);
     const opId=body.operationId;
     const timeout=Math.min(LIMITS.maxForegroundTimeoutMs,Math.max(1000,Number(body.input.timeoutMs??(isFg?LIMITS.defaultForegroundTimeoutMs:30_000))));
     const expires=Date.now()+timeout+10_000;
@@ -233,15 +240,24 @@ export class DeviceSession extends DurableObject<Env> {
       },timeout+5_000);
       this.waiters.set(opId,{resolve,timer,subscribers:new Set()});
     });
-    try {
-      socket.send(JSON.stringify({version:PROTOCOL_VERSION,type:"operation.dispatch",messageId:crypto.randomUUID(),
-        deviceId:"self",connectionEpoch:epoch,operationId:opId,grantId:body.grantId,
+    // Until the device acknowledges receipt, the frame may have been dropped by a
+    // half-open WebSocket. Re-send the SAME operation ID; the device persists a
+    // receipt before doing work and only acknowledges duplicates, never re-executes.
+    const sendDispatch=(target:WebSocket)=>{
+      const targetEpoch=(target.deserializeAttachment() as {epoch?:number}|null)?.epoch??this.epoch();
+      target.send(JSON.stringify({version:PROTOCOL_VERSION,type:"operation.dispatch",messageId:crypto.randomUUID(),
+        deviceId:"self",connectionEpoch:targetEpoch,operationId:opId,grantId:body.grantId,
         ...(typeof body.actorName==="string"?{actorName:body.actorName.slice(0,80)}:{}),
         expiresAt:new Date(expires).toISOString(),requestHash,toolName:body.name,input}));
-    } catch(error) {
-      this.finish(opId,failure("DEVICE_DISCONNECTED",String(error),opId),"unknown");
-    }
-    return await response;
+      this.ctx.storage.sql.exec("UPDATE ops SET dispatch_attempts=dispatch_attempts+1 WHERE id=?",opId);
+    };
+    try{sendDispatch(socket);}catch{/* A later retry may use the next connection. */}
+    const dispatchRetry=setInterval(()=>{
+      if(this.lookup(opId)?.status!=="dispatched"){clearInterval(dispatchRetry);return;}
+      const current=this.currentSocket();
+      if(current)try{sendDispatch(current);}catch{/* Retry while the waiter remains live. */}
+    },4_000);
+    try{return await response;}finally{clearInterval(dispatchRetry);}
   }
 
   private finish(id:string,result:Record<string,unknown>,status:string) {
@@ -289,10 +305,10 @@ export class DeviceSession extends DurableObject<Env> {
     if(msg.connectionEpoch!==attachment.epoch) return;
     if(msg.type==="device.hello") return;
     if(msg.type==="operation.accepted") {
-      this.ctx.storage.sql.exec("UPDATE ops SET status='accepted' WHERE id=? AND status='dispatched'",msg.operationId);return;
+      this.ctx.storage.sql.exec("UPDATE ops SET status='accepted',accepted_at=COALESCE(accepted_at,?) WHERE id=? AND status IN ('dispatched','accepted')",Date.now(),msg.operationId);return;
     }
     if(msg.type==="operation.started") {
-      this.ctx.storage.sql.exec("UPDATE ops SET status='running' WHERE id=? AND status IN ('dispatched','accepted')",msg.operationId);return;
+      this.ctx.storage.sql.exec("UPDATE ops SET status='running',started_at=COALESCE(started_at,?),accepted_at=COALESCE(accepted_at,?) WHERE id=? AND status IN ('dispatched','accepted','running')",Date.now(),Date.now(),msg.operationId);return;
     }
     if(msg.type==="operation.result.begin") {
       const row=this.lookup(msg.operationId);

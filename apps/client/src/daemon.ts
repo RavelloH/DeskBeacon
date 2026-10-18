@@ -46,6 +46,8 @@ export class ClientDaemon extends EventEmitter {
   private forceRefresh=false;
   private resultAckIds=new Map<string,string>();
   private replayInProgress=false;
+  // Memory-only execution guard: a repeated dispatch with the same ID must never restart work.
+  private operationInFlight=new Set<string>();
   private disconnectTimer:NodeJS.Timeout|undefined;
   private keepaliveTimer:NodeJS.Timeout|undefined;
   private handshakeTimer:NodeJS.Timeout|undefined;
@@ -59,6 +61,8 @@ export class ClientDaemon extends EventEmitter {
   private latencyMs:number|null=null;
   private lastHeartbeatAt:number|null=null;
   private heartbeatMisses=0;
+  private socketOpenedAt=0;
+  private heartbeatReplies=0;
   private cpuSample=process.cpuUsage();
   private cpuSampleAt=process.hrtime.bigint();
   private cpuPercent=0;
@@ -172,6 +176,7 @@ export class ClientDaemon extends EventEmitter {
     const target=this.config.url.replace(/^http:/,'ws:').replace(/^https:/,'wss:').replace(/\/$/,'')+'/device/connect';
     const socket=new WebSocket(target,{headers:{Authorization:'Bearer '+this.config.accessToken}});
     this.ws=socket;this.ready=false;
+    this.socketOpenedAt=Date.now();
     // A stalled TCP/TLS/WebSocket handshake must not leave the daemon stuck in connecting.
     this.handshakeTimer=setTimeout(()=>{
       if(this.ws===socket&&!this.ready){
@@ -182,8 +187,13 @@ export class ClientDaemon extends EventEmitter {
     },10_000);
     this.handshakeTimer.unref();
     socket.on('open',()=>{
+      this.socketOpenedAt=Date.now();
+      this.heartbeatReplies=0;
+      this.lastHeartbeatAt=null;
+      this.heartbeatAwaiting=false;
+      this.heartbeatMisses=0;
       this.recordConnection('websocket_open');
-      this.state='connected';this.emit('change');
+      this.state='connecting';this.emit('change');
       // Cloudflare DO replies using WebSocket auto-response without waking its handler.
       const heartbeat=()=>{
         if(socket.readyState!==WebSocket.OPEN||!this.ready)return;
@@ -198,8 +208,9 @@ export class ClientDaemon extends EventEmitter {
         this.heartbeatAwaiting=true;
         socket.send('ping');
       };
-      // Keep proxy/NAT idle connections alive and detect silent half-open sockets sooner.
-      this.keepaliveTimer=setInterval(heartbeat,20_000);
+      // Some intermediate links terminate an idle WebSocket after ~20 seconds.
+      // Send keepalives well before that deadline, not exactly at it.
+      this.keepaliveTimer=setInterval(heartbeat,5_000);
       this.keepaliveTimer.unref();
     });
     socket.on('message',raw=>{void this.message(raw.toString()).catch(e=>{console.error('Remote message:',err(e));});});
@@ -207,7 +218,9 @@ export class ClientDaemon extends EventEmitter {
       if(this.ws!==socket)return;
       if(this.handshakeTimer){clearTimeout(this.handshakeTimer);this.handshakeTimer=undefined;}
       if(this.keepaliveTimer){clearInterval(this.keepaliveTimer);this.keepaliveTimer=undefined;}
-      this.recordConnection('websocket_closed','code='+code+' reason='+reason.toString());
+      const age=Date.now()-this.socketOpenedAt;
+      const pongAge=this.lastHeartbeatAt===null?'never':String(Date.now()-this.lastHeartbeatAt)+'ms';
+      this.recordConnection('websocket_closed','code='+code+' age='+age+'ms pongAge='+pongAge+' awaiting='+this.heartbeatAwaiting+' misses='+this.heartbeatMisses+' reason='+reason.toString());
       console.error('DeskBeacon WebSocket closed:',code,reason.toString());this.ready=false;this.state='disconnected';
       this.heartbeatAwaiting=false;this.latencyMs=null;this.emit('change');
       if(this.disconnectTimer)clearTimeout(this.disconnectTimer);
@@ -284,7 +297,9 @@ export class ClientDaemon extends EventEmitter {
       if(this.heartbeatAwaiting){
         this.latencyMs=Math.round(performance.now()-this.heartbeatSentAt);
         this.lastHeartbeatAt=Date.now();
-        this.heartbeatAwaiting=false;this.heartbeatMisses=0;this.emit('change');
+        this.heartbeatAwaiting=false;this.heartbeatMisses=0;
+        if(++this.heartbeatReplies===1)this.recordConnection('first_pong','rttMs='+this.latencyMs);
+        this.emit('change');
       }
       return;
     }
@@ -335,10 +350,15 @@ export class ClientDaemon extends EventEmitter {
     const prev=this.supervisor.hasReceipt(opId);
     if(prev){
       if(prev.status==='completed'&&prev.result)await this.final(opId,tool,JSON.parse(prev.result));
-      else this.send({type:'operation.failed',operationId:opId,payload:{code:'OPERATION_UNKNOWN',message:'Operation was already accepted and may still be running',retryable:false}});
+      else if(prev.status==='accepted'&&this.operationInFlight.has(opId)){
+        // A DO delivery retry is a receipt request, not a second execution.
+        this.send({type:'operation.accepted',operationId:opId,payload:{acceptedAt:now()}});
+        this.send({type:'operation.started',operationId:opId,payload:{startedAt:now()}});
+      }else this.send({type:'operation.failed',operationId:opId,payload:{code:'OPERATION_UNKNOWN',message:'A previous execution is no longer live; check its result before retrying',retryable:false}});
       return;
     }
     this.supervisor.record(opId,'accepted',{});
+    this.operationInFlight.add(opId);
     const description=String(input.description??tool);
     const privateKey=/token|secret|password|cookie|authorization|api[_-]?key|private[_-]?key/i;
     const redact=(key:string,value:any)=>{
@@ -359,8 +379,12 @@ export class ClientDaemon extends EventEmitter {
         requestPreview.length>6000?JSON.stringify({summary:'参数过大，详情已省略'}):requestPreview);
     this.activityRevision++;
     this.emit('change');
-    this.send({type:'operation.accepted',operationId:opId,payload:{acceptedAt:now()}});
-    this.send({type:'operation.started',operationId:opId,payload:{startedAt:now()}});
+    // Acceptance is already persisted locally. A disconnect during the ACK
+    // must not silently prevent an otherwise valid, once-only execution.
+    try{this.send({type:'operation.accepted',operationId:opId,payload:{acceptedAt:now()}});}
+    catch{this.recordConnection('operation_ack_deferred','accepted '+opId);}
+    try{this.send({type:'operation.started',operationId:opId,payload:{startedAt:now()}});}
+    catch{this.recordConnection('operation_ack_deferred','started '+opId);}
     try{
       const result=await this.execute(tool,input,opId,m.grantId);
       this.supervisor.record(opId,'completed',result);
@@ -388,7 +412,7 @@ export class ClientDaemon extends EventEmitter {
       if(this.ws?.readyState===WebSocket.OPEN){
         this.send({type:'operation.failed',operationId:opId,payload:{code:message.split(':')[0]?.slice(0,64)||'INTERNAL',message:message.slice(0,2000),retryable:false}});
       }
-    }
+    }finally{this.operationInFlight.delete(opId);}
   }
   private async final(id:string,tool:string,result:any){
     if(tool==='exec_foreground'){

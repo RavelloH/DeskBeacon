@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomBytes, createHash } from 'node:crypto';
+import {readFileSync} from 'node:fs';
 import { ClientDaemon } from '../../client/dist/daemon.js';
 const base='http://127.0.0.1:8787';
 const cookies=new Map();
@@ -129,6 +130,12 @@ try{
    daemon.ws.send('ping');
  });
  console.log('PASS DO hibernation auto-response ping/pong');
+ const idleSocket=daemon.ws,idleStart=Date.now();
+ await new Promise(r=>setTimeout(r,26_000));
+ assert.equal(daemon.ws,idleSocket,'the same WebSocket must remain connected during a 26s idle period');
+ assert.equal((await daemon.status()).state,'connected');
+ assert.ok((await daemon.status()).lastHeartbeatAt>idleStart+18_000,'5s keepalive must receive replies during idle');
+ console.log('PASS 26-second idle stays on same WebSocket with periodic keepalive replies');
  await new Promise(r=>setTimeout(r,500));
  let r=await mcp(agent.access_token,'initialize',{protocolVersion:'2025-06-18',capabilities:{},
    clientInfo:{name:'DeskBeacon E2E',version:'0.1.0'}},1);
@@ -144,6 +151,64 @@ try{
  console.log('PASS device_info Worker -> DO -> Node');
  const decode=(answer)=>{const line=answer.raw.split('\n').find(x=>x.startsWith('data: '));if(!line)throw Error('missing SSE data '+answer.raw.slice(0,200));return JSON.parse(line.slice(6)).result?.structuredContent;};
  const invoke=async(name,args,n)=>{const result=await mcp(agent.access_token,'tools/call',{name,arguments:{deviceId:device.clientId,...args}},n);assert.equal(result.status,200,name+' HTTP');const data=decode(result);if(!data)throw Error('No structured data '+name);if(data.isError)throw Error(name+' ERROR '+JSON.stringify(data));return data;};
+ const firstDispatch=daemon.dispatch.bind(daemon);
+ let skippedDispatch=false;
+ daemon.dispatch=async msg=>{
+  if(msg.toolName==='device_info'&&!skippedDispatch){skippedDispatch=true;return;}
+  return firstDispatch(msg);
+ };
+ let rescued;
+ try{rescued=await invoke('device_info',{},450);}finally{daemon.dispatch=firstDispatch;}
+ assert.ok(skippedDispatch&&rescued.data?.deviceId,'lost first dispatch must recover without caller retry');
+ const rescueHistory=await invoke('operation_get',{operationId:rescued.operationId},451);
+ assert.ok(rescueHistory.dispatchAttempts>=2,'DO must resend unacknowledged dispatch');
+ console.log('PASS lost operation.dispatch is retried with original operationId');
+
+ const originalSend=daemon.send.bind(daemon);
+ let skippedAcks=0;
+ daemon.send=payload=>{
+  if((payload.type==='operation.accepted'||payload.type==='operation.started')&&skippedAcks<2){skippedAcks++;return 'intentionally-dropped';}
+  return originalSend(payload);
+ };
+ const onceFile='E:/DeskBeacon/.test-data/delivery-once-'+Date.now()+'.txt';
+ const onceScript='const fs=require("node:fs");fs.appendFileSync('+JSON.stringify(onceFile)+',"1");setTimeout(()=>console.log("delivered-once"),6500)';
+ let once;
+ try{once=await invoke('exec_foreground',{description:'Lost acceptance ACK should not rerun side effects',command:{mode:'program',program:'node',args:['-e',onceScript]},timeoutMs:12000},452);}finally{daemon.send=originalSend;}
+ assert.equal(skippedAcks,2);
+ assert.ok(once.outputPreview.includes('delivered-once'));
+ assert.equal(readFileSync(onceFile,'utf8'),'1','duplicate delivery must never rerun process');
+ console.log('PASS retry after lost acceptance ACK preserves exactly-once command execution');
+ // Even if the transport throws while sending both ACK frames, execution must
+ // continue and replay its final result; do not strand the operation as accepted.
+ let throwingAcks=0;
+ daemon.send=payload=>{
+  if((payload.type==='operation.accepted'||payload.type==='operation.started')&&throwingAcks<2){
+   throwingAcks++;throw Error('simulated WebSocket send failure');
+  }
+  return originalSend(payload);
+ };
+ let throwRecovery;
+ try{throwRecovery=await invoke('exec_foreground',{description:'E2E transport failure before ACK',
+  command:{mode:'program',program:'node',args:['-e','console.log("transport-ack-recovered")']},timeoutMs:9000},453);
+ }finally{daemon.send=originalSend;}
+ assert.equal(throwingAcks,2);
+ assert.equal(throwRecovery.data.exitCode,0);
+ assert.ok(throwRecovery.outputPreview.includes('transport-ack-recovered'));
+ console.log('PASS ACK send exceptions do not strand accepted operations');
+ // A request issued during the one-second reconnect window must wait briefly
+ // for the device rather than failing immediately with DEVICE_OFFLINE.
+ const scheduleBefore=daemon.scheduleReconnect;
+ daemon.scheduleReconnect=()=>{};
+ try{
+  daemon.ws.terminate();
+  await new Promise(r=>setTimeout(r,850));
+  const pendingCall=invoke('device_info',{},454);
+  await new Promise(r=>setTimeout(r,800));
+  await daemon.connect();
+  const afterRecovery=await pendingCall;
+  assert.ok(afterRecovery.data?.deviceId,'RPC during transient outage should recover');
+ }finally{daemon.scheduleReconnect=scheduleBefore;}
+ console.log('PASS RPC started during WebSocket reconnect is held until device returns');
  const combinedBatch=await invoke('batch',{description:'E2E mixed tool batch',stages:[
    {parallel:true,calls:[
      {id:'read-project',tool:'fs_read',input:{path:'E:/DeskBeacon/package.json',maxBytes:900}},
