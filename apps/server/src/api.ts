@@ -4,8 +4,9 @@ import { toolInputSchemas, TOOL_NAMES, type ToolName } from "@deskbeacon/protoco
 import type { Env, GrantProps, DeviceRecord } from "./env.js";
 import { executeToolBatch } from "./batch.js";
 import type { BatchInput } from "@deskbeacon/protocol";
+import { resolveActorName } from "./oauth-actor.js";
 
-type ApiCtx = ExecutionContext & { props?: GrantProps; auth?: { scope?: string[] } };
+type ApiCtx = ExecutionContext & { props?: GrantProps; auth?: { scope?: string[]; clientId?: string } };
 const scopeAgent = "deskbeacon:agent", scopeDevice = "deskbeacon:device";
 
 async function registry(env: Env): Promise<DeviceRecord[]> {
@@ -140,7 +141,8 @@ export async function handleApiRequest(request: Request, env: Env, ctx: ApiCtx):
   if (pathname === "/mcp") {
     if (props?.kind !== "agent" || !scopes.includes(scopeAgent)) return Response.json({ error: "FORBIDDEN" }, { status: 403 });
     const grantId = props.grantId;
-    const handler = createMcpHandler(() => makeMcpServer(env, grantId, props.actorName), { legacy: "stateless" });
+    const actorName = await resolveActorName(env, props.actorName, ctx.auth?.clientId);
+    const handler = createMcpHandler(() => makeMcpServer(env, grantId, actorName), { legacy: "stateless" });
     return handler.fetch(request);
   }
   if (pathname === "/device/connect") {

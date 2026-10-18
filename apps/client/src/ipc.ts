@@ -8,6 +8,80 @@ import { dataDir } from './daemon.js';
 export const ipcPath=process.env.DESKBEACON_IPC_PATH ?? (platform()==='win32'?'\\\\.\\pipe\\deskbeacon-'+process.env.USERNAME:
   join(dataDir,'daemon.sock'));
 
+const defaultOutputBytes=16*1024;
+const maxOutputBytes=64*1024;
+const continuationByte=(byte:number)=>byte>=0x80&&byte<=0xbf;
+function utf8CharacterBytes(bytes:Buffer,offset:number,totalBytes:number):number{
+ const first=bytes[offset]!;
+ let length=first>=0xc2&&first<=0xdf?2:first>=0xe0&&first<=0xef?3:first>=0xf0&&first<=0xf4?4:1;
+ if(length===1)return 1;
+ if(offset+length>bytes.length){
+   // An incomplete sequence at actual EOF is malformed text, so consume it as
+   // replacement text. Otherwise leave it for the next page.
+   return totalBytes<=bytes.length?1:0;
+ }
+ for(let i=1;i<length;i++)if(!continuationByte(bytes[offset+i]!))return 1;
+ const second=bytes[offset+1]!;
+ if((first===0xe0&&second<0xa0)||(first===0xed&&second>=0xa0)||
+    (first===0xf0&&second<0x90)||(first===0xf4&&second>=0x90))return 1;
+ return length;
+}
+function safeOperationId(value:unknown):string{
+ if(typeof value!=='string'||value.length<1||value.length>128||! /^[a-zA-Z0-9_.:-]+$/.test(value)||value==='.'||value==='..')
+   throw Error('INVALID_OPERATION_ID');
+ return value.replace(/[^a-zA-Z0-9_.-]/g,'_');
+}
+function outputPage(operationId:unknown,stream:unknown,byteOffset:unknown,maxBytes:unknown){
+ const safeId=safeOperationId(operationId);
+ if(stream!=='stdout'&&stream!=='stderr')throw Error('INVALID_OUTPUT_STREAM');
+ const offset=byteOffset===undefined?0:byteOffset;
+ if(typeof offset!=='number'||!Number.isSafeInteger(offset)||offset<0)throw Error('INVALID_BYTE_OFFSET');
+ const budget=maxBytes===undefined?defaultOutputBytes:maxBytes;
+ if(typeof budget!=='number'||!Number.isSafeInteger(budget)||budget<1||budget>maxOutputBytes)
+   throw Error('INVALID_OUTPUT_BUDGET');
+ const root=join(dataDir,'output');
+ const path=join(root,safeId+(stream==='stdout'?'.out':'.err'));
+ if(!existsSync(path)){
+   if(offset!==0)throw Error('INVALID_BYTE_OFFSET');
+   return{text:'',nextOffset:0,totalBytes:0,hasMore:false,stream};
+ }
+ const totalBytes=statSync(path).size;
+ if(offset>totalBytes)throw Error('INVALID_BYTE_OFFSET');
+ if(offset===totalBytes)return{text:'',nextOffset:offset,totalBytes,hasMore:false,stream};
+
+ // A caller-supplied cursor must point between UTF-8 code points. Cursors
+ // returned below always do; reject hand-crafted offsets into a multibyte
+ // character instead of returning mojibake or silently dropping its tail.
+ if(offset>0){
+   const lookbackStart=Math.max(0,offset-3),lookbackLength=Math.min(totalBytes-lookbackStart,offset-lookbackStart+3);
+   const lookback=Buffer.alloc(lookbackLength),fd=openSync(path,'r');
+   try{readSync(fd,lookback,0,lookbackLength,lookbackStart);}finally{closeSync(fd);}
+   const boundary=offset-lookbackStart;
+   for(let i=Math.max(0,boundary-3);i<boundary;i++){
+     const width=utf8CharacterBytes(lookback,i,lookback.length);
+     if(width>1&&i+width>boundary&&i+width<=lookback.length)throw Error('INVALID_BYTE_OFFSET');
+   }
+ }
+
+ const readLength=Math.min(totalBytes-offset,budget+3);
+ const bytes=Buffer.alloc(readLength),fd=openSync(path,'r');
+ try{readSync(fd,bytes,0,readLength,offset);}finally{closeSync(fd);}
+ let used=0;
+ while(used<bytes.length){
+   const width=utf8CharacterBytes(bytes,used,totalBytes-offset);
+   if(width===0)break;
+   if(used+width>budget){
+     // A budget smaller than one UTF-8 character still makes progress by
+     // returning that character intact (at most four bytes).
+     if(used===0)used=width;
+     break;
+   }
+   used+=width;
+ }
+ const nextOffset=offset+used;
+ return{text:bytes.subarray(0,used).toString('utf8'),nextOffset,totalBytes,hasMore:nextOffset<totalBytes,stream};
+}
+
 export function startIpc(daemon:ClientDaemon){
  // Exclusive atomic lock prevents two TUI windows from opening separate device
  // connections, including on Unix where deleting an active socket is unsafe.
@@ -51,18 +125,27 @@ export function startIpc(daemon:ClientDaemon){
          try{
            let result:any;
            if(request.action==='subscribe'){
+             let statusReadPending=false,statusDirty=false;
              const notify=()=>{
                if(socket.destroyed)return;
-               try{socket.write(JSON.stringify({result:daemon.status()})+'\n');}catch{}
+               if(statusReadPending){statusDirty=true;return;}
+               statusReadPending=true;
+               void daemon.status().then(status=>{
+                 if(!socket.destroyed)socket.write(JSON.stringify({result:status})+'\n');
+               }).catch(()=>{}).finally(()=>{
+                 statusReadPending=false;
+                 if(statusDirty){statusDirty=false;notify();}
+               });
              };
              daemon.on('change',notify);
              socket.once('close',()=>daemon.off('change',notify));
              notify();
              return;
            }
-           if(request.action==='status')result=daemon.status();
+           if(request.action==='status')result=await daemon.status();
            else if(request.action==='stop')result=await daemon.supervisor.stop(String(request.taskId));
            else if(request.action==='exit') {result={stopping:true};setImmediate(()=>{void daemon.shutdown().finally(()=>server.close());});}
+           else if(request.action==='output')result=outputPage(request.operationId,request.stream,request.byteOffset,request.maxBytes);
            else if(request.action==='logs') {
              const row=daemon.db.prepare('SELECT * FROM activity WHERE id=?').get(String(request.operationId));
              const id=String(request.operationId);

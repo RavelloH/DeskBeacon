@@ -47,7 +47,7 @@ export class TaskSupervisor{
  private cancelled=new Set<string>();
  private fg=new Map<string,Running>();
  private bg=new Map<string,Running>();
- constructor(private db:DatabaseSync,private outputDir:string) {
+ constructor(private db:DatabaseSync,private outputDir:string,private onChange:()=>void=()=>{}) {
    mkdirSync(outputDir,{recursive:true});
    db.exec("CREATE TABLE IF NOT EXISTS receipts(id TEXT PRIMARY KEY, status TEXT, created INTEGER, result TEXT)");
    db.exec("CREATE TABLE IF NOT EXISTS background(id TEXT PRIMARY KEY, operation_id TEXT, description TEXT, pid INTEGER, status TEXT, start INTEGER, exit_code INTEGER, stdout_path TEXT, stderr_path TEXT)");
@@ -104,12 +104,12 @@ export class TaskSupervisor{
      this.db.prepare('INSERT INTO background(id,operation_id,description,pid,status,start,stdout_path,stderr_path) VALUES(?,?,?,?,?,?,?,?)')
        .run(id,id,description,child.pid??0,'running',Date.now(),task.out,task.err);
      child.on('exit',(code)=>this.db.prepare("UPDATE background SET status='exited',exit_code=? WHERE id=?").run(code,id));
-     child.on('close',()=>{outFile.end();errFile.end();this.bg.delete(id);});
+     child.on('close',()=>{outFile.end();errFile.end();this.bg.delete(id);this.onChange();});
      return {backgroundTaskId:id,pid:child.pid??null,description,status:'running',cwd:p.cwd,program:p.exe};
    }
    const code=await new Promise<number|null>(resolve=>child.once('close',(code)=>resolve(code)));
    if(timeout)clearTimeout(timeout);
-   outFile.end();errFile.end();this.fg.delete(id);
+   outFile.end();errFile.end();this.fg.delete(id);this.onChange();
    return {exitCode:code,stdout,stderr,timedOut,outputLimit:outputLimitReached,spawnError,
      cancelled:this.cancelled.has(id)||[...this.cancelled].some(x=>id.startsWith(x+":")),
      durationMs:Date.now()-task.since,program:p.exe,cwd:p.cwd,

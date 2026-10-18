@@ -10,7 +10,7 @@ export type DemoTask={id:string;description:string;start:number;kind:'foreground
 export type DemoTransfer={id:string;status:string;bytes:number;totalBytes:number;path:string;start:number};
 export type DemoStatus={
  state:string;deviceName:string;deviceId:string;server:string;runtimeMode:'demo';
- uptimeMs:number;cpuPercent:number;memoryBytes:number;latencyMs:number|null;
+ uptimeMs:number;cpuPercent:number;memoryBytes:number;availableMemoryBytes:number;totalMemoryBytes:number;latencyMs:number|null;
  operationsTotal:number;active:DemoTask[];transfers:DemoTransfer[];activity:DemoActivity[];
 };
 const root=process.platform==='win32'?'C:\\Projects\\DeskBeacon':'/projects/deskbeacon';
@@ -44,7 +44,8 @@ export function createDemoStatus(scenario:DemoScenario='connected',now=Date.now(
  ];
  const base:DemoStatus={state:'connected',deviceName:'ASUS-TUF-F16',deviceId:'demo-offline-device',
  server:'https://example.invalid',runtimeMode:'demo',uptimeMs:3_900_000,
- cpuPercent:8.4,memoryBytes:188_743_680,latencyMs:52,operationsTotal:activityList.length,
+ cpuPercent:8.4,memoryBytes:188_743_680,availableMemoryBytes:9_126_805_504,totalMemoryBytes:17_179_869_184,
+ latencyMs:52,operationsTotal:activityList.length,
  active:[],transfers:[],activity:activityList};
  switch(scenario){
   case 'connecting':return {...base,state:'connecting',latencyMs:null};
@@ -64,7 +65,8 @@ export function createDemoStatus(scenario:DemoScenario='connected',now=Date.now(
     bytes:786_432,totalBytes:1_572_864,start:now-31_000}]};
   case 'crowded':return {...base,active:Array.from({length:9},(_,index)=>
     task('task-'+(index+1),'后台任务 #'+(index+1)+'：'+(['测试监听器','构建服务','类型检查'][index%3]),
-    now-((index+1)*80_000))),operationsTotal:99,memoryBytes:612_368_384,cpuPercent:37.2};
+    now-((index+1)*80_000))),operationsTotal:99,memoryBytes:612_368_384,
+    availableMemoryBytes:2_412_368_384,cpuPercent:37.2};
   default:return base;
  }
 }
@@ -95,7 +97,9 @@ export function advanceDemo(status:DemoStatus,key:string,now=Date.now()):DemoSta
    return {...status,transfers:[{...existing,bytes:Math.min(existing.totalBytes,existing.bytes+393_216)}]};
  }
  if(key==='9')return {...status,cpuPercent:(status.cpuPercent+19.1)%100,
-   memoryBytes:Math.round(status.memoryBytes*1.15),operationsTotal:status.operationsTotal+4,
+   memoryBytes:Math.round(status.memoryBytes*1.15),
+   availableMemoryBytes:Math.max(512*1024*1024,Math.round(status.availableMemoryBytes*0.85)),
+   operationsTotal:status.operationsTotal+4,
    latencyMs:status.latencyMs===null?42:status.latencyMs>=200?18:status.latencyMs+84};
  return status;
 }
@@ -106,6 +110,6 @@ export const demoHelp=[
  '8 增加传输进度 / 重置进度',
  '9 改变 CPU、内存、命令数量和 RTT',
  '0 恢复默认场景',
- 's 搜索 · / 命令 · Tab 切换焦点 · q 退出',
+ '/ 搜索 · > 命令 · Tab 切换焦点 · q 退出',
  '演示模式完全离线，所有操作均为模拟数据'
 ];

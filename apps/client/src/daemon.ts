@@ -6,6 +6,7 @@ import { hostname, homedir, platform, arch, totalmem, freemem, cpus } from 'node
 import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { WebSocket } from 'ws';
+import si from 'systeminformation';
 import { PROTOCOL_VERSION, LIMITS, ProtocolMessageSchema, type ProtocolMessage } from '@deskbeacon/protocol';
 import { TaskSupervisor } from './process.js';
 import { fileTool } from './filesystem.js';
@@ -25,6 +26,11 @@ function availableShells(){
 }
 const sha=(value:string)=>createHash('sha256').update(value).digest('hex');
 const err=(e:unknown)=>e instanceof Error?e.message:String(e);
+function safeActorName(value:unknown):string|null{
+  if(typeof value!=='string')return null;
+  const cleaned=value.replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g,'').trim();
+  return [...cleaned].slice(0,80).join('')||null;
+}
 export class ClientDaemon extends EventEmitter {
   private ws:WebSocket|null=null;
   private epoch=0;
@@ -52,6 +58,23 @@ export class ClientDaemon extends EventEmitter {
   private cpuSample=process.cpuUsage();
   private cpuSampleAt=process.hrtime.bigint();
   private cpuPercent=0;
+  private systemMemory={availableMemoryBytes:freemem(),totalMemoryBytes:totalmem()};
+  private systemMemorySampleAt=0;
+  private systemMemorySample:Promise<void>|undefined;
+  private async refreshSystemMemory(){
+    if(Date.now()-this.systemMemorySampleAt>=1000){
+      if(!this.systemMemorySample){
+        this.systemMemorySample=si.mem().then(memory=>{
+          if(Number.isFinite(memory.available)&&memory.available>=0&&Number.isFinite(memory.total)&&memory.total>0)
+            this.systemMemory={availableMemoryBytes:memory.available,totalMemoryBytes:memory.total};
+        }).catch(()=>{}).finally(()=>{
+          this.systemMemorySampleAt=Date.now();this.systemMemorySample=undefined;
+        });
+      }
+      await this.systemMemorySample;
+    }
+    return this.systemMemory;
+  }
   private async refreshAccessToken(){
     if(!this.config.refreshToken)return;
     if(!this.forceRefresh&&this.config.accessTokenExpiresAt&&Date.now()<this.config.accessTokenExpiresAt-60_000)return;
@@ -79,9 +102,10 @@ export class ClientDaemon extends EventEmitter {
     this.db.exec('CREATE TABLE IF NOT EXISTS unacked_results (operation_id TEXT PRIMARY KEY, tool TEXT NOT NULL, created INTEGER NOT NULL)');
     try{this.db.exec('ALTER TABLE unacked_results ADD COLUMN device_id TEXT');}catch{}
     this.db.prepare('DELETE FROM unacked_results WHERE device_id IS NULL OR device_id<>?').run(config.deviceId);
-    this.supervisor=new TaskSupervisor(this.db,join(dataDir,'output'));
+    this.supervisor=new TaskSupervisor(this.db,join(dataDir,'output'),()=>this.emit('change'));
   }
-  status(){
+  async status(){
+    const systemMemory=await this.refreshSystemMemory();
     const current=process.cpuUsage(),clock=process.hrtime.bigint();
     const elapsedUs=Number(clock-this.cpuSampleAt)/1000;
     if(elapsedUs>=800_000){
@@ -91,9 +115,15 @@ export class ClientDaemon extends EventEmitter {
     const total=this.db.prepare('SELECT COUNT(*) AS total FROM activity').get() as {total:number};
     return {state:this.state,runtimeMode:process.env.DESKBEACON_RUNTIME_MODE??'legacy',deviceId:this.config.deviceId,deviceName:this.config.deviceName,
       server:this.config.url,uptimeMs:Date.now()-this.startedAt,memoryBytes:process.memoryUsage().rss,
+      ...systemMemory,
       cpuPercent:Math.round(this.cpuPercent*10)/10,latencyMs:this.latencyMs,
       lastHeartbeatAt:this.lastHeartbeatAt,heartbeatMisses:this.heartbeatMisses,operationsTotal:total.total,
-      active:this.supervisor.active(),background:this.supervisor.list(),
+      active:this.supervisor.active().map(task=>{
+        // A long-running process can outlive the forty-row activity window.
+        const row=this.db.prepare('SELECT actor_name,grant_id,request_json,cwd FROM activity WHERE id=?').get(task.id) as
+          {actor_name:string|null;grant_id:string;request_json:string|null;cwd:string|null}|undefined;
+        return {...task,...(row?{actorName:row.actor_name,grantId:row.grant_id,requestJson:row.request_json,cwd:row.cwd}:{})};
+      }),background:this.supervisor.list(),
       transfers:[...this.transfers].map(([id,t])=>({id,...t})),
       activity:this.db.prepare('SELECT id,grant_id,actor_name,tool,description,status,time,finished_at,duration_ms,cwd,request_json,result FROM activity ORDER BY time DESC LIMIT 40').all()};
   }
@@ -267,6 +297,11 @@ export class ClientDaemon extends EventEmitter {
       this.send({type:'operation.failed',operationId:opId,payload:{code:'INVALID_INPUT',message:'Request invalid, changed or expired',retryable:false}});
       return;
     }
+    const actorName=safeActorName(m.actorName);
+    if(actorName){
+      this.db.prepare("UPDATE activity SET actor_name=? WHERE grant_id=? AND (actor_name IS NULL OR trim(actor_name)='' OR (actor_name='Agent' AND ?<>'Agent'))")
+        .run(actorName,m.grantId,actorName);
+    }
     const prev=this.supervisor.hasReceipt(opId);
     if(prev){
       if(prev.status==='completed'&&prev.result)await this.final(opId,tool,JSON.parse(prev.result));
@@ -290,7 +325,7 @@ export class ClientDaemon extends EventEmitter {
       (fileAction&&typeof pathHint==='string'?dirname(pathHint):pathHint)??process.cwd());
     const requestPreview=JSON.stringify(safeInput);
     this.db.prepare('INSERT OR REPLACE INTO activity(id,grant_id,actor_name,tool,description,status,time,cwd,request_json) VALUES(?,?,?,?,?,?,?,?,?)')
-      .run(opId,m.grantId,m.actorName??null,tool,description,'running',started,cwd,
+      .run(opId,m.grantId,actorName,tool,description,'running',started,cwd,
         requestPreview.length>6000?JSON.stringify({summary:'参数过大，详情已省略'}):requestPreview);
     this.emit('change');
     this.send({type:'operation.accepted',operationId:opId,payload:{acceptedAt:now()}});

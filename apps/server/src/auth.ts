@@ -1,5 +1,6 @@
 import { AuthorizationError, CimdFetchError } from "@cloudflare/workers-oauth-provider";
 import type { Env, GrantProps } from "./env.js";
+import { normalizeActorName } from "./oauth-actor.js";
 
 // Authorization UI, secret comparison and rate limit ported from E:/cf-browser-mcp/src/index.ts.
 import { AGENT_SCOPE, DEVICE_SCOPE, scopeToGrant } from "./oauth-scopes.js";
@@ -106,9 +107,10 @@ export async function handleAuthorize(request: Request, env: Env): Promise<Respo
 		if (!scope) return page("权限无效", "<h1>DeskBeacon 不支持请求的授权范围</h1>", 400);
 
 		const client = await oauth.lookupClient(approved.request.clientId);
+		const actorName = normalizeActorName(client?.clientName);
 		const props: GrantProps = scope === DEVICE_SCOPE
 		  ? { kind: "device", ownerId: "owner", deviceId: approved.request.clientId, deviceName: client?.clientName ?? "DeskBeacon device" }
-		  : { kind: "agent", ownerId: "owner", grantId: crypto.randomUUID(), actorName: client?.clientName?.slice(0,80) ?? "Agent" };
+		  : { kind: "agent", ownerId: "owner", grantId: crypto.randomUUID(), ...(actorName ? { actorName } : {}) };
 		const { redirectTo } = await oauth.completeAuthorization({
 			request: approved.request,
 			userId: "owner",

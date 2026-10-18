@@ -38,8 +38,10 @@
     "react": "^19.3.1",
     "screenshot-desktop": "^1.15.7",
     "sharp": "^0.35.5",
+    "string-width": "8.3.0",
     "systeminformation": "^5.33.15",
     "tar": "^7.5.22",
+    "wrap-ansi": "10.0.2",
     "ws": "^8.22.0"
   }
 }
