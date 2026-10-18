@@ -1,0 +1,36 @@
+import assert from 'node:assert/strict';
+import {mkdtempSync,writeFileSync,rmSync} from 'node:fs';
+import {join} from 'node:path';
+import {tmpdir} from 'node:os';
+import {fileTool} from '../dist/filesystem.js';
+const root=mkdtempSync(join(tmpdir(),'deskbeacon-file-range-'));
+const path=join(root,'big.txt');
+try{
+ const lines=Array.from({length:4000},(_,i)=>'line-'+i.toString().padStart(4,'0')+' alpha beta gamma delta 中文');
+ writeFileSync(path,lines.join('\n'),'utf8');
+ const middle=await fileTool('fs_read',{path,encoding:'utf8',lineOffset:3000,maxLines:2,maxBytes:256});
+ assert.equal(middle.content,lines.slice(3000,3002).join('\n'));
+ assert.equal(middle.linesRead,2);
+ assert.equal(middle.truncated,true);
+ assert.equal(middle.nextLineOffset,3002);
+ assert.equal(middle.readBytes,Buffer.byteLength(middle.content));
+ const last=await fileTool('fs_read',{path,encoding:'utf8',lineOffset:3999,maxLines:5,maxBytes:256});
+ assert.equal(last.content,lines[3999]);
+ assert.equal(last.truncated,false);
+ assert.equal(last.nextLineOffset,null);
+ const exhausted=await fileTool('fs_read',{path,encoding:'utf8',lineOffset:4005,maxLines:3,maxBytes:256});
+ assert.equal(exhausted.content,'');
+ assert.equal(exhausted.truncated,false);
+ const byteRange=await fileTool('fs_read',{path,encoding:'utf8',maxBytes:12,byteOffset:0});
+ assert.equal(byteRange.readBytes,12);
+ assert.equal(byteRange.nextByteOffset,12);
+ await assert.rejects(()=>fileTool('fs_read',{path,encoding:'base64',lineOffset:1}),/INCOMPATIBLE_FILE_RANGE/);
+ await assert.rejects(()=>fileTool('fs_read',{path,encoding:'utf8',lineOffset:1,byteOffset:1}),/INCOMPATIBLE_FILE_RANGE/);
+ await assert.rejects(()=>fileTool('fs_read',{path,encoding:'utf8',lineOffset:0,maxLines:1,maxBytes:4}),/LINE_EXCEEDS_MAX_BYTES/);
+ const utf16=join(root,'utf16.txt');
+ writeFileSync(utf16,'首行\n第二行\n第三行','utf16le');
+ const utf16Result=await fileTool('fs_read',{path:utf16,encoding:'utf16le',lineOffset:1,maxLines:1,maxBytes:256});
+ assert.equal(utf16Result.content,'第二行');
+ assert.equal(utf16Result.truncated,true);
+ console.log('PASS file line-range streaming, accurate truncation/continuation, UTF-16, and range errors');
+}finally{rmSync(root,{recursive:true,force:true,maxRetries:4,retryDelay:50});}

@@ -71,3 +71,8 @@ Agent UX friction verified: failed TCP probes surfaced as an opaque tool error i
 8. `operation_batch`: group short filesystem/search/stat reads under one RPC where latency dominates.
 
 Keep the initial v1 scope and avoid automatically exposing general-purpose destructive process-kill or external network upload surfaces. A tool should justify its addition through repeated Agent friction, not just feature count.
+
+
+### Follow-up: file ranges
+
+A real `fs_read(lineOffset:10,maxLines:8)` returned only the requested lines but reported `readBytes` equal to the entire source and `truncated:false`. More seriously, code beyond the initial byte window could not be read by line number. Replaced post-read string slicing with a bounded streaming line reader that scans from file start to the requested line, produces at most `maxBytes` of result text, and reports `linesRead`, `nextLineOffset`, `truncated`, and available `totalLines`. Byte-mode reads return `nextByteOffset`. Reject incompatible binary/line or simultaneous byte/line offsets. Added tests for large UTF-8 (including Chinese), UTF-16LE, EOF and too-small output budgets. Large line-offset scans are O(file prefix size); future indexing could optimize repeated deep jumps.

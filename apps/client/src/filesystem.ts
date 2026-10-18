@@ -1,4 +1,6 @@
 import * as fs from 'node:fs/promises';
+import {createReadStream} from 'node:fs';
+import {createInterface} from 'node:readline';
 import { createHash } from 'node:crypto';
 import { resolve, dirname, basename, join, relative, isAbsolute, sep } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -160,14 +162,42 @@ export async function fileTool(tool:string,input:Input,workspace?:string):Promis
    return{entries,truncated:queue.length>0};
  }
  case 'fs_read':{
+   const encoding=input.encoding??'utf8',hasLines=input.lineOffset!==undefined||input.maxLines!==undefined;
+   const max=input.maxBytes??65536,st=await fs.stat(path);
+   if(hasLines){
+     if(encoding==='base64')throw Error('INCOMPATIBLE_FILE_RANGE: base64 does not support line offsets');
+     if(input.byteOffset)throw Error('INCOMPATIBLE_FILE_RANGE: lineOffset cannot combine with byteOffset');
+     const start=input.lineOffset??0,lineLimit=input.maxLines??10000;
+     const decoded=encoding==='utf16le'?'utf16le':'utf8';
+     const stream=createReadStream(path,{encoding:decoded,highWaterMark:65536});
+     const lines=createInterface({input:stream,crlfDelay:Infinity});
+     const collected:string[]=[];let scanned=0,bytes=0,truncated=false,ended=false;
+     try{
+       for await(const line of lines){
+         if(scanned++<start)continue;
+         if(collected.length>=lineLimit){truncated=true;break;}
+         const needed=Buffer.byteLength((collected.length?'\n':'')+line,decoded);
+         if(bytes+needed>max){
+           if(collected.length===0)throw Error('LINE_EXCEEDS_MAX_BYTES: increase maxBytes');
+           truncated=true;break;
+         }
+         collected.push(line);bytes+=needed;
+       }
+       ended=!truncated;
+     }finally{lines.close();stream.destroy();}
+     return{path,content:collected.join('\n'),encoding,readBytes:bytes,totalBytes:st.size,
+       truncated,lineOffset:start,linesRead:collected.length,
+       nextLineOffset:truncated?start+collected.length:null,
+       ...(ended?{totalLines:scanned}:{})};
+   }
    const h=await fs.open(path,'r');
    try{
-     const st=await h.stat(),offset=Math.min(st.size,input.byteOffset??0),max=input.maxBytes??65536;
-     const buffer=Buffer.alloc(Math.min(max,st.size-offset));const {bytesRead}=await h.read(buffer,0,buffer.length,offset);
-     let text=input.encoding==='base64'?buffer.subarray(0,bytesRead).toString('base64'):
-       buffer.subarray(0,bytesRead).toString(input.encoding==='utf16le'?'utf16le':'utf8');
-     if(input.lineOffset!==undefined||input.maxLines!==undefined)text=text.split(/\r?\n/).slice(input.lineOffset??0,(input.lineOffset??0)+(input.maxLines??10000)).join('\n');
-     return{path,content:text,encoding:input.encoding,readBytes:bytesRead,totalBytes:st.size,truncated:offset+bytesRead<st.size};
+     const offset=Math.min(st.size,input.byteOffset??0);
+     const buffer=Buffer.alloc(Math.min(max,st.size-offset));
+     const {bytesRead}=await h.read(buffer,0,buffer.length,offset);
+     const content=buffer.subarray(0,bytesRead).toString(encoding==='base64'?'base64':encoding);
+     return{path,content,encoding,readBytes:bytesRead,totalBytes:st.size,truncated:offset+bytesRead<st.size,
+       nextByteOffset:offset+bytesRead<st.size?offset+bytesRead:null};
    }finally{await h.close();}
  }
  case 'fs_find':case 'fs_grep':return search(tool,input,path);
