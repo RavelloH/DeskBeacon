@@ -327,7 +327,7 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
  const [edit,setEdit]=useState<'command'|'search'|null>(null);
  const [text,setText]=useState(''),[query,setQuery]=useState('');
  const [commandIndex,setCommandIndex]=useState(0);
- const [settings,setSettings]=useState<{name?:string;url?:string;pending?:boolean;activeUrl?:string}>({});
+ const [settings,setSettings]=useState<{name?:string|undefined;url?:string|undefined;pending?:boolean;activeUrl?:string}>({});
  const commandMenu=edit==='command'?commandPalette(text,{
    name:settings.name??status?.deviceName,url:settings.url??status?.server}):null;
  const commandOptions=commandMenu?.items??[];
