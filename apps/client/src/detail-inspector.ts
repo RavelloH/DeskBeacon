@@ -2,7 +2,7 @@ import {fullNumberedBlock,type DetailLine} from './detail-presentation.js';
 import {languageForCommand,languageForPath} from './syntax-highlight.js';
 import type {ActivityEntry} from './presenter.js';
 
-export type InspectorTab='summary'|'input'|'stdout'|'stderr';
+export type InspectorTab='summary'|'input'|'result'|'stdout'|'stderr';
 export type FullSource={text:string;totalBytes:number;available:boolean;legacy?:boolean};
 
 const heading=(text:string):DetailLine=>({text,section:text,tone:'muted',bold:true});
@@ -61,6 +61,44 @@ export function inspectorInput(entry:ActivityEntry,source:FullSource|null):Detai
  // above are just convenient syntax-highlighted views, not replacements.
  rows.push(heading('COMPLETE INPUT · JSON'));
  rows.push(...fullNumberedBlock(format(input),'json'));
+ return rows;
+}
+/** Show the complete structured tool result from local receipts, not the
+ * activity list's truncated/redacted preview. */
+export function inspectorResult(entry:ActivityEntry,source:FullSource|null):DetailLine[]{
+ if(!source)return [message('正在读取完整结果…')];
+ const raw=source.available?source.text:(entry.result??'');
+ if(!raw)return [message('此操作没有保存可读取的结果','warning')];
+ const rows:DetailLine[]=[];
+ if(!source.available)rows.push(message('历史完整回执已缺失；以下仅为摘要缓存，无法恢复被删减的数据。','warning'));
+ const result=data(raw);
+ if(result){
+  const payload=result.data&&typeof result.data==='object'&&!Array.isArray(result.data)?
+   result.data as Record<string,unknown>:result;
+  if(entry.tool==='fs_read'&&typeof payload.content==='string'){
+   const request=data(entry.request_json??'')??{};
+   const rawOffset=payload.lineOffset??request.lineOffset;
+   const start=Number.isSafeInteger(rawOffset)?Number(rawOffset)+1:
+     Number(request.byteOffset??0)>0?null:1;
+   rows.push(heading('FILE CONTENT'));
+   rows.push(...fullNumberedBlock(payload.content,languageForPath(request.path),start));
+  }
+  if(entry.tool==='fs_read_many'&&Array.isArray(payload.files)){
+   for(const file of payload.files){
+    if(!file||typeof file!=='object')continue;
+    const item=file as Record<string,unknown>;
+    if(typeof item.content!=='string')continue;
+    rows.push(heading('FILE · '+String(item.path??'unknown')));
+    rows.push(...fullNumberedBlock(item.content,languageForPath(item.path),
+      Number.isSafeInteger(item.lineOffset)?Number(item.lineOffset)+1:1));
+   }
+  }
+  rows.push(heading('COMPLETE RESULT · JSON'));
+  rows.push(...fullNumberedBlock(format(result),'json'));
+ }else{
+  rows.push(heading('RESULT'));
+  rows.push(...fullNumberedBlock(raw));
+ }
  return rows;
 }
 export function inspectorOutput(source:FullSource|null,stream:'stdout'|'stderr',language?:string,sourceLimited=false):DetailLine[]{

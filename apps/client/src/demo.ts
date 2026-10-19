@@ -27,7 +27,9 @@ function task(id:string,description:string,start:number):DemoTask{
 export function createDemoStatus(scenario:DemoScenario='connected',now=Date.now()):DemoStatus{
  const activityList:DemoActivity[]=[
  activity('read-1','fs_read','检查项目配置',{path:root+'\\package.json',maxLines:60},
-   {path:root+'\\package.json',lines:42},'completed',now-120_000,680),
+   {path:root+'\\package.json',lines:344,lineOffset:0,
+    content:JSON.stringify({name:'deskbeacon',files:Array.from({length:340},(_,i)=>'src/module-'+i+'.ts')},null,2)},
+   'completed',now-120_000,680),
  activity('edit-1','fs_edit','更新设备连接策略',{path:root+'\\apps\\client\\src\\daemon.ts',
    mode:'patch',patch:'@@ -1,3 +1,5 @@\n- const retry=1500;\n+ const retry=3000;\n+ const jitter=true;'},
    {path:root+'\\apps\\client\\src\\daemon.ts',replacements:1},'completed',now-100_000,1640,'Codex'),

@@ -4,7 +4,7 @@ import {requestIpc, subscribeIpc} from './ipc.js';
 import {activityPresentation, safeText, duration, elapsedText, type ActivityEntry} from './presenter.js';
 import {toolRow, type Segment, type Tone} from './tool-presentation.js';
 import {detailPresentation, wrapDetail, numberedBlock, type DetailLine} from './detail-presentation.js';
-import {inspectorInput,inspectorOutput,inspectorCopyText,storedOutputLimited,type InspectorTab,type FullSource} from './detail-inspector.js';
+import {inspectorInput,inspectorResult,inspectorOutput,inspectorCopyText,storedOutputLimited,type InspectorTab,type FullSource} from './detail-inspector.js';
 import {readEntireLocalStream} from './local-stream.js';
 import {terminalWindowTitle,writeTerminalTitle} from './terminal-title.js';
 import {activityFileLink,openActivityFile,decodeSgrMouse} from './action-link.js';
@@ -573,12 +573,12 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
     setInspectorSource({text:raw,totalBytes:Buffer.byteLength(raw),available:raw!=='',legacy:true});
    }else{
     let result:Record<string,unknown>={};try{result=JSON.parse(entry.result??'{}');}catch{}
-    const raw=String(result[mode]??'');
+    const raw=mode==='result'?(entry.result??''):String(result[mode]??'');
     setInspectorSource({text:raw,totalBytes:Buffer.byteLength(raw),available:true});
    }
    return;
   }
-  const action=mode==='input'?'input':'output';
+  const action=mode==='input'?'input':mode==='result'?'result':'output';
   void readEntireLocalStream(async byteOffset=>
     await requestIpc({action,operationId:entry.id,...(mode==='input'?{}:{stream:mode}),
       byteOffset,maxBytes:65536}) as OutputPage & {available?:boolean},
@@ -633,6 +633,7 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
   if(inspectorTab!=='summary'){
    const lines:DetailLine[]=inspectorError?[{text:inspectorError,tone:'danger'}]:
     inspectorTab==='input'?inspectorInput(entry,inspectorSource):
+    inspectorTab==='result'?inspectorResult(entry,inspectorSource):
     inspectorOutput(inspectorSource,inspectorTab,undefined,storedOutputLimited(entry));
    return wrapDetail(inspectorProgress?[{text:inspectorProgress,tone:'muted'},...lines]:lines,Math.max(1,dw-2));
   }
@@ -689,8 +690,9 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
   if(event.kind==='press'&&event.button===0&&horizontal&&event.y===6&&
     event.x>aw&&inspectorTab!=='summary'){
    const local=event.x-aw-1;
-   if(local>=0&&local<29){
-    setInspectorTab(local<9?'input':local<19?'stdout':'stderr');
+   const commandTool=entry&&['exec_foreground','exec_background'].includes(entry.tool);
+   if(local>=0&&local<(commandTool?29:19)){
+    setInspectorTab(local<9?'input':commandTool?(local<19?'stdout':'stderr'):'result');
     setDetailScroll(0);
    }
    return;
@@ -818,7 +820,9 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
    void copyText(content).then(()=>setNotice('已复制 '+content.length+' 字符')).catch(e=>setNotice(String(e)));return;
   }
   if((input==='i'||input==='o')&&entry){
-   setInspectorTab(input==='i'?'input':'stdout');setFocus('detail');setDetailScroll(0);
+   setInspectorTab(input==='i'?'input':
+    ['exec_foreground','exec_background'].includes(entry.tool)?'stdout':'result');
+   setFocus('detail');setDetailScroll(0);
    if(selected&&selectedId===null)setSelectedId(selected.id);return;
   }
   if(input==='e'&&(inspectorTab==='stdout'||inspectorTab==='stderr')){
@@ -842,12 +846,14 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
      linkHovered={hoverLinkId===(row as ActivityEntry).id}/>):<Line width={aw} text={pageError?' 历史读取失败 · '+pageError:pageLoading?' 正在加载活动…':activeQuery?' 没有匹配记录 · Esc 清除筛选':' 暂无操作，等待 Agent 请求'} color={palette.muted}/>}
  </Box>;
  const detailPane=<Box flexDirection="column" width={dw} height={layout.detailHeight} overflow="hidden">
-  <Title label={view==='config'?'CONNECTION':inspectorTab==='input'?'INPUT':inspectorTab!=='summary'?'OUTPUT':'DETAIL'} width={dw} active={focus==='detail'}
+  <Title label={view==='config'?'CONNECTION':inspectorTab==='input'?'INPUT':inspectorTab==='result'?'RESULT':inspectorTab!=='summary'?'OUTPUT':'DETAIL'} width={dw} active={focus==='detail'}
    right={detailScrollStatus(detail.length,detailRows,scroll)}/>
   {inspectorTab!=='summary'?<Box height={1} flexShrink={0} width={dw}>
    <Text color={inspectorTab==='input'?palette.accent:palette.muted}>{' [INPUT] '}</Text>
-   <Text color={inspectorTab==='stdout'?palette.accent:palette.muted}>{' [STDOUT] '}</Text>
-   <Text color={inspectorTab==='stderr'?palette.accent:palette.muted}>{' [STDERR]'}</Text>
+   {entry&&['exec_foreground','exec_background'].includes(entry.tool)?<>
+    <Text color={inspectorTab==='stdout'?palette.accent:palette.muted}>{' [STDOUT] '}</Text>
+    <Text color={inspectorTab==='stderr'?palette.accent:palette.muted}>{' [STDERR]'}</Text>
+   </>:<Text color={inspectorTab==='result'?palette.accent:palette.muted}>{' [RESULT]'}</Text>}
   </Box>:null}
   <Box flexDirection="column" height={detailRows} overflow="hidden">
    {detail.slice(scroll,scroll+detailRows).map((item,i)=>

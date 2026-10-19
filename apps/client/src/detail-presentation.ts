@@ -28,12 +28,14 @@ export function fullNumberedBlock(raw:unknown,language?:string,startLine:number|
  return numberedBlock(raw,language,startLine,Infinity,Infinity);
 }
 export function numberedBlock(raw:unknown,language?:string,startLine:number|null=1,
- maxLines=280,maxChars=64000):DetailLine[]{
+ maxLines=280,maxChars=64000,expand:'i'|'o'='o'):DetailLine[]{
  if(typeof raw!=='string')return [line('（内容不可用）','muted',false,true)];
  const normalized=raw.replace(/\r\n?/g,'\n');
  const text=normalized.slice(0,maxChars),lines=text.split('\n');
  const displayedSource=lines.slice(0,maxLines);
- const source=displayedSource.map(value=>clean(value,maxLines===Infinity&&maxChars===Infinity?Infinity:500).replace(/\t/g,'  '));
+ const lineLimit=maxLines===Infinity&&maxChars===Infinity?Infinity:500;
+ const shownSource=displayedSource.map(value=>value.slice(0,lineLimit));
+ const source=shownSource.map(value=>clean(value,Infinity).replace(/\t/g,'  '));
  const lineDigits=startLine===null?1:String(startLine+Math.max(0,source.length-1)).length;
  const highlighted=language?highlightCodeLines(source,language):undefined;
  const result:DetailLine[]=source.map((v,index)=>{
@@ -44,14 +46,12 @@ export function numberedBlock(raw:unknown,language?:string,startLine:number|null
   return {...line(v,comment?'muted':tone,v.startsWith('@@'),comment),sourceLine:startLine===null?null:startLine+index,lineDigits};
  });
  const shown=displayedSource.join('\n').length;
- const missingChars=Math.max(0,normalized.length-shown);
- // Count omitted *source* lines, including lines excluded by maxChars.
- // lines here is only the maxChars prefix, so its length is insufficient.
+ const represented=shownSource.join('\n').length;
+ const missingChars=Math.max(0,normalized.length-represented);
  let missingLines=0;
  for(let i=shown;i<normalized.length;i++)if(normalized.charCodeAt(i)===10)missingLines++;
- if(missingLines>0||missingChars>0)
-  result.push(line('摘要未展示：剩余 '+(missingLines>0?missingLines+' 行'+(missingChars>0?' / ':''):'')+
-   (missingChars>0?missingChars+' 字符':'')+'（仅摘要显示省略；输入/输出原文请切换对应视图）','warning'));
+ if(missingChars>0||missingLines>0)
+  result.push(line('... +'+missingLines+' 行, '+missingChars+' 字符 (按 '+expand+' 展开)','warning'));
 
  return result;
 }
@@ -70,8 +70,8 @@ const cmd=(x:Fields)=>{const c=x.command;if(!c||typeof c!=='object')return '';re
 function contentFor(a:ActivityEntry,i:Fields,r:Fields):DetailLine[]{
  const out:DetailLine[]=[];
  const meta=(fields:[string,unknown][])=>out.push(...fields.filter(([,v])=>v!==undefined&&v!==null&&v!=='').map(([k,v])=>label(k,v)));
- const content=(title:string,text:unknown,language?:string,startLine:number|null=1)=>
-  out.push(section(title),...numberedBlock(text,language,startLine));
+ const content=(title:string,text:unknown,language?:string,startLine:number|null=1,expand:'i'|'o'='o')=>
+  out.push(section(title),...numberedBlock(text,language,startLine,280,64000,expand));
  const list=(title:string,items:unknown,format:(v:Fields,n:number)=>string)=>out.push(section(title),...records(items,format));
  switch(a.tool){
   case 'fs_edit':{
@@ -80,7 +80,7 @@ function contentFor(a:ActivityEntry,i:Fields,r:Fields):DetailLine[]{
    const patches=i.mode==='patch'?[String(i.patch??'')]:edits.slice(0,40)
     .filter((v:Fields)=>typeof v.oldText==='string'&&typeof v.newText==='string')
     .map((v:Fields,n:number)=>createPatch(String(i.path??'file')+' #'+(n+1),v.oldText,v.newText,'before','after',{context:2}));
-   content('DIFF  '+(r.addedLines!==undefined?'+++ '+r.addedLines+' ':'')+(r.removedLines!==undefined?'--- '+r.removedLines:''),patches.join('\n'));
+   content('DIFF  '+(r.addedLines!==undefined?'+++ '+r.addedLines+' ':'')+(r.removedLines!==undefined?'--- '+r.removedLines:''),patches.join('\n'),undefined,1,'i');
    break;
   }
   case 'fs_write':{
@@ -90,7 +90,7 @@ function contentFor(a:ActivityEntry,i:Fields,r:Fields):DetailLine[]{
    // post-write file contents. Binary/base64 and legacy redacted histories
    // cannot be treated as source code.
    if(typeof i.content==='string'&&i.content!=='[redacted]'&&i.encoding!=='base64')
-    content(heading,i.content,languageForPath(i.path),i.mode==='append'?null:1);
+    content(heading,i.content,languageForPath(i.path),i.mode==='append'?null:1,'i');
    else out.push(section(heading),line('历史记录未保存可预览的写入文本','muted',false,true));
    break;
   }
@@ -134,7 +134,7 @@ function contentFor(a:ActivityEntry,i:Fields,r:Fields):DetailLine[]{
    if(r.entries)list('ENTRIES',r.entries,(x,n)=>(n+1)+'. '+loc(x)+'  '+(x.size??''));break;
   case 'exec_foreground':case 'exec_background':
    meta([['CWD',i.command?.cwd??a.cwd],['EXIT',r.exitCode],['PID',r.pid],['TIMEOUT',r.timedOut]]);
-   content('COMMAND',cmd(i),languageForCommand(i.command));
+   content('COMMAND',cmd(i),languageForCommand(i.command),1,'i');
    if(r.stdout||r.outputPreview)content('STDOUT',r.stdout??normalizeProcessStderr(r.outputPreview));
    if(r.stderr)content('STDERR',normalizeProcessStderr(r.stderr));break;
   case 'batch':

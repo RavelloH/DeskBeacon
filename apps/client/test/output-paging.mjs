@@ -138,6 +138,31 @@ try{
   assert.ok(!combinedInput.includes('sensitive-do-not-store'));
   const oldInput=await requestIpc({action:'input',operationId:'legacy-missing-input'});
   assert.equal(oldInput.available,false);
+  // The activity list can hold a short result preview, but the original
+  // structured output has always existed in local receipts. 'o' reads it.
+  const fullResultId='complete-fs-read-fixture';
+  const originalContent=Array.from({length:480},(_,n)=>'中文行'+n+'：'+('x'.repeat(90))).join('\\n');
+  const structured={data:{content:originalContent,lineOffset:310,readBytes:Buffer.byteLength(originalContent)},
+   authorization:'must-not-appear',secret:'must-not-appear'};
+  daemon.supervisor.record(fullResultId,'completed',structured);
+  let resultOffset=0,resultRaw='',resultPages=0;
+  for(;;){
+   const part=await requestIpc({action:'result',operationId:fullResultId,
+    byteOffset:resultOffset,maxBytes:37});
+   assert.ok(part.available,'structured result should be present in receipts');
+   assert.ok(part.nextOffset>resultOffset,'structured result must advance by UTF-8-safe bytes');
+   resultRaw+=part.text;resultOffset=part.nextOffset;resultPages++;
+   if(!part.hasMore)break;
+   assert.ok(resultPages<5000,'structured result must finish');
+  }
+  assert.ok(resultPages>1,'large structured output requires many pages');
+  const completeResult=JSON.parse(resultRaw);
+  assert.equal(completeResult.data.content,originalContent);
+  assert.equal(completeResult.authorization,'[redacted]');
+  assert.equal(completeResult.secret,'[redacted]');
+  const noReceipt=await requestIpc({action:'result',operationId:'legacy-missing-receipt'});
+  assert.equal(noReceipt.available,false,'missing historical result must be explicitly unavailable');
+  console.log('PASS structured local result opens all file-read content (old receipts included)');
   console.log('PASS full local input IPC pagination with sensitive-field redaction and legacy fallback');
 }finally{
   await new Promise(resolve=>listener.close(resolve));

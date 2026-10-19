@@ -99,6 +99,55 @@ function outputPage(operationId:unknown,stream:unknown,byteOffset:unknown,maxByt
  return{text:bytes.subarray(0,used).toString('utf8'),nextOffset,totalBytes,hasMore:nextOffset<totalBytes,stream};
 }
 
+/** Completed local receipts are immutable. Cache the redacted result bytes so
+ * paging large files doesn't repeatedly stringify the whole receipt (O(n²)). */
+const receiptBytesCache=new Map<string,Buffer>();
+let receiptCachedBytes=0;
+function fullResultBytes(daemon:ClientDaemon,id:string):Buffer|null{
+ const previous=receiptBytesCache.get(id);
+ if(previous){receiptBytesCache.delete(id);receiptBytesCache.set(id,previous);return previous;}
+ const receipt=daemon.supervisor.hasReceipt(id);
+ if(!receipt?.result||!['completed','failed'].includes(receipt.status))return null;
+ const sensitive=/^(?:env|dataBase64)$|token|secret|password|cookie|authorization|api[_-]?key|private[_-]?key/i;
+ const raw=JSON.stringify(JSON.parse(receipt.result),(key,value)=>sensitive.test(key)?'[redacted]':value);
+ const bytes=Buffer.from(raw,'utf8');
+ if(bytes.length<=16*1024*1024){
+  while(receiptCachedBytes+bytes.length>32*1024*1024||receiptBytesCache.size>=8){
+   const oldest=receiptBytesCache.keys().next().value;
+   if(oldest===undefined)break;
+   const removed=receiptBytesCache.get(oldest)!;
+   receiptCachedBytes-=removed.length;
+   receiptBytesCache.delete(oldest);
+  }
+  receiptBytesCache.set(id,bytes);receiptCachedBytes+=bytes.length;
+ }
+ return bytes;
+}
+/** Full structured result is already retained in the local receipts SQLite
+ * table. Read it without the activity list's bounded JSON preview. */
+function resultPage(daemon:ClientDaemon,operationId:unknown,byteOffset:unknown,maxBytes:unknown){
+ const safeId=safeOperationId(operationId);
+ const offset=byteOffset===undefined?0:byteOffset;
+ const budget=maxBytes===undefined?defaultOutputBytes:maxBytes;
+ if(typeof offset!=='number'||!Number.isSafeInteger(offset)||offset<0)throw Error('INVALID_BYTE_OFFSET');
+ if(typeof budget!=='number'||!Number.isSafeInteger(budget)||budget<1||budget>maxOutputBytes)
+  throw Error('INVALID_OUTPUT_BUDGET');
+ const bytes=fullResultBytes(daemon,safeId);
+ if(!bytes)return{text:'',nextOffset:0,totalBytes:0,hasMore:false,stream:'result',available:false};
+ const totalBytes=bytes.length;
+ if(offset>totalBytes)throw Error('INVALID_BYTE_OFFSET');
+ if(offset>0&&continuationByte(bytes[offset]!))throw Error('INVALID_BYTE_OFFSET');
+ let used=0;
+ while(offset+used<totalBytes){
+  const width=utf8CharacterBytes(bytes,offset+used,totalBytes-offset);
+  if(width===0)break;
+  if(used+width>budget){if(used===0)used=width;break;}
+  used+=width;
+ }
+ const nextOffset=offset+used;
+ return{text:bytes.subarray(offset,nextOffset).toString('utf8'),nextOffset,totalBytes,
+  hasMore:nextOffset<totalBytes,stream:'result',available:true};
+}
 export function startIpc(daemon:ClientDaemon){
  // Exclusive atomic lock prevents two TUI windows from opening separate device
  // connections, including on Unix where deleting an active socket is unsafe.
@@ -170,6 +219,7 @@ export function startIpc(daemon:ClientDaemon){
            else if(request.action==='exit') {result={stopping:true};setImmediate(()=>{void daemon.shutdown().finally(()=>server.close());});}
            else if(request.action==='output'||request.action==='input')result=outputPage(request.operationId,
   request.action==='input'?'input':request.stream,request.byteOffset,request.maxBytes);
+           else if(request.action==='result')result=resultPage(daemon,request.operationId,request.byteOffset,request.maxBytes);
            else if(request.action==='logs') {
              const row=daemon.db.prepare('SELECT * FROM activity WHERE id=?').get(String(request.operationId));
              const id=String(request.operationId);

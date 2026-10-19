@@ -294,11 +294,34 @@ try{
     await waitFor(()=>search.capture.snapshot().includes('ACTIVITY 1'),'search must match the OAuth actor name');
     assert.ok(search.capture.snapshot().includes('Codex'),'actor search result must be visible');
     await search.send('\x1b');
+    await waitFor(()=>!search.capture.snapshot().includes('⌕ Codex'),
+      'Esc must finish clearing the previous filter before typing another query');
     await search.send('S');await search.send('pnpm');await search.send('\r');
     await waitFor(()=>search.capture.snapshot().includes('ACTIVITY 1'),'search must match a command target\n'+search.capture.snapshot().slice(0,1200));
     assert.ok(search.capture.snapshot().includes('pnpm'),'command search result must be visible');
   }finally{await search.close();}
   console.log('PASS activity search by Actor and command');
+  const expansion=await mountDemo('connected',120,36);
+  try{
+    await expansion.send('s');await expansion.send('检查项目配置');await expansion.send('\r');
+    await waitFor(()=>expansion.capture.snapshot().includes('ACTIVITY 1'),
+      'file read must be uniquely selected for full result test\n'+expansion.capture.snapshot().slice(0,1500));
+    await expansion.send('o');
+    await waitFor(()=>expansion.capture.snapshot().includes('[RESULT]'),
+      'o should open structured result for fs_read instead of empty stdout');
+    await waitFor(()=>expansion.capture.snapshot().includes('FILE CONTENT'),
+      'full result view should display the file content');
+    const view=expansion.capture.snapshot();
+    assert.ok(view.includes('src/module-'),'complete result view must show original content');
+    assert.ok(!view.includes('摘要未展示'),'full result must not repeat the summary limit');
+    await expansion.send('c');
+    await waitFor(()=>expansion.capture.snapshot().includes('DEMO · 复制'),
+      'c should copy full receipt content, not the bounded summary');
+    await expansion.send('i');
+    await waitFor(()=>expansion.capture.snapshot().includes('[INPUT]'),
+      'i should still open original parameters for file tool');
+  }finally{await expansion.close();}
+  console.log('PASS o expands structured file-read result, i expands input');
   const mouse=await mountDemo('connected',160,38);
   try{
     let linkedY=0;
@@ -332,7 +355,7 @@ try{
     await waitFor(()=>controls.capture.snapshot().includes('Checking protocol'),'demo output is displayed locally');
     assert.ok(controls.capture.snapshot().includes('[STDOUT]'),'output shows tabs');
     await controls.send('e');
-    await waitFor(()=>controls.capture.snapshot().includes('[STDERR]'),'e switches stdout/stderr');
+    await waitFor(()=>controls.capture.snapshot().includes('[STDERR]'),'e switches stdout/stderr\n'+controls.capture.snapshot().slice(0,1300));
     await controls.send('i');
     await waitFor(()=>controls.capture.snapshot().includes('[INPUT]'),'i opens the input inspector');
     await waitFor(()=>controls.capture.snapshot().includes('PROGRAM'),'input shows full program invocation with line numbers');
