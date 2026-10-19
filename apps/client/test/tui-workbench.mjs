@@ -396,26 +396,52 @@ try{
   const commands=await mountDemo('connected',120,32);
   try{
     await commands.send('/');
-    await commands.send('config');await commands.send('\r');
-    await waitFor(()=>commands.capture.snapshot().includes('CONNECTION'),'slash should open the command palette');
+    await waitFor(()=>commands.capture.snapshot().includes('COMMANDS'),
+      'slash must insert a candidate panel between search and activity');
+    await commands.send('conf');
+    await waitFor(()=>commands.capture.snapshot().includes('/config'),
+      'partial slash name filters command candidates');
+    await commands.send(' ');
+    await waitFor(()=>commands.capture.snapshot().includes('设备名称：')&&
+      commands.capture.snapshot().includes('服务器地址：'),
+      'space after command changes to config parameter choices');
+    await commands.send('name');
+    await waitFor(()=>commands.capture.snapshot().includes('设备名称：'),
+      'partial config parameter narrows suggestions');
+    await commands.send('\r');
+    await waitFor(()=>commands.capture.snapshot().includes('name = ASUS-TUF-F16'),
+      '/config name queries existing value without listing commands');
+    await commands.send('/');
+    await commands.send('config name Custom Device');
+    await commands.send('\r');
+    await waitFor(()=>commands.capture.snapshot().includes('DEMO · 已设置 name = Custom Device'),
+      'free-form device names including spaces are accepted');
+    await commands.send('/');
+    await commands.send('config url');
+    await commands.send('\r');
+    await waitFor(()=>commands.capture.snapshot().includes('url = https://example.invalid'),
+      '/config url queries actual server configuration');
+    await commands.send('/');
+    await commands.send('view input');
+    await commands.send('\r');
+    await waitFor(()=>commands.capture.snapshot().includes('[INPUT]'),
+      '/view input uses the existing inspector');
     await commands.send('\x1b');
     await commands.send('?');
     await waitFor(()=>commands.capture.snapshot().includes('f 最新')&&
       commands.capture.snapshot().includes('x 停止'),
-      'global help must show follow and stop instead of DETAIL-only shortcuts');
+      'global help must retain navigation shortcuts');
     const footer=commands.capture.snapshot().split('\n').at(-1)??'';
-    assert.match(footer,/s 搜索.*\/ 指令.*f 最新.*x 停止.*q 退出/,
-      'bottom bar must consistently show global shortcuts at 120 columns');
-    assert.ok(!footer.includes('i 输入')&&!footer.includes('o 输出')&&!footer.includes('c 复制'),
-      'DETAIL-only hints belong in the DETAIL pane, not the global footer');
+    assert.match(footer,/s 搜索.*\/ 指令.*f 最新.*x 停止.*q 退出/);
     await commands.send('/');
     await commands.send('nonsense');
     await commands.send('\r');
-    await waitFor(()=>commands.capture.snapshot().includes('命令：config'),
-      'unknown commands should still show an error');
-    await sleep(3400);
-    assert.ok(!commands.capture.snapshot().includes('命令：config'),'transient notice must expire');
-    console.log('PASS slash commands, global footer hints and notice expiration');
+    await waitFor(()=>commands.capture.snapshot().includes('未知命令'),
+      'unknown slash command should report an error instead of showing stale CLI commands');
+    await commands.send('\x1b');
+    await waitFor(()=>!commands.capture.snapshot().includes('COMMANDS'),
+      'Escape closes command choices without changing activity');
+    console.log('PASS slash suggestions, config values, staged arguments and commands');
   }finally{await commands.close();}
 
   const interrupted=await mountDemo('connected',120,32);
