@@ -398,6 +398,15 @@ try{
     await commands.send('/');
     await waitFor(()=>commands.capture.snapshot().includes('COMMANDS'),
       'slash must insert a candidate panel between search and activity');
+    await commands.send('\x1b[B');
+    await commands.send(' ');
+    await waitFor(()=>commands.capture.snapshot().includes('设备名称：')&&
+      commands.capture.snapshot().includes('服务器地址：'),
+      'down arrow plus space selects /config and advances to config keys');
+    await commands.send('\x1b');
+    await commands.send('/');
+    await waitFor(()=>commands.capture.snapshot().includes('COMMANDS'),
+      'palette must reopen after Escape');
     await commands.send('conf');
     await waitFor(()=>commands.capture.snapshot().includes('/config'),
       'partial slash name filters command candidates');
