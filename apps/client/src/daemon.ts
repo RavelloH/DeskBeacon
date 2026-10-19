@@ -15,7 +15,7 @@ import {activityPage, type ActivityPageOptions} from './activity-query.js';
 
 
 
-export type Config={url:string;deviceId:string;accessToken:string;refreshToken?:string;accessTokenExpiresAt?:number;clientId:string;deviceName:string;pendingUrl?:string};
+export type Config={url:string;deviceId:string;accessToken:string;refreshToken?:string;accessTokenExpiresAt?:number;clientId:string;deviceName:string;pendingUrl?:string|undefined};
 export const dataDir=process.env.DESKBEACON_DATA_DIR ?? join(homedir(),'.deskbeacon');
 export const configPath=join(dataDir,'config.json');
 export function saveConfig(config:Config){mkdirSync(dataDir,{recursive:true});writeFileSync(configPath,JSON.stringify(config,null,2),{mode:0o600});if(process.platform!=='win32')chmodSync(configPath,0o600);}
