@@ -88,7 +88,14 @@ async function promptUrl():Promise<string>{
   }finally{io.close();}
 }
 async function configured(){
-  if(!existsSync(configPath))await setup(await promptUrl());
+  if(!existsSync(configPath)){await setup(await promptUrl());return;}
+  const cfg=loadConfig();
+  if(cfg.pendingUrl&&!await currentRuntime(700)){
+    if(!process.stdin.isTTY)
+      throw Error('SERVER_REAUTH_REQUIRED: run deskbeacon setup --url '+cfg.pendingUrl+' interactively');
+    console.log('DeskBeacon server change pending: '+cfg.pendingUrl+' · authorizing new server.');
+    await setup(cfg.pendingUrl);
+  }
 }
 async function currentRuntime(timeout=700):Promise<any|null>{
   try{return await requestIpc({action:'status'},timeout);}catch{return null;}
