@@ -9,8 +9,15 @@ import { hostname } from 'node:os';
 import { existsSync } from 'node:fs';
 import { configPath, loadConfig, saveConfig, ClientDaemon } from './daemon.js';
 import { requestIpc, startIpc } from './ipc.js';
-import { showTui } from './tui.js';
 import {demoScenarios, type DemoScenario} from './demo.js';
+
+// React's development reconciler records unbounded performance.measure entries
+// in long-lived Node TUI processes. Select production before loading Ink/React.
+async function showTui(scenario?:DemoScenario):Promise<void>{
+ if(!process.env.NODE_ENV)process.env.NODE_ENV='production';
+ const {showTui:launch}=await import('./tui.js');
+ await launch(scenario);
+}
 
 const url64=(value:Buffer)=>value.toString('base64url');
 const sleep=(ms:number)=>new Promise(resolve=>setTimeout(resolve,ms));

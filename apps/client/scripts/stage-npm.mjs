@@ -34,11 +34,16 @@ const pkg={
  homepage:'https://github.com/RavelloH/DeskBeacon#readme',
  bugs:{url:'https://github.com/RavelloH/DeskBeacon/issues'},
  keywords:['mcp','ai-agent','remote-device','cli','tui','cloudflare','remote-access'],
- engines:{node:'>=24'},bin:{deskbeacon:'cli.js'},publishConfig:{access:'public'},
+ engines:{node:'>=24'},bin:{deskbeacon:'launcher.js'},publishConfig:{access:'public'},
  dependencies:Object.fromEntries(Object.entries(source.dependencies).filter(([name])=>name!=='@deskbeacon/protocol')),
  optionalDependencies
 };
 writeFileSync(join(base,'package.json'),JSON.stringify(pkg,null,2)+'\n');
+// A separate ESM bootstrap is essential: bundled ESM imports are evaluated
+// before module code, so setting NODE_ENV inside cli.js is too late for React.
+writeFileSync(join(base,'launcher.js'),
+ '#!/usr/bin/env node\nif(!process.env.NODE_ENV)process.env.NODE_ENV="production";\nawait import("./cli.js");\n',
+ {mode:0o755});
 for(const name of ['README.md','LICENSE']){
  const original=join(root,name);if(existsSync(original))copyFileSync(original,join(base,name));
 }
