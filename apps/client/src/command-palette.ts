@@ -34,7 +34,7 @@ export function commandPalette(raw:string,config:{name?:string;url?:string}={}):
     '当前：'+(key==='name'?config.name??'未配置':config.url??'未配置'),raw,false)]};
  }
  if(head==='view'||head==='stop'){
-  const entries=head==='view'?[
+  const entries:[string,string][]=head==='view'?[
    ['summary','普通详情'],['input','全部输入参数'],['output','全部输出或结构化结果'],['stderr','错误输出']]:
    [['selected','停止当前任务，需确认'],['all','停止所有任务，需确认']];
   return{stage:'argument',hint:head==='view'?'选择详情视图 · Enter 执行':'选择停止范围 · Enter 后确认',
