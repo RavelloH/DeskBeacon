@@ -1,10 +1,22 @@
 import type {ToolName} from '@deskbeacon/protocol';
 import type {ActivityEntry} from './presenter.js';
+import {normalizeProcessStderr} from './terminal-errors.js';
 
 /** One explicit presentation contract per MCP tool. No raw request bodies or secrets in table cells. */
 export type Tone='default'|'muted'|'success'|'danger'|'warning'|'accent';
 export type Segment={text:string;tone?:Tone};
-export type ToolRow={toolLabel:string;action:Segment[];result:Segment[]};
+export type ToolRow={toolLabel:string;action:Segment[];result:Segment[];readOnly?:boolean};
+/** Only read-only tools are dimmed; commands, batches and arbitrary HTTP methods stay visible. */
+const readTools=new Set(['device_list','device_info','workspace_info','fs_list','fs_stat',
+ 'fs_read','fs_read_many','fs_find','fs_grep','background_list','background_get',
+ 'background_output','operation_get','operation_output','transfer_download','transfer_status',
+ 'net_ports','net_probe','system_snapshot','system_processes','screen_capture']);
+export function isReadOnlyTool(tool:string,request?:string|null):boolean{
+ if(readTools.has(tool))return true;
+ if(tool==='fs_archive'){const input=parse(request);return input.action==='list';}
+ if(tool==='http_request'){const input=parse(request);return ['GET','HEAD','OPTIONS'].includes(String(input.method??'GET').toUpperCase());}
+ return false;
+}
 type Fields=Record<string,any>;
 type Template={label:string;action:(i:Fields,a:ActivityEntry)=>string;result:(r:Fields,i:Fields)=>Segment[]};
 const part=(text:unknown,tone:Tone='muted'):Segment[]=>[{text:String(text??'—'),tone}];
@@ -50,7 +62,7 @@ function outputPreview(r:Fields){
  const candidates=[r.outputPreview,r.stdout,r.stderr,r.output,r.text];
  for(const candidate of candidates){
   if(typeof candidate!=='string'||!candidate.trim())continue;
-  const lines=candidate.split(/\r?\n/).map(line=>clean(line,140)).filter(Boolean);
+  const lines=normalizeProcessStderr(candidate).split(/\r?\n/).map(line=>clean(line,140)).filter(Boolean);
   if(lines.length)return lines.at(-1)??'';
  }
  return '';
@@ -60,7 +72,7 @@ function commandResult(r:Fields):Segment[]{
  if(r.outputLimit)return part('输出上限','warning');
  if(r.spawnError)return part('启动失败 · '+clean(r.spawnError,80),'danger');
  const exit=count(r.exitCode);
- const preview=outputPreview(r);
+ const preview=clean(r.errorSummary??outputPreview(r),140);
  if(exit!==undefined&&exit!==0)return part('退出 '+exit+(preview?' · '+preview:''),'danger');
  if(preview)return part(preview,'muted');
  if(exit!==undefined)return part('退出 '+exit,exit===0?'success':'danger');
@@ -135,6 +147,7 @@ export function toolRow(a:ActivityEntry):ToolRow{
  const i=parse(a.request_json),wrapper=parse(a.result),r=wrapper.data&&typeof wrapper.data==='object'&&!Array.isArray(wrapper.data)?{...wrapper,...wrapper.data}:wrapper;
  let action='';
  try{action=clean(template.action(i,a),250);}catch{action=clean(a.description??a.tool);}
+ const readOnly=isReadOnlyTool(a.tool,a.request_json);
  let result:Segment[];
  if(a.status==='running'||a.status==='accepted'||a.status==='started')result=part('进行中','warning');
  else if(a.status==='cancelled'||a.status==='stopped')result=part('已中止','warning');
@@ -147,5 +160,5 @@ export function toolRow(a:ActivityEntry):ToolRow{
   {text:action.slice(0,cut),tone:'default'},
   {text:action.slice(cut),tone:'muted'}
  ];
- return {toolLabel:template.label,action:actionSegments,result:result.map(seg=>({...seg,text:clean(seg.text,250)}))};
+ return {toolLabel:template.label,action:actionSegments,readOnly,result:result.map(seg=>({...seg,text:clean(seg.text,250)}))};
 }

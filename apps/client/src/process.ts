@@ -1,6 +1,7 @@
 import { execFile, spawnSync } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import spawn from 'cross-spawn';
+import {normalizeProcessStderr,errorSummary} from './terminal-errors.js';
 import { mkdirSync, createWriteStream, existsSync, openSync, closeSync, readSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -148,7 +149,10 @@ export class TaskSupervisor{
    stdout+=decoders.stdout.end();stderr+=decoders.stderr.end();
    if(timeout)clearTimeout(timeout);
    outFile.end();errFile.end();this.fg.delete(id);this.onChange();
-   return {exitCode:code,stdout,stderr,timedOut,outputLimit:outputLimitReached,spawnError,
+   const readableStderr=normalizeProcessStderr(stderr);
+   return {exitCode:code,stdout,stderr:readableStderr,
+     ...(code!==0&&readableStderr?{errorSummary:errorSummary(readableStderr,code)}:{}),
+     timedOut,outputLimit:outputLimitReached,spawnError,
      cancelled:this.cancelled.has(id)||[...this.cancelled].some(x=>id.startsWith(x+":")),
      durationMs:Date.now()-task.since,program:p.exe,cwd:p.cwd,
      cleanup:jobManaged?'windows-job-object':'posix-process-group'};

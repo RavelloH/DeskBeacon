@@ -3,7 +3,8 @@ import {render, Box, Text, useInput, useApp, useStdout, useStdin} from 'ink';
 import {requestIpc, subscribeIpc} from './ipc.js';
 import {activityPresentation, safeText, duration, elapsedText, type ActivityEntry} from './presenter.js';
 import {toolRow, type Segment, type Tone} from './tool-presentation.js';
-import {detailPresentation, wrapDetail, type DetailLine} from './detail-presentation.js';
+import {detailPresentation, wrapDetail, numberedBlock, type DetailLine} from './detail-presentation.js';
+import {activityFileLink,openActivityFile,decodeSgrMouse} from './action-link.js';
 import {ACTIVITY_PAGE_SIZE, sortActivityRows, compatibleDayStats, type ActivityPage, type ActivityDayStats} from './activity-query.js';
 import {createDemoStatus, advanceDemo, demoHelp, type DemoScenario, type DemoStatus} from './demo.js';
 import {cellWidth, fit, oneLine, paneLayout, tableColumns, detailScrollStatus, wrapLines, rightFit, activityTime, dateDivider, dateKey, type Column} from './tui-layout.js';
@@ -185,7 +186,7 @@ function Line({text,width,color=palette.text,bold=false}:{text:string;width:numb
 }
 
 /** Rich text clipped by terminal cells, never by UTF-16 length. */
-function RichCell({segments,width,selected=false}:{segments:Segment[];width:number;selected?:boolean}){
+function RichCell({segments,width,linkLabel,hovered=false}:{segments:Segment[];width:number;linkLabel?:string|undefined;hovered?:boolean|undefined}){
  let remaining=Math.max(0,width);
  const spans:{text:string;tone:Tone}[]=[];
  for(const segment of segments){
@@ -196,22 +197,28 @@ function RichCell({segments,width,selected=false}:{segments:Segment[];width:numb
   remaining-=used;
   if(cellWidth(raw)>used)break;
  }
- return <Text>{spans.map((part,index)=><Text key={index} color={toneColor[part.tone]}>{part.text}</Text>)}{' '.repeat(remaining)+' '}</Text>;
+ return <Text>{spans.map((part,index)=>{
+  const at=hovered&&linkLabel?part.text.indexOf(linkLabel):-1;
+  if(at<0)return <Text key={index} color={toneColor[part.tone]}>{part.text}</Text>;
+  return <Text key={index} color={toneColor[part.tone]}>{part.text.slice(0,at)}<Text underline color={palette.accent}>{part.text.slice(at,at+linkLabel!.length)}</Text>{part.text.slice(at+linkLabel!.length)}</Text>;
+ })}{' '.repeat(remaining)+' '}</Text>;
 }
 
 /** The history list is normally static: a status/clock tick should not reparse
  * every visible row's request and result JSON or rerun unicode fitting. */
-const ActivityTableRow=React.memo(function ActivityTableRow({record,columns,isSelected,timeAnchor}:{
- record:ActivityEntry;columns:Column[];isSelected:boolean;timeAnchor:number;
+const ActivityTableRow=React.memo(function ActivityTableRow({record,columns,isSelected,timeAnchor,linkHovered}:{
+ record:ActivityEntry;columns:Column[];isSelected:boolean;timeAnchor:number;linkHovered?:boolean;
 }){
  const a=activityPresentation(record,timeAnchor),visual=toolRow(record);
+ const link=linkHovered?activityFileLink(record):null;
  return <Box height={1} flexShrink={0} paddingX={1} backgroundColor={isSelected?palette.selection:undefined}>
   <Text color={isSelected?palette.accent:palette.muted}>{isSelected?'▸ ':'  '}</Text>
   {columns.map(c=>{
    const width=c.width-1;
    if(c.key==='action'||c.key==='result')return <RichCell key={c.key}
-    segments={c.key==='action'?visual.action:visual.result} width={width}/>;
-   const color=c.key==='state'?stateColor[a.state]:c.key==='elapsed'||c.key==='time'?palette.muted:palette.text;
+    segments={c.key==='action'?visual.action:visual.result} width={width}
+    linkLabel={c.key==='action'?link?.label:undefined} hovered={c.key==='action'&&linkHovered}/>;
+   const color=c.key==='state'?stateColor[a.state]:c.key==='elapsed'||c.key==='time'||(c.key==='tool'&&visual.readOnly)?palette.muted:palette.text;
    if(c.key==='state'&&a.state==='running')return <SpinnerCell key={c.key} color={color}/>;
    if(c.key==='elapsed'&&a.state==='running')return <RunningElapsedCell key={c.key}
     entry={record} color={color} bold={isSelected} width={width}/>;
@@ -233,6 +240,20 @@ const DetailCell=React.memo(function DetailCell({item,width}:{item:DetailLine;wi
   </Box>;
  }
  const text=item.text;
+ if(item.sourceLine!==undefined){
+  const digits=Math.max(5,String(item.sourceLine??'?').length);
+  const marker=item.continued?' '.repeat(digits-1)+'↳':String(item.sourceLine??'?').padStart(digits);
+  const gutter=marker+' │ ';
+  const used=cellWidth(gutter);
+  return <Box height={1} flexShrink={0} width={width}>
+   <Text>{' '}</Text>
+   <Text color={palette.line}>{gutter}</Text>
+   {item.syntax?<Text>{item.syntax.map((segment,index)=><Text key={index} color={segment.color}>{segment.text}</Text>)}</Text>:
+    <Text color={item.tone&&item.tone!=='default'?toneColor[item.tone]:palette.muted}
+     bold={item.bold===true}>{fit(text,Math.max(1,width-used-2))}</Text>}
+   <Text>{' '}</Text>
+  </Box>;
+ }
  if(item.syntax){
   return <Box height={1} flexShrink={0} width={width}>
    <Text>{' '}</Text>
@@ -291,6 +312,7 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
  const [edit,setEdit]=useState<'command'|'search'|null>(null);
  const [text,setText]=useState(''),[query,setQuery]=useState('');
  const [notice,setNotice]=useState('');
+ const [hoverLinkId,setHoverLinkId]=useState<string|null>(null);
  const [exitArmedAt,setExitArmedAt]=useState(0);
  const uptimeAnchorRef=useRef<{device:string;uptime:number;at:number}|null>(null);
  useEffect(()=>{if(!notice)return;const timer=setTimeout(()=>setNotice(''),3200);return()=>clearTimeout(timer);},[notice]);
@@ -316,6 +338,7 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
  const pageLoadingRef=useRef(false);
  const viewportStartRef=useRef(0);
  const wheelHandlerRef=useRef<(direction:number,x:number,y:number)=>void>(()=>{});
+ const mouseHandlerRef=useRef<(event:ReturnType<typeof decodeSgrMouse>[number])=>void>(()=>{});
  const selectionIndexRef=useRef(0);
  const loadedActivityRef=useRef(loadedActivity);
  loadedActivityRef.current=loadedActivity;
@@ -572,14 +595,16 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
   if(view==='config')return fromPlain(['连接信息',status?.deviceName??'等待本地 Runtime',
    status?.server??'', '后台服务：deskbeacon service start / stop / restart']);
   if(!entry||!model)return fromPlain(['选择活动记录以查看参数与结果。']);
-  if(outputMode)return fromPlain([model.tool+' · '+model.status,
-   '本地日志 · '+stream+' · '+(output?output.totalBytes+' B · offset '+pageOffset:'读取中…'),
-   ...(outputError?[outputError]:output?[(output.text||'(empty)')]:[])]);
+  if(outputMode)return wrapDetail([
+   {text:stream+' · '+(output?output.totalBytes+' B · offset '+pageOffset:'读取中…'),tone:'muted'},
+   ...(outputError?[{text:outputError,tone:'danger' as const}]:output?
+    numberedBlock(output.text||'(empty)',undefined,pageOffset===0?1:null):[])
+  ],Math.max(1,dw-2));
   const lines=detailPresentation(entry,tick);
   if(liveLog&&entry.status==='running'){
    const preview:DetailLine[]=[{text:'LIVE OUTPUT',section:'LIVE OUTPUT',tone:'muted',bold:true}];
-   for(const value of liveLog.replace(/\r\n?/g,'\n').split('\n').slice(-20))
-    preview.push({text:' '+safeText(value,240),tone:'muted'});
+   // Live output is a tail; its actual first stream line is unknown.
+   preview.push(...numberedBlock(liveLog,undefined,null,20,3500));
    const trace=lines.findIndex(row=>row.section==='TRACE');
    lines.splice(trace<0?lines.length:trace,0,...preview);
   }
@@ -617,13 +642,50 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
  };
  useEffect(()=>{
   const listener=(chunk:Buffer|string)=>{
-   const source=chunk.toString(),matcher=/\x1b\[<6([45]);(\d+);(\d+)M/g;
-   for(const match of source.matchAll(matcher))
-    wheelHandlerRef.current(match[1]==='5'?1:-1,Number(match[2]),Number(match[3]));
+   for(const event of decodeSgrMouse(chunk.toString())){
+    if(event.kind==='wheel')wheelHandlerRef.current(event.direction,event.x,event.y);
+    else mouseHandlerRef.current(event);
+   }
   };
   stdin.on('data',listener);
   return()=>{stdin.off('data',listener);};
  },[stdin]);
+ mouseHandlerRef.current=event=>{
+  // Search occupies terminal rows 2–4; click to enter search editing.
+  if(event.kind==='press'&&event.button===0&&event.y>=2&&event.y<=4){
+   setEdit('search');setText(query);setNotice('');return;
+  }
+  if(event.y<7||event.y>=7+tableRows||(horizontal&&event.x>aw)){
+   if(event.kind==='move')setHoverLinkId(null);
+   return;
+  }
+  const record=visibleRows[event.y-7];
+  if(!record||'kind' in record){
+   if(event.kind==='move')setHoverLinkId(null);
+   return;
+  }
+  const actionIndex=columns.findIndex(column=>column.key==='action');
+  const start=3+columns.slice(0,actionIndex).reduce((sum,column)=>sum+column.width,0);
+  const actionWidth=columns[actionIndex]?.width??0;
+  const link=activityFileLink(record);
+  const displayed=fit(toolRow(record).action.map(segment=>segment.text).join(''),Math.max(1,actionWidth-1),false);
+  const match=link?.label?displayed.indexOf(link.label):-1;
+  // Only the filename span is a link, not the entire ACTION column.
+  const fileStart=match>=0?start+cellWidth(displayed.slice(0,match)):-1;
+  const overFile=match>=0&&event.x>=fileStart&&event.x<fileStart+cellWidth(link!.label);
+  if(event.kind==='move'){
+   setHoverLinkId(prev=>{
+    const next=overFile?record.id:null;
+    return prev===next?prev:next;
+   });return;
+  }
+  if(event.kind!=='press'||event.button!==0||edit||confirm)return;
+  if(event.ctrl&&overFile&&link){
+   void openActivityFile(link).then(setNotice).catch(error=>setNotice(String(error)));
+   return;
+  }
+  setFocus('activity');setSelectedId(record.id);setDetailTask(false);resetDetail();
+ };
  const stop=async(ids:string[])=>{
   setConfirm(null);
   if(demo){
@@ -727,7 +789,8 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
   <Box height={1} paddingX={1} flexShrink={0}><Text color={palette.muted}>{'  '+columns.map(c=>(c.key==='elapsed'?rightFit(c.title,c.width-1):fit(c.title,c.width-1))+' ').join('')}</Text></Box>
   {visibleRows.length?visibleRows.map(row=>'kind' in row&&row.kind==='date'?
     <Line key={'day-'+row.timestamp} width={aw} text={' ┄ '+dailyLabel(row.timestamp)+' ┄'} color={palette.line}/>:<ActivityTableRow key={(row as ActivityEntry).id} record={row as ActivityEntry}
-     columns={columns} isSelected={(row as ActivityEntry).id===selected?.id} timeAnchor={timeAnchor}/>):<Line width={aw} text={pageError?' 历史读取失败 · '+pageError:pageLoading?' 正在加载活动…':activeQuery?' 没有匹配记录 · Esc 清除筛选':' 暂无操作，等待 Agent 请求'} color={palette.muted}/>}
+     columns={columns} isSelected={(row as ActivityEntry).id===selected?.id} timeAnchor={timeAnchor}
+     linkHovered={hoverLinkId===(row as ActivityEntry).id}/>):<Line width={aw} text={pageError?' 历史读取失败 · '+pageError:pageLoading?' 正在加载活动…':activeQuery?' 没有匹配记录 · Esc 清除筛选':' 暂无操作，等待 Agent 请求'} color={palette.muted}/>}
  </Box>;
  const detailPane=<Box flexDirection="column" width={dw} height={layout.detailHeight} overflow="hidden">
   <Title label={view==='config'?'CONNECTION':outputMode?'LOCAL OUTPUT':'DETAIL'} width={dw} active={focus==='detail'}
@@ -756,7 +819,9 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
  const headerRightWidth=Math.max(0,w-headerLeftWidth);
  const footerPrompt=confirm?
   '停止 '+confirm.length+' 个进程及其子进程？ y / Enter 确认 · n / Esc 返回':
-  notice||(pageError?'活动读取失败 · '+pageError:w<64?'↑↓ 选择 · Tab 切换 · S 搜索 · / 指令 · q 退出':'↑↓ 选择 · Tab 切换 · S 搜索 · / 指令 · x 停止 · q 退出');
+  notice||(pageError?'活动读取失败 · '+pageError:hoverLinkId?'Ctrl+点击文件名 · 在 VS Code 打开对应文件/行':
+   w<64?'↑↓ 选择 · Tab 切换 · S 搜索 · / 指令 · q 退出':
+   '↑↓ 选择 · Tab 切换 · S 搜索 · / 指令 · f 最新 · x 停止 · Ctrl+点击文件 · q 退出');
  const compactMetrics=w<40?'CPU '+(status?.cpuPercent??0).toFixed(1)+'% · RAM '+ramText:
   w<72?'CPU '+(status?.cpuPercent??0).toFixed(1)+'% · RAM '+ramText+' · '+(status?.operationsTotal??0)+' OPS':metrics;
  const footerRightWidth=wideFooter?Math.min(64,Math.max(48,Math.floor(w*.48))):0;
@@ -771,7 +836,7 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
   </Box>
   <Box height={3} flexShrink={0} borderStyle="single" borderColor={edit?palette.accent:palette.line} paddingX={1}>
    <Text color={edit?palette.accent:palette.muted}>{fit(edit?(edit==='search'?'⌕ ':'> ')+text+'▏':
-    query?'⌕ '+query+' · '+activities.length+' matches · Esc 清除':'⌕ S 搜索 · / 指令 · f 最新',Math.max(1,w-4))}</Text>
+    query?'⌕ '+query+' · '+activities.length+' 条匹配 · Esc 清除':'⌕ 搜索：Agent、工具、描述、路径、命令、结果、状态 · 点击输入',Math.max(1,w-4))}</Text>
   </Box>
   <Box width={w} height={bodyHeight} flexShrink={0} flexDirection={horizontal?'row':'column'} overflow="hidden">
    {activityPane}
@@ -802,11 +867,11 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
 }
 
 export async function showTui(demoScenario?:DemoScenario){
- if(process.stdout.isTTY)process.stdout.write('\x1b[?1049h\x1b[?1000h\x1b[?1006h');
+ if(process.stdout.isTTY)process.stdout.write('\x1b[?1049h\x1b[?1003h\x1b[?1006h');
  try{
   const app=render(demoScenario?<App demoScenario={demoScenario}/>:<App/>,{interactive:process.stdout.isTTY===true,exitOnCtrlC:false});
   await app.waitUntilExit();
  }finally{
-  if(process.stdout.isTTY)process.stdout.write('\x1b[?1006l\x1b[?1000l\x1b[?1049l');
+  if(process.stdout.isTTY)process.stdout.write('\x1b[?1006l\x1b[?1003l\x1b[?1049l');
  }
 }

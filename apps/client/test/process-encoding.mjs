@@ -22,6 +22,14 @@ Write-Output "中文输出：$Label，Ω ✓"
     assert.ok(result.stderr.includes('中文错误输出 ✓'),JSON.stringify(result));
     assert.ok(!result.stderr.includes('CLIXML'),JSON.stringify(result));
     console.log('PASS '+shellProfile+' emits correct UTF-8 stdout and stderr with param()');
+    const failed=await supervisor.foreground('ps-error-'+shellProfile,'PowerShell error normalization',
+      {mode:'shell',shellProfile,script:"Write-Error 'PS_ERROR_SENTINEL'; exit 7"},15000);
+    assert.notEqual(failed.exitCode,0,'PowerShell failure must retain nonzero exit status');
+    assert.match(failed.stderr,/PS_ERROR_SENTINEL/);
+    assert.ok(!failed.stderr.includes('<Objs')&&!failed.stderr.includes('_x001B_'),
+      'agent-facing stderr must be readable, not CLIXML');
+    assert.match(failed.errorSummary??'',/PS_ERROR_SENTINEL/);
+    console.log('PASS '+shellProfile+' failure returns readable agent-facing stderr and errorSummary');
   }
 
   const split=`const x=Buffer.from('中文✓','utf8');process.stdout.write(x.subarray(0,1));setTimeout(()=>process.stdout.write(x.subarray(1)),40);`;

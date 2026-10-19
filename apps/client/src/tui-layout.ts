@@ -72,7 +72,8 @@ export function tableColumns(width:number,timeWidth=9,resultTransfer=0):Column[]
  const add=(key:Column['key'],title:string,width:number)=>columns.push({key,title,width});
  if(structuralWidth>=54)add('time','TIME',Math.min(16,Math.max(9,timeWidth)));
  add('state','S',2);
- if(structuralWidth>=78)add('agent','AGENT',9);
+ // Keep AGENT visible even when a terminal is narrow; don't collapse identity.
+ add('agent','AGENT',structuralWidth>=78?9:structuralWidth>=50?7:Math.max(3,Math.min(6,Math.floor(structuralWidth*.23))));
  if(structuralWidth>=35)add('tool','TOOL',structuralWidth>=110?10:9);
  if(structuralWidth>=54)add('elapsed','DUR',6);
  const remaining=Math.max(1,available-columns.reduce((n,c)=>n+c.width,0));

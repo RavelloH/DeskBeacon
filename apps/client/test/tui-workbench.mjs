@@ -277,7 +277,8 @@ try{
 
   const search=await mountDemo('connected',120,32);
   try{
-    await search.send('S');await search.send('Codex');
+    // SGR mouse left-click inside the existing 3-row search box edits search.
+    await search.send('\x1b[<0;10;3M');await search.send('Codex');
     await waitFor(()=>search.capture.snapshot().includes('ACTIVITY 1'),'search previews matches before Enter');
     await search.send('\r');
     await waitFor(()=>search.capture.snapshot().includes('ACTIVITY 1'),'search must match the OAuth actor name');
@@ -288,6 +289,22 @@ try{
     assert.ok(search.capture.snapshot().includes('pnpm'),'command search result must be visible');
   }finally{await search.close();}
   console.log('PASS activity search by Actor and command');
+  const mouse=await mountDemo('connected',160,38);
+  try{
+    let linkedY=0;
+    for(let row=7;row<=15;row++){
+      mouse.input.write('\x1b[<35;49;'+row+'M');
+      await sleep(75);
+      if(mouse.capture.snapshot().includes('Ctrl+点击文件名')){linkedY=row;break;}
+    }
+    assert.ok(linkedY,'hovering a file path should show a Ctrl+click hint');
+    mouse.input.write('\x1b[<16;49;'+linkedY+'M');
+    await waitFor(()=>mouse.capture.snapshot().includes('文件不存在'),
+      'Ctrl+click should validate file existence without shell execution');
+    mouse.input.write('\x1b[<35;10;2M');
+    await waitFor(()=>!mouse.capture.snapshot().includes('Ctrl+点击文件名'),'link hover should clear on exit');
+    console.log('PASS file hover, Ctrl+click path validation and hover reset');
+  }finally{await mouse.close();}
 
   const controls=await mountDemo('busy',100,16);
   try{

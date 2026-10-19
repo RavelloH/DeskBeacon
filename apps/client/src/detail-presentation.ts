@@ -3,8 +3,10 @@ import {activityPresentation,type ActivityEntry} from './presenter.js';
 import {toolRow,type Tone,type Segment} from './tool-presentation.js';
 import {cellWidth,fit,wrapLines} from './tui-layout.js';
 import {highlightCodeLines,languageForPath,languageForCommand,type CodeSpan} from './syntax-highlight.js';
+import {normalizeProcessStderr} from './terminal-errors.js';
 
-export type DetailLine={text:string;tone?:Tone;bold?:boolean;italic?:boolean;label?:string;section?:string;syntax?:CodeSpan[]|undefined};
+export type DetailLine={text:string;tone?:Tone;bold?:boolean;italic?:boolean;label?:string;section?:string;syntax?:CodeSpan[]|undefined;
+ sourceLine?:number|null;continued?:boolean};
 type Fields=Record<string,any>;
 const line=(text:string,tone:Tone='default',bold=false,italic=false):DetailLine=>({text,tone,bold,italic});
 const label=(key:string,value:unknown,tone:Tone='default'):DetailLine=>({text:clean(String(value??'—'),1000),label:key,tone});
@@ -20,17 +22,18 @@ function clean(raw:string,max=300):string{
   .replace(/https?:\/\/[^\s]+/gi,match=>{try{const u=new URL(match);return u.origin+u.pathname;}catch{return match.split(/[?#]/)[0]??'';}})
   .slice(0,max);
 }
-function block(raw:unknown,maxLines=280,maxChars=64000,language?:string):DetailLine[]{
+export function numberedBlock(raw:unknown,language?:string,startLine:number|null=1,
+ maxLines=280,maxChars=64000):DetailLine[]{
  if(typeof raw!=='string')return [line('（内容不可用）','muted',false,true)];
  const text=raw.slice(0,maxChars),lines=text.replace(/\r\n?/g,'\n').split('\n');
  const source=lines.slice(0,maxLines).map(value=>clean(value,500).replace(/\t/g,'  '));
  const highlighted=language?highlightCodeLines(source,language):undefined;
  const result:DetailLine[]=source.map((v,index)=>{
-  if(highlighted)return {...line(v,'muted'),syntax:highlighted[index]};
+  if(highlighted)return {...line(v,'muted'),syntax:highlighted[index],sourceLine:startLine===null?null:startLine+index};
   const tone:Tone=v.startsWith('+++')||v.startsWith('+')?'success':
    v.startsWith('---')||v.startsWith('-')?'danger':v.startsWith('@@')?'warning':'default';
   const comment=/^\s*(\/\/|#\s)/.test(v);
-  return line(v,comment?'muted':tone,v.startsWith('@@'),comment);
+  return {...line(v,comment?'muted':tone,v.startsWith('@@'),comment),sourceLine:startLine===null?null:startLine+index};
  });
  if(raw.length>maxChars||lines.length>maxLines)result.push(line('… 内容过长，请使用文件或输出读取工具查看完整内容','warning'));
  return result;
@@ -50,7 +53,8 @@ const cmd=(x:Fields)=>{const c=x.command;if(!c||typeof c!=='object')return '';re
 function contentFor(a:ActivityEntry,i:Fields,r:Fields):DetailLine[]{
  const out:DetailLine[]=[];
  const meta=(fields:[string,unknown][])=>out.push(...fields.filter(([,v])=>v!==undefined&&v!==null&&v!=='').map(([k,v])=>label(k,v)));
- const content=(title:string,text:unknown,language?:string)=>out.push(section(title),...block(text,280,64000,language));
+ const content=(title:string,text:unknown,language?:string,startLine:number|null=1)=>
+  out.push(section(title),...numberedBlock(text,language,startLine));
  const list=(title:string,items:unknown,format:(v:Fields,n:number)=>string)=>out.push(section(title),...records(items,format));
  switch(a.tool){
   case 'fs_edit':{
@@ -69,7 +73,7 @@ function contentFor(a:ActivityEntry,i:Fields,r:Fields):DetailLine[]{
    // post-write file contents. Binary/base64 and legacy redacted histories
    // cannot be treated as source code.
    if(typeof i.content==='string'&&i.content!=='[redacted]'&&i.encoding!=='base64')
-    content(heading,i.content,languageForPath(i.path));
+    content(heading,i.content,languageForPath(i.path),i.mode==='append'?null:1);
    else out.push(section(heading),line('历史记录未保存可预览的写入文本','muted',false,true));
    break;
   }
@@ -78,7 +82,12 @@ function contentFor(a:ActivityEntry,i:Fields,r:Fields):DetailLine[]{
    // Display only the content returned to the agent by this exact read call.
    // Never reopen the path: the file may have changed and the requested range
    // may have been only a few lines or bytes.
-   if(typeof r.content==='string'&&r.content!=='[redacted]')content('FILE CONTENT',r.content,languageForPath(i.path));
+   if(typeof r.content==='string'&&r.content!=='[redacted]'){
+    const offset=r.lineOffset??i.lineOffset;
+    const start=Number.isSafeInteger(offset)?Number(offset)+1:
+      Number(i.byteOffset??0)>0?null:1;
+    content('FILE CONTENT',r.content,languageForPath(i.path),start);
+   }
    else out.push(section('FILE CONTENT'),line('历史记录未保存此次读取的正文','muted',false,true));
    break;
   case 'fs_read_many':
@@ -86,7 +95,10 @@ function contentFor(a:ActivityEntry,i:Fields,r:Fields):DetailLine[]{
    for(const file of (Array.isArray(r.files)?r.files:[]).slice(0,20)){
     out.push(section(clean(String(loc(file)),100)));
     out.push(...(file.error?[line(clean(String(file.error)),'danger')]:
-     typeof file.content==='string'&&file.content!=='[redacted]'?block(file.content,45,4000,languageForPath(loc(file))):
+     typeof file.content==='string'&&file.content!=='[redacted]'?numberedBlock(file.content,
+      languageForPath(loc(file)),Number.isSafeInteger(file.lineOffset)?file.lineOffset+1:
+      Number(i.files?.find((f:Fields)=>f.path===file.path)?.byteOffset??0)>0?null:
+      (Number(i.files?.find((f:Fields)=>f.path===file.path)?.lineOffset??0)+1),45,4000):
      [line('历史记录未保存此次读取的正文','muted',false,true)]));
    }break;
   case 'fs_grep':
@@ -106,8 +118,8 @@ function contentFor(a:ActivityEntry,i:Fields,r:Fields):DetailLine[]{
   case 'exec_foreground':case 'exec_background':
    meta([['CWD',i.command?.cwd??a.cwd],['EXIT',r.exitCode],['PID',r.pid],['TIMEOUT',r.timedOut]]);
    content('COMMAND',cmd(i),languageForCommand(i.command));
-   if(r.stdout||r.outputPreview)content('STDOUT',r.stdout??r.outputPreview);
-   if(r.stderr)content('STDERR',r.stderr);break;
+   if(r.stdout||r.outputPreview)content('STDOUT',r.stdout??normalizeProcessStderr(r.outputPreview));
+   if(r.stderr)content('STDERR',normalizeProcessStderr(r.stderr));break;
   case 'batch':
    meta([['STAGES',i.stages?.length],['DONE',r.completed],['FAILED',r.failed],['SKIPPED',r.skipped]]);
    for(const [index,stage] of (Array.isArray(r.stages)?r.stages:[]).slice(0,20).entries())
@@ -165,7 +177,7 @@ function wrapSyntaxLine(item:DetailLine,width:number):DetailLine[]{
  const rows:DetailLine[]=[],max=Math.max(1,width);
  let parts:CodeSpan[]=[],used=0,plain='';
  const flush=()=>{
-  rows.push({...item,text:plain,syntax:parts});
+  rows.push({...item,text:plain,syntax:parts,continued:rows.length>0});
   parts=[];used=0;plain='';
  };
  for(const span of item.syntax??[]){
@@ -205,7 +217,11 @@ export function wrapDetail(lines:DetailLine[],width:number):DetailLine[]{
     text:(index===0?title:' '.repeat(cellWidth(title)))+'│ '+v
    }));
   }
-  if(item.syntax)return wrapSyntaxLine(item,w);
-  return wrapLines([item.text],w).map(v=>({...item,text:v}));
+  // Source line numbers are attached before wrapping. Physical terminal wraps
+  // get a continuation marker, never a counterfeit source line number.
+  const gutter=item.sourceLine!==undefined?Math.max(5,String(item.sourceLine??'?').length)+3:0;
+  if(item.syntax)return wrapSyntaxLine(item,Math.max(1,w-gutter));
+  return wrapLines([item.text],Math.max(1,w-gutter))
+   .map((v,index)=>({...item,text:v,continued:index>0}));
  });
 }
