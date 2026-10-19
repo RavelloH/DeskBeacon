@@ -70,7 +70,7 @@ export class ClientDaemon extends EventEmitter {
   private systemMemory={availableMemoryBytes:freemem(),totalMemoryBytes:totalmem()};
   private systemMemorySampleAt=0;
   private systemMemorySample:Promise<void>|undefined;
-  private async refreshSystemMemory(){
+  private refreshSystemMemory(){
     if(Date.now()-this.systemMemorySampleAt>=1000){
       if(!this.systemMemorySample){
         this.systemMemorySample=si.mem().then(memory=>{
@@ -80,7 +80,8 @@ export class ClientDaemon extends EventEmitter {
           this.systemMemorySampleAt=Date.now();this.systemMemorySample=undefined;
         });
       }
-      await this.systemMemorySample;
+      // Windows systeminformation.mem() may take seconds on slow or cold hosts.
+      // Never delay the IPC status response or the TUI refresh for this sample.
     }
     return this.systemMemory;
   }
@@ -121,7 +122,7 @@ export class ClientDaemon extends EventEmitter {
     this.supervisor=new TaskSupervisor(this.db,join(dataDir,'output'),()=>this.emit('change'));
   }
   async status(){
-    const systemMemory=await this.refreshSystemMemory();
+    const systemMemory=this.refreshSystemMemory();
     const current=process.cpuUsage(),clock=process.hrtime.bigint();
     const elapsedUs=Number(clock-this.cpuSampleAt)/1000;
     if(elapsedUs>=800_000){
