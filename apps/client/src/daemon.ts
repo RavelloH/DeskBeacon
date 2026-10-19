@@ -15,7 +15,7 @@ import {activityPage, type ActivityPageOptions} from './activity-query.js';
 
 
 
-export type Config={url:string;deviceId:string;accessToken:string;refreshToken?:string;accessTokenExpiresAt?:number;clientId:string;deviceName:string};
+export type Config={url:string;deviceId:string;accessToken:string;refreshToken?:string;accessTokenExpiresAt?:number;clientId:string;deviceName:string;pendingUrl?:string};
 export const dataDir=process.env.DESKBEACON_DATA_DIR ?? join(homedir(),'.deskbeacon');
 export const configPath=join(dataDir,'config.json');
 export function saveConfig(config:Config){mkdirSync(dataDir,{recursive:true});writeFileSync(configPath,JSON.stringify(config,null,2),{mode:0o600});if(process.platform!=='win32')chmodSync(configPath,0o600);}
@@ -96,7 +96,7 @@ export class ClientDaemon extends EventEmitter {
     if(token.refresh_token)this.config.refreshToken=token.refresh_token;
     if(token.expires_in)this.config.accessTokenExpiresAt=Date.now()+token.expires_in*1000;
     this.forceRefresh=false;
-    if(existsSync(configPath))try{const saved=loadConfig();if(saved.clientId===this.config.clientId)saveConfig(this.config);}catch{}
+    if(existsSync(configPath))try{const saved=loadConfig();if(saved.clientId===this.config.clientId)saveConfig({...saved,...this.config,pendingUrl:saved.pendingUrl});}catch{}
   }
 
   private transfers=new Map<string,{status:string;bytes:number;path:string}>();
