@@ -1,0 +1,30 @@
+import assert from 'node:assert/strict';
+import {commandPalette,parseCommand,normalizeServerUrl} from '../dist/command-palette.js';
+const context={name:'DeskBeacon Dev',url:'https://beacon.example.test'};
+const root=commandPalette('/',context);
+assert.ok(root.items.some(x=>x.label==='/config'));
+assert.ok(root.items.some(x=>x.label==='/tasks'));
+assert.ok(!root.items.some(x=>x.label==='/search'),'search must remain a separate input');
+assert.equal(commandPalette('/conf',context).items[0]?.insert,'/config ');
+assert.deepEqual(commandPalette('/config ',context).items.map(x=>x.label),['name','url']);
+assert.deepEqual(commandPalette('/config n',context).items.map(x=>x.label),['name']);
+assert.equal(commandPalette('/config name ',context).stage,'value');
+assert.equal(commandPalette('/config name ',context).items[0]?.selectable,false);
+assert.equal(commandPalette('/config url ',context).stage,'value');
+assert.equal(commandPalette('/view st',context).items[0]?.insert,'/view stderr');
+assert.equal(parseCommand('/config name').id,'config');
+assert.deepEqual(parseCommand('/config name New Device'),{id:'config',args:['name'],value:'New Device'});
+assert.deepEqual(parseCommand('/config url https://beacon.example.test'),
+ {id:'config',args:['url'],value:'https://beacon.example.test'});
+assert.deepEqual(parseCommand('/stop all'),{id:'stop',args:['all']});
+assert.deepEqual(parseCommand('/view output'),{id:'view',args:['output']});
+assert.ok('error' in parseCommand('/config'));
+assert.ok('error' in parseCommand('/search anything'));
+assert.ok('error' in parseCommand('config name'));
+assert.ok('error' in parseCommand('/config token foo'));
+assert.ok('error' in parseCommand('/config name2'));
+assert.equal(normalizeServerUrl('https://example.test/'),'https://example.test');
+assert.equal(normalizeServerUrl('http://localhost:8787'),'http://localhost:8787');
+for(const value of ['http://evil.example','https://a.test/path','https://admin:secret@host.test',
+ 'https://a.test/?token=value','javascript:evil'])assert.throws(()=>normalizeServerUrl(value));
+console.log('PASS command registry, staged choices, slash-only parsing and URL validation');
