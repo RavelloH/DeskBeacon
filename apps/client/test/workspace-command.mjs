@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
-import {mkdtempSync,mkdirSync,rmSync} from 'node:fs';
+import {mkdtempSync,mkdirSync,rmSync,realpathSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
+// Windows runners may spell the same directory as RUNNER~1 or runneradmin.
+// Compare filesystem-canonical paths rather than raw 8.3/long-name spellings.
+const canonicalPath=value=>{
+ const path=realpathSync.native(resolve(value));
+ return process.platform==='win32'?path.toLowerCase():path;
+};
 const root=mkdtempSync(join(tmpdir(),'deskbeacon-workspace-regression-'));
 process.env.DESKBEACON_DATA_DIR=join(root,'runtime');
 const {ClientDaemon}=await import('../dist/daemon.js');
@@ -23,15 +29,15 @@ try{
  for(const mode of ['program','shell']){
   const result=await run(mode,opened.workspaceId);
   assert.equal(result.exitCode,0,JSON.stringify(result));
-  assert.equal(resolve(result.stdout.trim()),resolve(a),mode+' must honor nested workspaceId');
+  assert.equal(canonicalPath(result.stdout.trim()),canonicalPath(a),mode+' must honor nested workspaceId');
  }
  const cd=await exec('workspace_cd',{workspaceId:opened.workspaceId,path:'../b',expectedVersion:0});
  assert.equal(cd.version,1);
  assert.equal(cd.cwd,resolve(b));
  const changed=await run('program',opened.workspaceId);
- assert.equal(resolve(changed.stdout.trim()),resolve(b),'command must observe workspace_cd');
+ assert.equal(canonicalPath(changed.stdout.trim()),canonicalPath(b),'command must observe workspace_cd');
  const explicit=await run('program',opened.workspaceId,a);
- assert.equal(resolve(explicit.stdout.trim()),resolve(a),'explicit cwd overrides workspace');
+ assert.equal(canonicalPath(explicit.stdout.trim()),canonicalPath(a),'explicit cwd overrides workspace');
  await assert.rejects(()=>run('program','nonexistent-workspace-id'),/WORKSPACE_NOT_FOUND/);
  await assert.rejects(()=>exec('exec_foreground',{description:'isolation',command:{
   mode:'program',program:process.execPath,args:['-v'],workspaceId:opened.workspaceId
