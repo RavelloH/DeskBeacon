@@ -1,5 +1,6 @@
 {
   "name": "deskbeacon",
+  "private": true,
   "version": "0.2.0",
   "description": "DeskBeacon local companion CLI and Ink TUI for Agent-controlled devices",
   "type": "module",

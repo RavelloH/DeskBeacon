@@ -5,6 +5,7 @@ import {fileURLToPath} from 'node:url';
 const client=dirname(dirname(fileURLToPath(import.meta.url)));
 const root=dirname(dirname(client)),base=join(client,'dist','npm');
 const source=JSON.parse(readFileSync(join(client,'package.json'),'utf8'));
+if(source.private!==true)throw Error('Raw workspace client must be private; publish staged npm artifacts only');
 if(!source.optionalDependencies?.['@deskbeacon/win32-x64']||
    !source.optionalDependencies?.['@deskbeacon/win32-arm64'])
  throw Error('Platform optionalDependencies are missing');

@@ -66,6 +66,16 @@ jobs:
           npm pack ./packages/win32-arm64 --pack-destination packed
           npm pack ./apps/client/dist/npm --pack-destination packed
           ls -lh packed
+      - name: Smoke test installed main npm tarball on Linux (no Windows helper)
+        shell: bash
+        run: |
+          set -euo pipefail
+          smoke="$(mktemp -d)"
+          trap 'rm -rf "$smoke"' EXIT
+          printf '{"name":"deskbeacon-linux-smoke","version":"1.0.0","private":true}\n' > "$smoke/package.json"
+          npm install --prefix "$smoke" --no-audit --no-fund --no-save "$GITHUB_WORKSPACE/packed/deskbeacon-0.2.0.tgz"
+          test "$(node "$smoke/node_modules/deskbeacon/launcher.js" version)" = '0.2.0'
+          node "$smoke/node_modules/deskbeacon/launcher.js" help
       - uses: actions/upload-artifact@v4
         with:
           name: deskbeacon-npm-0.2.0
@@ -98,6 +108,26 @@ jobs:
           name: deskbeacon-native-c-binaries
           # Upload's common root is packages/, so restore that root explicitly.
           path: packages
+      - uses: actions/download-artifact@v4
+        with:
+          name: deskbeacon-npm-0.2.0
+          path: packed
+      - name: Smoke test installed npm release tarballs (Windows x64)
+        shell: pwsh
+        run: |
+          $smoke = Join-Path $env:RUNNER_TEMP "deskbeacon-npm-x64"
+          New-Item -ItemType Directory -Force $smoke | Out-Null
+          '{"name":"deskbeacon-npm-smoke","version":"1.0.0","private":true}' | Set-Content -Encoding utf8 (Join-Path $smoke 'package.json')
+          npm install --prefix $smoke --no-audit --no-fund --no-save (Join-Path $PWD 'packed/deskbeacon-0.2.0.tgz') (Join-Path $PWD 'packed/deskbeacon-win32-x64-0.2.0.tgz')
+          if ($LASTEXITCODE -ne 0) { throw "npm x64 tarball install failed" }
+          $launcher = Join-Path $smoke 'node_modules/deskbeacon/launcher.js'
+          $version = & node $launcher version
+          if ($LASTEXITCODE -ne 0 -or ($version.Trim()) -ne '0.2.0') { throw "Installed CLI version mismatch" }
+          & node $launcher help
+          if ($LASTEXITCODE -ne 0) { throw "Installed CLI help failed" }
+          $native = Join-Path $smoke 'node_modules/@deskbeacon/win32-x64/deskbeacon-job.exe'
+          & node apps/client/scripts/verify-native.mjs win32-x64 $native
+          if ($LASTEXITCODE -ne 0) { throw "Installed x64 C helper verification failed" }
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @deskbeacon/protocol build
       - run: pnpm check
@@ -128,6 +158,26 @@ jobs:
           name: deskbeacon-native-c-binaries
           # Upload's common root is packages/, so restore that root explicitly.
           path: packages
+      - uses: actions/download-artifact@v4
+        with:
+          name: deskbeacon-npm-0.2.0
+          path: packed
+      - name: Smoke test installed npm release tarballs (Windows ARM64)
+        shell: pwsh
+        run: |
+          $smoke = Join-Path $env:RUNNER_TEMP "deskbeacon-npm-arm64"
+          New-Item -ItemType Directory -Force $smoke | Out-Null
+          '{"name":"deskbeacon-npm-smoke","version":"1.0.0","private":true}' | Set-Content -Encoding utf8 (Join-Path $smoke 'package.json')
+          npm install --prefix $smoke --no-audit --no-fund --no-save (Join-Path $PWD 'packed/deskbeacon-0.2.0.tgz') (Join-Path $PWD 'packed/deskbeacon-win32-arm64-0.2.0.tgz')
+          if ($LASTEXITCODE -ne 0) { throw "npm ARM64 tarball install failed" }
+          $launcher = Join-Path $smoke 'node_modules/deskbeacon/launcher.js'
+          $version = & node $launcher version
+          if ($LASTEXITCODE -ne 0 -or ($version.Trim()) -ne '0.2.0') { throw "Installed CLI version mismatch" }
+          & node $launcher help
+          if ($LASTEXITCODE -ne 0) { throw "Installed CLI help failed" }
+          $native = Join-Path $smoke 'node_modules/@deskbeacon/win32-arm64/deskbeacon-job.exe'
+          & node apps/client/scripts/verify-native.mjs win32-arm64 $native
+          if ($LASTEXITCODE -ne 0) { throw "Installed ARM64 C helper verification failed" }
       # workerd (server-only) does not publish a Windows ARM64 executable.
       # Install only the client dependency closure on the ARM64 runner.
       - run: pnpm --filter 'deskbeacon...' install --frozen-lockfile
