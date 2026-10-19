@@ -418,18 +418,22 @@ try{
       'multiple command candidates must render');
     assertCandidateColumns(commands.capture.snapshot(),['/help','/config','/tasks']);
     await commands.send('\x1b[B');
+    await waitFor(()=>commands.capture.snapshot().includes('› /config'),
+      'arrow selection must be rendered before advancing parameters');
     await commands.send(' ');
     await waitFor(()=>commands.capture.snapshot().includes('设备名称：')&&
       commands.capture.snapshot().includes('服务器地址：'),
       'down arrow plus space selects /config and advances to config keys');
     assertCandidateColumns(commands.capture.snapshot(),['name','url']);
     await commands.send('\x1b');
+    await waitFor(()=>!commands.capture.snapshot().includes('COMMANDS'),
+      'Escape must close the first palette before reopening');
     await commands.send('/');
     await waitFor(()=>commands.capture.snapshot().includes('COMMANDS'),
       'palette must reopen after Escape');
     await commands.send('conf');
-    await waitFor(()=>commands.capture.snapshot().includes('/config'),
-      'partial slash name filters command candidates');
+    await waitFor(()=>commands.capture.snapshot().includes('⌘ /conf'),
+      'the typed partial command must be visible before invoking Space');
     await commands.send(' ');
     await waitFor(()=>commands.capture.snapshot().includes('设备名称：')&&
       commands.capture.snapshot().includes('服务器地址：'),
