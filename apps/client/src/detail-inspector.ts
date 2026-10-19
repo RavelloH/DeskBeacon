@@ -38,7 +38,7 @@ export function inspectorInput(entry:ActivityEntry,source:FullSource|null):Detai
    rows.push(heading('COMMAND · '+String(c.shellProfile??'shell')));
    rows.push(...fullNumberedBlock(script,languageForCommand(c)));
   }else if(typeof c.program==='string'){
-   rows.push(heading('PROGRAM'));
+   rows.push(heading('COMMAND · PROGRAM'));
    rows.push(...fullNumberedBlock(c.program,languageForCommand(c)));
    if(Array.isArray(c.args)&&c.args.length){
     rows.push(heading('ARGUMENTS · JSON'));
@@ -55,18 +55,12 @@ export function inspectorInput(entry:ActivityEntry,source:FullSource|null):Detai
   rows.push(heading('PATCH'));
   rows.push(...fullNumberedBlock(input.patch,'diff'));
  }
- const metadata={...input};
- if(metadata.command&&typeof metadata.command==='object'&&!Array.isArray(metadata.command)){
-  const copied={...(metadata.command as Record<string,unknown>)};
-  delete copied.script;
-  delete copied.args;
-  delete copied.program;
-  metadata.command=copied;
- }
- delete metadata.content;
- delete metadata.patch;
- rows.push(heading('PARAMETERS · JSON'));
- rows.push(...fullNumberedBlock(format(metadata),'json'));
+ // The inspector must show the exact entire locally stored request:
+ // command.script, program, args, cwd, env (redacted at persistence), file
+ // content and patch all belong to the input. The standalone code sections
+ // above are just convenient syntax-highlighted views, not replacements.
+ rows.push(heading('COMPLETE INPUT · JSON'));
+ rows.push(...fullNumberedBlock(format(input),'json'));
  return rows;
 }
 export function inspectorOutput(source:FullSource|null,stream:'stdout'|'stderr',language?:string,sourceLimited=false):DetailLine[]{

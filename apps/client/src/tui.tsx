@@ -28,6 +28,11 @@ type LocalTask={id:string;title:string;start:number;kind:string;entry:ActivityEn
 type TaskLog={id:string;line:string};
 type OutputPage={text:string;nextOffset:number;totalBytes:number;hasMore:boolean;stream:string};
 type Focus='activity'|'detail'|'tasks';
+// The bottom bar is for app-wide navigation. Inspector-only controls live in DETAIL.
+const globalShortcuts=(width:number)=>width<64?
+ 's 搜索 · / 指令 · f 最新 · x 停止 · q 退出':width<140?
+ 'Tab 切换 · s 搜索 · / 指令 · f 最新 · x 停止 · q 退出':
+ '↑↓ 选择 · Tab 切换 · s 搜索 · / 指令 · f 最新 · x 停止 · q 退出';
 const palette={text:'#D6D6D6',muted:'#969696',line:'#5E5E5E',accent:'#75D9CF',selection:'#303030'};
 const stateColor={running:'#EFC778',success:'#92D6A2',failed:'#F58D91',stopped:'#A6A6A6',interrupted:'#EFC778',unknown:'#A6A6A6'};
 const spinnerFrames=['⣾','⣷','⣯','⣟','⡿','⢿','⣻','⣽'] as const;
@@ -746,7 +751,7 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
    if(key.return){
     const value=text.trim(),kind=edit;setEdit(null);setText('');
     if(kind==='search'){setQuery(value);setSelectedId(null);setDetailTask(false);setFocus('activity');resetDetail();return;}
-    if(value==='help'){setNotice('↑↓ 浏览 · Tab 切换 · i 输入 · o 输出 · e 切换流 · c 复制');return;}
+    if(value==='help'){setNotice(globalShortcuts(w));return;}
     if(value==='config'){setView('config');setFocus('detail');setDetailScroll(0);return;}
     if(value==='tasks'){
      if(tasks.length){setFocus('tasks');setDetailTask(true);resetDetail();}
@@ -778,7 +783,7 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
   }
   if(input==='s'||input==='S'){setEdit('search');setText(query);setNotice('');return;}
   if(input==='/'||input===':'||input==='>'){setEdit('command');setText('');setNotice('');return;}
-  if(input==='?'){setNotice('↑↓ 浏览 · Tab 切换 · S 搜索 · i 输入 · o 输出 · c 复制');return;}
+  if(input==='?'){setNotice(globalShortcuts(w));return;}
   if(key.tab){
    const order:Focus[]=tasks.length?['activity','detail','tasks']:['activity','detail'];
    const index=order.indexOf(focus),delta=key.shift?-1:1;
@@ -869,9 +874,7 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
  const headerRightWidth=Math.max(0,w-headerLeftWidth);
  const footerPrompt=confirm?
   '停止 '+confirm.length+' 个进程及其子进程？ y / Enter 确认 · n / Esc 返回':
-  notice||(pageError?'活动读取失败 · '+pageError:
-   w<64?'↑↓ 选择 · Tab 切换 · S 搜索 · / 指令 · q 退出':
-   '↑↓ 选择 · Tab 切换 · S 搜索 · i 输入 · o 输出 · c 复制 · q 退出');
+  notice||(pageError?'活动读取失败 · '+pageError:globalShortcuts(w));
  const compactMetrics=w<40?'CPU '+(status?.cpuPercent??0).toFixed(1)+'% · RAM '+ramText:
   w<72?'CPU '+(status?.cpuPercent??0).toFixed(1)+'% · RAM '+ramText+' · '+(status?.operationsTotal??0)+' OPS':metrics;
  const footerRightWidth=wideFooter?Math.min(64,Math.max(48,Math.floor(w*.48))):0;

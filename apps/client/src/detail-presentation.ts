@@ -32,7 +32,8 @@ export function numberedBlock(raw:unknown,language?:string,startLine:number|null
  if(typeof raw!=='string')return [line('（内容不可用）','muted',false,true)];
  const normalized=raw.replace(/\r\n?/g,'\n');
  const text=normalized.slice(0,maxChars),lines=text.split('\n');
- const source=lines.slice(0,maxLines).map(value=>clean(value,maxLines===Infinity&&maxChars===Infinity?Infinity:500).replace(/\t/g,'  '));
+ const displayedSource=lines.slice(0,maxLines);
+ const source=displayedSource.map(value=>clean(value,maxLines===Infinity&&maxChars===Infinity?Infinity:500).replace(/\t/g,'  '));
  const lineDigits=startLine===null?1:String(startLine+Math.max(0,source.length-1)).length;
  const highlighted=language?highlightCodeLines(source,language):undefined;
  const result:DetailLine[]=source.map((v,index)=>{
@@ -42,12 +43,15 @@ export function numberedBlock(raw:unknown,language?:string,startLine:number|null
   const comment=/^\s*(\/\/|#\s)/.test(v);
   return {...line(v,comment?'muted':tone,v.startsWith('@@'),comment),sourceLine:startLine===null?null:startLine+index,lineDigits};
  });
- const shown=lines.slice(0,maxLines).join('\n').length;
- const missingLines=lines.length-source.length;
+ const shown=displayedSource.join('\n').length;
  const missingChars=Math.max(0,normalized.length-shown);
+ // Count omitted *source* lines, including lines excluded by maxChars.
+ // lines here is only the maxChars prefix, so its length is insufficient.
+ let missingLines=0;
+ for(let i=shown;i<normalized.length;i++)if(normalized.charCodeAt(i)===10)missingLines++;
  if(missingLines>0||missingChars>0)
-  result.push(line('...剩余 '+(missingLines>0?missingLines+' 行'+(missingChars>0?' / ':''):'')+
-   (missingChars>0?missingChars+' 字符':'')+'（详情预览限制）','warning'));
+  result.push(line('摘要未展示：剩余 '+(missingLines>0?missingLines+' 行'+(missingChars>0?' / ':''):'')+
+   (missingChars>0?missingChars+' 字符':'')+'（仅摘要显示省略；输入/输出原文请切换对应视图）','warning'));
 
  return result;
 }
