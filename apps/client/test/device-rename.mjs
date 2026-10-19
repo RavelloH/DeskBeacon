@@ -47,14 +47,12 @@ function launch(...args){
 const config=()=>JSON.parse(readFileSync(join(dir,'config.json'),'utf8'));
 let service;
 try{
- const standalone=await launch('rename','Standalone Name');
- assert.equal(standalone.code,0,standalone.stderr);
- assert.match(standalone.stdout,/Device renamed to Standalone Name/);
- assert.equal(label,'Standalone Name');
- assert.equal(config().deviceName,'Standalone Name');
- console.log('PASS standalone CLI rename syncs server and local config');
+ const removed=await launch('rename','Legacy Name');
+ assert.notEqual(removed.code,0,'CLI rename must no longer be available');
+ assert.match(removed.stderr,/Unknown command rename/);
+ console.log('PASS obsolete CLI rename removed');
 
- service=spawn(process.execPath,[cli,'__service_run'],{cwd:dir,env,windowsHide:true,stdio:'ignore'});
+  service=spawn(process.execPath,[cli,'__service_run'],{cwd:dir,env,windowsHide:true,stdio:'ignore'});
  process.env.DESKBEACON_DATA_DIR=dir;process.env.DESKBEACON_IPC_PATH=ipc;
  const {requestIpc}=await import('../dist/ipc.js');
  let active=false;
@@ -63,13 +61,22 @@ try{
   await new Promise(r=>setTimeout(r,80));
  }
  assert.ok(active,'service must be connected');
- const online=await launch('rename','Online Service Name');
- assert.equal(online.code,0,online.stderr);
- assert.match(online.stdout,/Device renamed to Online Service Name/);
- assert.equal(label,'Online Service Name');
+ const online=await requestIpc({action:'config-set',key:'name',value:'Online Service Name'},16000);
+ assert.equal(online.name,'Online Service Name');
+  assert.equal(label,'Online Service Name');
  assert.equal(config().deviceName,'Online Service Name');
  assert.equal((await requestIpc({action:'status'})).deviceName,'Online Service Name');
- console.log('PASS active background service rename updates server, config and live status');
+ console.log('PASS /config name changes sync server, disk and live status');
+ const current=await requestIpc({action:'config-get'});
+ assert.equal(current.name,'Online Service Name');
+ assert.equal(current.pending,false);
+ const pending=await requestIpc({action:'config-set',key:'url',value:'https://alternate.example.test'});
+ assert.equal(pending.pending,true);
+ assert.equal(pending.activeUrl,'http://127.0.0.1:'+port);
+ assert.equal(config().url,'http://127.0.0.1:'+port);
+ assert.equal(config().pendingUrl,'https://alternate.example.test');
+ assert.equal(config().accessToken,'local-test-token','never forward existing OAuth credentials to new host');
+ console.log('PASS /config url stages origin safely without reusing OAuth tokens');
  const stopped=await launch('service','stop');
  assert.equal(stopped.code,0,stopped.stderr);
 }finally{
