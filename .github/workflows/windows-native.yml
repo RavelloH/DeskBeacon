@@ -93,6 +93,7 @@ jobs:
           name: deskbeacon-native-c-binaries
           path: .
       - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @deskbeacon/protocol build
       - run: pnpm check
       - run: pnpm build
       - run: node apps/client/scripts/verify-native.mjs win32-x64
@@ -120,7 +121,9 @@ jobs:
         with:
           name: deskbeacon-native-c-binaries
           path: .
-      - run: pnpm install --frozen-lockfile
+      # workerd (server-only) does not publish a Windows ARM64 executable.
+      # Install only the client dependency closure on the ARM64 runner.
+      - run: pnpm --filter 'deskbeacon...' install --frozen-lockfile
       - run: pnpm --filter @deskbeacon/protocol build
       - run: pnpm --filter deskbeacon build
       - run: node apps/client/scripts/verify-native.mjs win32-arm64
