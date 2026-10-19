@@ -12,7 +12,7 @@ const commands:{id:CommandId;description:string}[]=[
 {id:'copy',description:'复制当前详情'},
 {id:'quit',description:'退出 DeskBeacon'}];
 const opt=(label:string,description:string,insert:string,selectable=true):Option=>({label,description,insert,selectable});
-export function commandPalette(raw:string,config:{name?:string;url?:string}={}):Palette{
+export function commandPalette(raw:string,config:{name?:string|undefined;url?:string|undefined}={}):Palette{
  const rest=raw.startsWith('/')?raw.slice(1):raw,space=rest.indexOf(' ');
  if(space<0){
   const needle=rest.trim().toLowerCase();
