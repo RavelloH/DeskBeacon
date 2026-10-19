@@ -82,7 +82,7 @@ writeFileSync(join(base,'launcher.js'),
   ''
  ].join('\n'),
  {mode:0o755});
-for(const name of ['README.md','LICENSE']){
+for(const name of ['README.md','LICENSE','CHANGELOG.md']){
  const original=join(root,name);if(existsSync(original))copyFileSync(original,join(base,name));
 }
 const bundled=readFileSync(join(base,'cli.js'),'utf8');
