@@ -1010,9 +1010,28 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
    <Text color={headerTheme.foreground}>{rightFit('● '+connection+' · '+(status?.latencyMs??'—')+' MS · '+host,Math.max(0,headerRightWidth-1))+' '}</Text>
   </Box>
   <Box height={3} flexShrink={0} borderStyle="single" borderColor={edit?palette.accent:palette.line} paddingX={1}>
-   <Text color={edit?palette.accent:palette.muted}>{fit(edit?(edit==='search'?'⌕ ':'> ')+text+'▏':
+   <Text color={edit?palette.accent:palette.muted}>{fit(edit?(edit==='search'?'⌕ '+text:'⌘ '+text)+'▏':
     query?'⌕ '+query+' · '+activities.length+' 条匹配 · Esc 清除':'⌕ 搜索：Agent、工具、描述、路径、命令、结果、状态 · 点击输入',Math.max(1,w-4))}</Text>
   </Box>
+  {edit==='command'?<Box width={w} height={commandPanelHeight} flexShrink={0}
+   flexDirection="column" overflow="hidden">
+   <Line width={w} text={' COMMANDS · '+(commandMenu?.stage==='command'?'命令':commandMenu?.stage==='argument'?'参数':'配置值')} color={palette.accent}/>
+   {commandOptions.slice(Math.max(0,commandSelect-visibleOptions+1),
+       Math.max(0,commandSelect-visibleOptions+1)+paletteCount).map((option,index)=>{
+    const first=Math.max(0,commandSelect-visibleOptions+1);
+    const active=first+index===commandSelect&&option.selectable;
+    const labelWidth=Math.max(10,Math.min(29,Math.floor(w*.28)));
+    return <Box key={option.label+index} height={1} width={w} flexShrink={0}
+      backgroundColor={active?palette.selection:undefined}>
+      <Text color={active?palette.accent:option.selectable?palette.text:palette.muted}>
+       {fit((active?' › ':'   ')+option.label,labelWidth,false)}
+      </Text>
+      <Text color={palette.muted}>{fit(' '+option.description,Math.max(1,w-labelWidth-1))}</Text>
+     </Box>;
+   })}
+   {commandOptions.length===0?<Line width={w} text="  无匹配候选，继续输入或按 Esc 返回" color={palette.muted}/>:null}
+   <Line width={w} text={' '+(commandMenu?.hint??'')} color={palette.muted}/>
+  </Box>:null}
   <Box width={w} height={bodyHeight} flexShrink={0} flexDirection={horizontal?'row':'column'} overflow="hidden">
    {activityPane}
    {horizontal?<Box width={1} height={bodyHeight}><Text color={palette.line}>{Array.from({length:bodyHeight},(_,i)=>i===0?'┯':detail[scroll+i-(inspectorTab==='summary'?1:2)]?.section?'├':'│').join('\n')}</Text></Box>:
