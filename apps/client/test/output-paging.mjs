@@ -94,8 +94,31 @@ try{
   assert.equal(nameById['other-grant'],null,'actor names must not cross OAuth grants');
   assert.equal(nameById[operationIdForActor],safeName);
   console.log('PASS trusted OAuth actor name sanitization and same-grant activity backfill');
+  const longContent='中文文字和表情 🙂\\n'.repeat(2100);
+  const inputForInspection={path:'/tmp/large-file.txt',mode:'create',content:longContent,
+   env:{PASSWORD:'sensitive-do-not-store'}};
+  const fullId='complete-input-fixture',fullTool='fs_write';
+  const fullHash=createHash('sha256').update(JSON.stringify([fullTool,inputForInspection])).digest('hex');
+  await daemon.dispatch({type:'operation.dispatch',operationId:fullId,toolName:fullTool,
+   input:inputForInspection,grantId,actorName:'Agent',requestHash:fullHash,
+   expiresAt:new Date(Date.now()+60_000).toISOString()});
+  const firstInput=await requestIpc({action:'input',operationId:fullId,maxBytes:1024});
+  assert.equal(firstInput.stream,'input');
+  assert.ok(firstInput.hasMore);
+  let combinedInput=firstInput.text, next=firstInput;
+  for(let n=0;next.hasMore&&n<150;n++){
+   next=await requestIpc({action:'input',operationId:fullId,byteOffset:next.nextOffset,maxBytes:1024});
+   combinedInput+=next.text;
+  }
+  const preserved=JSON.parse(combinedInput);
+  assert.equal(preserved.content,longContent,'full local input must not inherit activity-index truncation');
+  assert.equal(preserved.env,'[redacted]','environment secrets must not be stored verbatim');
+  assert.ok(!combinedInput.includes('sensitive-do-not-store'));
+  const oldInput=await requestIpc({action:'input',operationId:'legacy-missing-input'});
+  assert.equal(oldInput.available,false);
+  console.log('PASS full local input IPC pagination with sensitive-field redaction and legacy fallback');
 }finally{
   await new Promise(resolve=>listener.close(resolve));
   daemon.stop();
-  await rm(fixture,{recursive:true,force:true});
+  await rm(fixture,{recursive:true,force:true,maxRetries:15,retryDelay:150});
 }

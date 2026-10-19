@@ -4,6 +4,9 @@ import {requestIpc, subscribeIpc} from './ipc.js';
 import {activityPresentation, safeText, duration, elapsedText, type ActivityEntry} from './presenter.js';
 import {toolRow, type Segment, type Tone} from './tool-presentation.js';
 import {detailPresentation, wrapDetail, numberedBlock, type DetailLine} from './detail-presentation.js';
+import {inspectorInput,inspectorOutput,inspectorCopyText,storedOutputLimited,type InspectorTab,type FullSource} from './detail-inspector.js';
+import {readEntireLocalStream} from './local-stream.js';
+import {terminalWindowTitle,writeTerminalTitle} from './terminal-title.js';
 import {activityFileLink,openActivityFile,decodeSgrMouse} from './action-link.js';
 import {TuiInputBridge,stripMouseControlText} from './tui-input.js';
 import type {EventEmitter} from 'node:events';
@@ -246,7 +249,9 @@ const DetailCell=React.memo(function DetailCell({item,width}:{item:DetailLine;wi
   // Reserve exactly as many columns as the highest logical line number in
   // this block. A soft wrap leaves the number blank, never adds a glyph.
   const digits=item.lineDigits??String(item.sourceLine??'?').length;
-  const gutter=(item.continued?' '.repeat(digits):String(item.sourceLine??'?').padStart(digits))+' ';
+  // Pane separator │ + one inset cell + logical number + │ + one space.
+  // Soft wraps retain the gutter but leave the number entirely blank.
+  const gutter=' '+(item.continued?' '.repeat(digits):String(item.sourceLine??'?').padStart(digits))+' │ ';
   const room=Math.max(0,width-cellWidth(gutter));
   return <Box height={1} flexShrink={0} width={width}>
    <Text color={palette.line}>{gutter}</Text>
@@ -291,12 +296,15 @@ function RunningDurationDetailCell({entry,item,width}:{entry:ActivityEntry;item:
  const elapsed=elapsedText(Date.now()-entry.time);
  return <DetailCell item={{...item,text:item.text.replace(/│.*/, '│ '+elapsed)}} width={width}/>;
 }
-export function App({demoScenario,mouseEvents}:{demoScenario?:DemoScenario;mouseEvents?:EventEmitter}={}){
+export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoScenario?:DemoScenario;mouseEvents?:EventEmitter;terminalTitle?:string}={}){
  const demo=demoScenario!==undefined;
  const [demoStatus,setDemoStatus]=useState<DemoStatus|null>(()=>demoScenario?createDemoStatus(demoScenario):null);
  const {exit}=useApp(),{w,h}=useSize();
  const [liveStatus,setLiveStatus]=useState<Status|null>(null);
  const status:Status|null=demo?demoStatus:liveStatus;
+ useEffect(()=>{
+  writeTerminalTitle(terminalWindowTitle(terminalTitle,status?.state??'connecting',status?.active?.length??0));
+ },[terminalTitle,status?.state,status?.active?.length]);
  const [loadedActivity,setLoadedActivity]=useState<ActivityEntry[]>(()=>demoStatus?.activity??[]);
  const activityDeviceRef=useRef<string|null>(null);
  const activityVersionRef=useRef<number|null>(null);
@@ -319,11 +327,10 @@ export function App({demoScenario,mouseEvents}:{demoScenario?:DemoScenario;mouse
  useEffect(()=>{if(!notice)return;const timer=setTimeout(()=>setNotice(''),3200);return()=>clearTimeout(timer);},[notice]);
  const [confirm,setConfirm]=useState<string[]|null>(null);
  const [detailScroll,setDetailScroll]=useState(0);
- const [outputMode,setOutputMode]=useState(false);
- const [stream,setStream]=useState<'stdout'|'stderr'>('stdout');
- const [offsets,setOffsets]=useState([0]);
- const [output,setOutput]=useState<OutputPage|null>(null);
- const [outputError,setOutputError]=useState('');
+ const [inspectorTab,setInspectorTab]=useState<InspectorTab>('summary');
+ const [inspectorSource,setInspectorSource]=useState<FullSource|null>(null);
+ const [inspectorError,setInspectorError]=useState('');
+ const [inspectorProgress,setInspectorProgress]=useState('');
  const [liveLog,setLiveLog]=useState('');
  const [refresh,setRefresh]=useState(0);
  const [pageHasMore,setPageHasMore]=useState(false);
@@ -548,25 +555,47 @@ export function App({demoScenario,mouseEvents}:{demoScenario?:DemoScenario;mouse
  const visibleRows=rows.slice(rowStart,rowStart+tableRows);
  const columns=useMemo(()=>tableColumns(Math.max(1,aw-2),longestTime+1,layout.detailGain),
   [aw,longestTime,layout.detailGain]);
- const detailRows=Math.max(1,layout.detailHeight-2);
- const pageOffset=offsets[offsets.length-1]??0;
+ const detailRows=Math.max(1,layout.detailHeight-(inspectorTab==='summary'?2:3));
+ useEffect(()=>{setDetailScroll(0);setInspectorSource(null);setInspectorError('');},[entry?.id,inspectorTab]);
  useEffect(()=>{
-  setDetailScroll(0);setOffsets([0]);setOutput(null);setOutputError('');
- },[entry?.id,stream]);
- useEffect(()=>{
-  if(!outputMode||!entry)return;
-  let alive=true;setOutput(null);setOutputError('');
+  if(inspectorTab==='summary'||!entry)return;
+  let alive=true;
+  setInspectorError('');setInspectorSource(null);setInspectorProgress('');
+  const mode=inspectorTab;
   if(demo){
-   let result:Record<string,unknown>={};try{result=JSON.parse(entry.result??'{}');}catch{}
-   const value=String(result[stream]??'');
-   setOutput({text:value,nextOffset:Buffer.byteLength(value),totalBytes:Buffer.byteLength(value),hasMore:false,stream});
+   if(mode==='input'){
+    const raw=entry.request_json??'';
+    setInspectorSource({text:raw,totalBytes:Buffer.byteLength(raw),available:raw!=='',legacy:true});
+   }else{
+    let result:Record<string,unknown>={};try{result=JSON.parse(entry.result??'{}');}catch{}
+    const raw=String(result[mode]??'');
+    setInspectorSource({text:raw,totalBytes:Buffer.byteLength(raw),available:true});
+   }
    return;
   }
-  void requestIpc({action:'output',operationId:entry.id,stream,byteOffset:pageOffset,maxBytes:16384})
-   .then(result=>{if(alive)setOutput(result as OutputPage);})
-   .catch(error=>{if(alive)setOutputError(safeText(String(error),200));});
+  const action=mode==='input'?'input':'output';
+  void readEntireLocalStream(async byteOffset=>
+    await requestIpc({action,operationId:entry.id,...(mode==='input'?{}:{stream:mode}),
+      byteOffset,maxBytes:65536}) as OutputPage & {available?:boolean},
+    (loaded,total)=>{if(alive&&total>65536)setInspectorProgress('已读取 '+loaded+' / '+total+' 字节');})
+   .then(source=>{if(alive){
+     setInspectorSource(source);
+     if(mode==='input'&&!source.available)setInspectorProgress('旧版输入快照不可用');
+     else setInspectorProgress('');
+   }})
+   .catch(error=>{if(alive){
+     if(mode==='input'){
+      setInspectorSource({text:'',totalBytes:0,available:false,legacy:true});
+      setInspectorProgress('旧版输入快照不可用');
+     }else setInspectorError(safeText(String(error),300));
+   }});
   return()=>{alive=false;};
- },[demo,outputMode,entry?.id,stream,pageOffset,refresh]);
+ },[demo,entry?.id,inspectorTab,refresh]);
+ useEffect(()=>{
+  if(inspectorTab==='summary'||inspectorTab==='input'||entry?.status!=='running')return;
+  const timer=setInterval(()=>setRefresh(x=>x+1),2000);
+  return()=>clearInterval(timer);
+ },[inspectorTab,entry?.status]);
  // Only local IPC is sampled at 100ms for a selected running command.
  // WebSocket/DO is never polled by the preview.
  useEffect(()=>{
@@ -574,7 +603,7 @@ export function App({demoScenario,mouseEvents}:{demoScenario?:DemoScenario;mouse
    setLiveLog('');return;
   }
   let active=true,busy=false,totalBytes=0;
-  const currentStream=outputMode?stream:'stdout';
+  const currentStream=inspectorTab==='stderr'?'stderr':'stdout';
   const poll=()=>{
    if(busy)return;busy=true;
    // Read the tail, not the first 8KB forever as output grows.
@@ -584,23 +613,24 @@ export function App({demoScenario,mouseEvents}:{demoScenario?:DemoScenario;mouse
       totalBytes=page.totalBytes;
       const next=page.text?.slice(-3500)??'';
       setLiveLog(previous=>previous===next?previous:next);
-      if(outputMode&&pageOffset===0)setOutput(previous=>previous?.text===page.text?previous:page);
+
     }}).catch(()=>{}).finally(()=>{busy=false;});
   };
   poll();const timer=setInterval(poll,100);
   return()=>{active=false;clearInterval(timer);};
- },[demo,entry?.id,entry?.status,entry?.tool,outputMode,stream,pageOffset]);
+ },[demo,entry?.id,entry?.status,entry?.tool,inspectorTab]);
  const detailNow=entry?.status==='running'?Math.floor(tick/1000):0;
  const detail=useMemo(():DetailLine[]=>{
   const fromPlain=(lines:string[])=>wrapDetail(lines.map(text=>({text})),Math.max(1,dw-2));
   if(view==='config')return fromPlain(['连接信息',status?.deviceName??'等待本地 Runtime',
    status?.server??'', '后台服务：deskbeacon service start / stop / restart']);
   if(!entry||!model)return fromPlain(['选择活动记录以查看参数与结果。']);
-  if(outputMode)return wrapDetail([
-   {text:stream+' · '+(output?output.totalBytes+' B · offset '+pageOffset:'读取中…'),tone:'muted'},
-   ...(outputError?[{text:outputError,tone:'danger' as const}]:output?
-    numberedBlock(output.text||'(empty)',undefined,pageOffset===0?1:null):[])
-  ],Math.max(1,dw-2));
+  if(inspectorTab!=='summary'){
+   const lines:DetailLine[]=inspectorError?[{text:inspectorError,tone:'danger'}]:
+    inspectorTab==='input'?inspectorInput(entry,inspectorSource):
+    inspectorOutput(inspectorSource,inspectorTab,undefined,storedOutputLimited(entry));
+   return wrapDetail(inspectorProgress?[{text:inspectorProgress,tone:'muted'},...lines]:lines,Math.max(1,dw-2));
+  }
   const lines=detailPresentation(entry,tick);
   if(liveLog&&entry.status==='running'){
    const preview:DetailLine[]=[{text:'LIVE OUTPUT',section:'LIVE OUTPUT',tone:'muted',bold:true}];
@@ -610,9 +640,9 @@ export function App({demoScenario,mouseEvents}:{demoScenario?:DemoScenario;mouse
    lines.splice(trace<0?lines.length:trace,0,...preview);
   }
   return wrapDetail(lines,Math.max(1,dw-2));
- },[entry?.id,entry?.status,entry?.result,entry?.request_json,model?.state,detailNow,liveLog,outputMode,output,outputError,pageOffset,view,dw,status?.deviceName,status?.server,demo]);
+ },[entry?.id,entry?.status,entry?.result,entry?.request_json,model?.state,detailNow,liveLog,inspectorTab,inspectorSource,inspectorError,inspectorProgress,view,dw,status?.deviceName,status?.server,demo]);
  const scroll=Math.min(detailScroll,Math.max(0,detail.length-detailRows));
- const resetDetail=()=>{setDetailScroll(0);setOutputMode(false);setView('main');};
+ const resetDetail=()=>{setDetailScroll(0);setInspectorTab('summary');setView('main');};
  const move=(delta:number,edge?:'first'|'last',target:Focus=focus)=>{
   if(target==='detail'){
    setDetailScroll(x=>edge==='first'?0:edge==='last'?Math.max(0,detail.length-detailRows):Math.max(0,Math.min(detail.length-detailRows,x+delta)));
@@ -650,6 +680,16 @@ export function App({demoScenario,mouseEvents}:{demoScenario?:DemoScenario;mouse
   return()=>{mouseEvents?.off('mouse',listener);};
  },[mouseEvents]);
  mouseHandlerRef.current=event=>{
+  // The inspector's visible tabs are clickable as well as keyboard-accessible.
+  if(event.kind==='press'&&event.button===0&&horizontal&&event.y===6&&
+    event.x>aw&&inspectorTab!=='summary'){
+   const local=event.x-aw-1;
+   if(local>=0&&local<29){
+    setInspectorTab(local<9?'input':local<19?'stdout':'stderr');
+    setDetailScroll(0);
+   }
+   return;
+  }
   // Search occupies terminal rows 2–4; click to enter search editing.
   if(event.kind==='press'&&event.button===0&&event.y>=2&&event.y<=4){
    setEdit('search');setText(query);setNotice('');return;
@@ -706,7 +746,7 @@ export function App({demoScenario,mouseEvents}:{demoScenario?:DemoScenario;mouse
    if(key.return){
     const value=text.trim(),kind=edit;setEdit(null);setText('');
     if(kind==='search'){setQuery(value);setSelectedId(null);setDetailTask(false);setFocus('activity');resetDetail();return;}
-    if(value==='help'){setNotice('↑↓ 浏览 · Tab 切换 · S 搜索 · / 指令 · f 最新 · o 输出');return;}
+    if(value==='help'){setNotice('↑↓ 浏览 · Tab 切换 · i 输入 · o 输出 · e 切换流 · c 复制');return;}
     if(value==='config'){setView('config');setFocus('detail');setDetailScroll(0);return;}
     if(value==='tasks'){
      if(tasks.length){setFocus('tasks');setDetailTask(true);resetDetail();}
@@ -729,7 +769,7 @@ export function App({demoScenario,mouseEvents}:{demoScenario?:DemoScenario;mouse
   }
   if(input==='q'){exit();return;}
   if(key.escape){
-   if(view!=='main'||outputMode){resetDetail();return;}
+   if(view!=='main'||inspectorTab!=='summary'){resetDetail();return;}
    if(query){setQuery('');setSelectedId(null);return;}
    setFocus('activity');setDetailTask(false);return;
   }
@@ -738,7 +778,7 @@ export function App({demoScenario,mouseEvents}:{demoScenario?:DemoScenario;mouse
   }
   if(input==='s'||input==='S'){setEdit('search');setText(query);setNotice('');return;}
   if(input==='/'||input===':'||input==='>'){setEdit('command');setText('');setNotice('');return;}
-  if(input==='?'){setNotice('↑↓ 浏览 · Tab 切换 · S 搜索 · / 指令 · f 最新 · o 输出 · y 复制');return;}
+  if(input==='?'){setNotice('↑↓ 浏览 · Tab 切换 · S 搜索 · i 输入 · o 输出 · c 复制');return;}
   if(key.tab){
    const order:Focus[]=tasks.length?['activity','detail','tasks']:['activity','detail'];
    const index=order.indexOf(focus),delta=key.shift?-1:1;
@@ -766,16 +806,20 @@ export function App({demoScenario,mouseEvents}:{demoScenario?:DemoScenario;mouse
    if(ids.length)setConfirm(ids);else setNotice('当前没有运行中的进程');
    return;
   }
-  if(input==='y'&&model){
-   const value=model.command||model.target;
-   if(demo){setNotice('DEMO · 复制预览：'+value);return;}
-   void copyText(value).then(()=>setNotice(model.command?'已复制命令预览':'已复制目标')).catch(e=>setNotice(String(e)));return;
+  if(input==='c'&&model){
+   const content=inspectorCopyText(inspectorTab,entry,inspectorSource,model.command||model.target);
+   if(!content){setNotice('当前视图没有可复制的内容');return;}
+   if(demo){setNotice('DEMO · 复制 '+content.length+' 字符');return;}
+   void copyText(content).then(()=>setNotice('已复制 '+content.length+' 字符')).catch(e=>setNotice(String(e)));return;
   }
-  if(input==='o'&&entry){setOutputMode(x=>!x);setFocus('detail');setDetailScroll(0);setOffsets([0]);if(selected&&selectedId===null)setSelectedId(selected.id);return;}
-  if(input==='e'&&outputMode){setStream(x=>x==='stdout'?'stderr':'stdout');return;}
-  if(input===']'&&outputMode&&output?.hasMore){setOffsets(x=>[...x,output.nextOffset]);setDetailScroll(0);return;}
-  if(input==='['&&outputMode){setOffsets(x=>x.length>1?x.slice(0,-1):x);setDetailScroll(0);return;}
-  if(input==='r'&&outputMode){setRefresh(x=>x+1);return;}
+  if((input==='i'||input==='o')&&entry){
+   setInspectorTab(input==='i'?'input':'stdout');setFocus('detail');setDetailScroll(0);
+   if(selected&&selectedId===null)setSelectedId(selected.id);return;
+  }
+  if(input==='e'&&(inspectorTab==='stdout'||inspectorTab==='stderr')){
+   setInspectorTab(inspectorTab==='stdout'?'stderr':'stdout');return;
+  }
+  if(input==='r'&&inspectorTab!=='summary'){setRefresh(x=>x+1);return;}
  });
  const connected=status?.state==='connected',connecting=!status||status.state==='connecting';
  const connection=connected?'CONNECTED':connecting?'CONNECTING':'OFFLINE';
@@ -793,15 +837,20 @@ export function App({demoScenario,mouseEvents}:{demoScenario?:DemoScenario;mouse
      linkHovered={hoverLinkId===(row as ActivityEntry).id}/>):<Line width={aw} text={pageError?' 历史读取失败 · '+pageError:pageLoading?' 正在加载活动…':activeQuery?' 没有匹配记录 · Esc 清除筛选':' 暂无操作，等待 Agent 请求'} color={palette.muted}/>}
  </Box>;
  const detailPane=<Box flexDirection="column" width={dw} height={layout.detailHeight} overflow="hidden">
-  <Title label={view==='config'?'CONNECTION':outputMode?'LOCAL OUTPUT':'DETAIL'} width={dw} active={focus==='detail'}
+  <Title label={view==='config'?'CONNECTION':inspectorTab==='input'?'INPUT':inspectorTab!=='summary'?'OUTPUT':'DETAIL'} width={dw} active={focus==='detail'}
    right={detailScrollStatus(detail.length,detailRows,scroll)}/>
+  {inspectorTab!=='summary'?<Box height={1} flexShrink={0} width={dw}>
+   <Text color={inspectorTab==='input'?palette.accent:palette.muted}>{' [INPUT] '}</Text>
+   <Text color={inspectorTab==='stdout'?palette.accent:palette.muted}>{' [STDOUT] '}</Text>
+   <Text color={inspectorTab==='stderr'?palette.accent:palette.muted}>{' [STDERR]'}</Text>
+  </Box>:null}
   <Box flexDirection="column" height={detailRows} overflow="hidden">
    {detail.slice(scroll,scroll+detailRows).map((item,i)=>
     entry?.status==='running'&&item.label==='DUR'
      ?<RunningDurationDetailCell key={entry.id+'-dur'} entry={entry} item={item} width={dw}/>
      :<DetailCell key={scroll+i} item={item} width={dw}/>)}
   </Box>
-  <Line width={dw} text={outputMode?' [ ] 翻页 · e 切换流 · r 刷新 · Esc 返回':' y 复制预览 · o 本地输出 · ↑↓ 滚动'} color={palette.muted}/>
+  <Line width={dw} text={inspectorTab!=='summary'?' i 输入 · o 输出 · c 复制 · e 流 · Esc':' i 输入 · o 输出 · c 复制 · ↑↓ 滚动'} color={palette.muted}/>
  </Box>;
  const ramTotalBytes=status?.totalMemoryBytes??0;
  const ramUsedBytes=Math.max(0,ramTotalBytes-(status?.availableMemoryBytes??0));
@@ -814,14 +863,15 @@ export function App({demoScenario,mouseEvents}:{demoScenario?:DemoScenario;mouse
  const runMode=demo?'DEMO':status?.runtimeMode==='service'?'SERVICE':status?.runtimeMode==='background'?'SERVICE':'FOREGROUND';
  const metrics=runMode+' · CPU '+(status?.cpuPercent??0).toFixed(1)+'% · RAM '+ramText+' · '+(status?.operationsTotal??0)+' OPS · UP '+duration(uptimeMs);
  const compactHeader=w<56;
- const headerBrand=compactHeader?' DeskBeacon':' ((·)) DeskBeacon'+(demo&&w>=65?' · DEMO':'');
- const headerLeftWidth=Math.min(w,compactHeader?12:demo&&w>=65?34:26);
+ const visibleTitle=safeText(terminalTitle,44).trim()||'DeskBeacon';
+ const headerBrand=compactHeader?' '+visibleTitle:' ((·)) '+visibleTitle+(demo&&w>=65?' · DEMO':'');
+ const headerLeftWidth=Math.min(w,Math.max(compactHeader?12:26,Math.min(48,cellWidth(headerBrand)+1)));
  const headerRightWidth=Math.max(0,w-headerLeftWidth);
  const footerPrompt=confirm?
   '停止 '+confirm.length+' 个进程及其子进程？ y / Enter 确认 · n / Esc 返回':
   notice||(pageError?'活动读取失败 · '+pageError:
    w<64?'↑↓ 选择 · Tab 切换 · S 搜索 · / 指令 · q 退出':
-   '↑↓ 选择 · Tab 切换 · S 搜索 · / 指令 · f 最新 · x 停止 · q 退出');
+   '↑↓ 选择 · Tab 切换 · S 搜索 · i 输入 · o 输出 · c 复制 · q 退出');
  const compactMetrics=w<40?'CPU '+(status?.cpuPercent??0).toFixed(1)+'% · RAM '+ramText:
   w<72?'CPU '+(status?.cpuPercent??0).toFixed(1)+'% · RAM '+ramText+' · '+(status?.operationsTotal??0)+' OPS':metrics;
  const footerRightWidth=wideFooter?Math.min(64,Math.max(48,Math.floor(w*.48))):0;
@@ -840,7 +890,7 @@ export function App({demoScenario,mouseEvents}:{demoScenario?:DemoScenario;mouse
   </Box>
   <Box width={w} height={bodyHeight} flexShrink={0} flexDirection={horizontal?'row':'column'} overflow="hidden">
    {activityPane}
-   {horizontal?<Box width={1} height={bodyHeight}><Text color={palette.line}>{Array.from({length:bodyHeight},(_,i)=>i===0?'┯':detail[scroll+i-1]?.section?'├':'│').join('\n')}</Text></Box>:
+   {horizontal?<Box width={1} height={bodyHeight}><Text color={palette.line}>{Array.from({length:bodyHeight},(_,i)=>i===0?'┯':detail[scroll+i-(inspectorTab==='summary'?1:2)]?.section?'├':'│').join('\n')}</Text></Box>:
     <Line text={'─'.repeat(w)} width={w} color={palette.line}/>}
    {detailPane}
   </Box>
@@ -866,16 +916,17 @@ export function App({demoScenario,mouseEvents}:{demoScenario?:DemoScenario;mouse
  </Box>;
 }
 
-export async function showTui(demoScenario?:DemoScenario){
+export async function showTui(demoScenario?:DemoScenario,terminalTitle='DeskBeacon'){
  const bridge=new TuiInputBridge(process.stdin);
  if(process.stdout.isTTY)process.stdout.write('\x1b[?1049h\x1b[?1003h\x1b[?1006h');
  try{
-  const app=render(<App {...(demoScenario?{demoScenario}:{})} mouseEvents={bridge.mouse}/>,{
+  const app=render(<App {...(demoScenario?{demoScenario}:{})} mouseEvents={bridge.mouse} terminalTitle={terminalTitle}/>,{
    stdin:bridge.keyboard as unknown as typeof process.stdin,
    interactive:process.stdout.isTTY===true,exitOnCtrlC:false});
   await app.waitUntilExit();
  }finally{
   bridge.dispose();
   if(process.stdout.isTTY)process.stdout.write('\x1b[?1006l\x1b[?1003l\x1b[?1049l');
+  writeTerminalTitle('DeskBeacon');
  }
 }

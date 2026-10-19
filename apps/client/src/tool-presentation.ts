@@ -32,7 +32,7 @@ function clean(text:unknown,max=200){
   .replace(/\b(sk-[a-z0-9_-]{12,}|gh[pousr]_[a-z0-9_]{12,})\b/gi,'[redacted]')
   .replace(/https?:\/\/[^\s]+/gi,match=>safeUrl(match))
   .replace(/\s+/g,' ').trim();
- return input.length<=max?input:input.slice(0,max-1)+'…';
+ return input.length<=max?input:input.slice(0,max)+' ...剩余 '+(input.length-max)+' 字符';
 }
 function safeUrl(v:unknown){
  try{const url=new URL(value(v));return url.origin+url.pathname;}catch{return value(v).replace(/[?#].*$/,'').replace(/\/\/[^/@]+@/,'//');}

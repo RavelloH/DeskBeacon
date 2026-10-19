@@ -363,13 +363,26 @@ export class ClientDaemon extends EventEmitter {
     const description=String(input.description??tool);
     const privateKey=/token|secret|password|cookie|authorization|api[_-]?key|private[_-]?key/i;
     const redact=(key:string,value:any)=>{
-      if(key==='content'&&tool==='fs_write'&&typeof value==='string')return value.slice(0,8000);
+      if(key==='content'&&tool==='fs_write'&&typeof value==='string')return value.length>8000?
+        value.slice(0,8000)+' ...剩余 '+(value.length-8000)+' 字符':value;
       if(['content','dataBase64','env'].includes(key)||privateKey.test(key))return '[redacted]';
-      if(typeof value==='string'&&value.length>4000)return value.slice(0,4000)+' [truncated]';
-      if(Array.isArray(value)&&value.length>80)return [...value.slice(0,80),'[truncated]'];
+      if(typeof value==='string'&&value.length>4000)return value.slice(0,4000)+' ...剩余 '+(value.length-4000)+' 字符';
+      if(Array.isArray(value)&&value.length>80)return [...value.slice(0,80),'...剩余 '+(value.length-80)+' 行'];
       return value;
     };
     const safeInput=JSON.parse(JSON.stringify(input,redact));
+    // Keep complete locally displayable inputs outside the bounded activity index.
+    // Do not persist authentication fields, environment maps or binary data.
+    try{
+      const locallySafe=JSON.stringify(input,(key,value)=>{
+        if(['dataBase64','env'].includes(key)||privateKey.test(key))return '[redacted]';
+        return value;
+      });
+      const outputDir=join(dataDir,'output');
+      mkdirSync(outputDir,{recursive:true,mode:0o700});
+      const safeId=opId.replace(/[^a-zA-Z0-9_.-]/g,'_');
+      writeFileSync(join(outputDir,safeId+'.input.json'),locallySafe,{mode:0o600});
+    }catch(error){console.error('Could not retain local operation input:',err(error));}
     const started=Date.now();
     const fileAction=['fs_read','fs_write','fs_edit'].includes(tool);
     const pathHint=input.path??input.sourcePath??input.targetPath;
@@ -378,7 +391,7 @@ export class ClientDaemon extends EventEmitter {
     const requestPreview=JSON.stringify(safeInput);
     this.db.prepare('INSERT OR REPLACE INTO activity(id,grant_id,actor_name,tool,description,status,time,cwd,request_json) VALUES(?,?,?,?,?,?,?,?,?)')
       .run(opId,m.grantId,actorName,tool,description,'running',started,cwd,
-        requestPreview.length>(tool==='fs_write'?12000:6000)?JSON.stringify({summary:'参数过大，详情已省略'}):requestPreview);
+        requestPreview.length>(tool==='fs_write'?12000:6000)?JSON.stringify({summary:'参数过大，详情已省略，...剩余 '+requestPreview.length+' 字符'}):requestPreview);
     this.activityRevision++;
     this.emit('change');
     // Acceptance is already persisted locally. A disconnect during the ACK
@@ -394,14 +407,14 @@ export class ClientDaemon extends EventEmitter {
         // File reads belong to this local user's history: retain a bounded
         // preview, not a blanket '[redacted]' placeholder.
         if(key==='content'&&(tool==='fs_read'||tool==='fs_read_many')&&typeof value==='string')
-          return value.slice(0,10000);
+          return value.length>10000?value.slice(0,10000)+' ...剩余 '+(value.length-10000)+' 字符':value;
         if(['content','dataBase64','env'].includes(key)||privateKey.test(key))return '[redacted]';
-        if(typeof value==='string'&&value.length>3000)return value.slice(0,3000)+' [truncated]';
-        if(Array.isArray(value)&&value.length>40)return [...value.slice(0,40),'[truncated]'];
+        if(typeof value==='string'&&value.length>3000)return value.slice(0,3000)+' ...剩余 '+(value.length-3000)+' 字符';
+        if(Array.isArray(value)&&value.length>40)return [...value.slice(0,40),'...剩余 '+(value.length-40)+' 行'];
         return value;
       });
       const resultPreview=safeResult.length>(tool==='fs_read'||tool==='fs_read_many'?20000:6000)
-        ?JSON.stringify({summary:'结果过大，请查看操作日志'}):safeResult;
+        ?JSON.stringify({summary:'结果过大，...剩余 '+safeResult.length+' 字符，请查看本地日志'}):safeResult;
       this.db.prepare('UPDATE activity SET status=?,result=?,finished_at=?,duration_ms=? WHERE id=?')
         .run('completed',resultPreview,Date.now(),Date.now()-started,opId);
       this.activityRevision++;

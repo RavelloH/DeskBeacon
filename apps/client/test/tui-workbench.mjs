@@ -328,12 +328,25 @@ try{
     const detailLine=assertPosition(controls.capture,'DETAIL').line;
     assert.match(detailLine,/1\s*\/\s*\d+/,'Tab must focus detail and show one line scrolled / remaining scrollable range');
     await controls.send('o');
-    await waitFor(()=>controls.capture.snapshot().includes('LOCAL OUTPUT'),'o opens the local output view');
+    await waitFor(()=>controls.capture.snapshot().includes('OUTPUT'),'o opens the complete output inspector');
     await waitFor(()=>controls.capture.snapshot().includes('Checking protocol'),'demo output is displayed locally');
-    assert.ok(controls.capture.snapshot().includes('stdout'));
+    assert.ok(controls.capture.snapshot().includes('[STDOUT]'),'output shows tabs');
     await controls.send('e');
-    await waitFor(()=>controls.capture.snapshot().includes('stderr'),'e switches between stdout and stderr');
+    await waitFor(()=>controls.capture.snapshot().includes('[STDERR]'),'e switches stdout/stderr');
+    await controls.send('i');
+    await waitFor(()=>controls.capture.snapshot().includes('[INPUT]'),'i opens the input inspector');
+    await waitFor(()=>controls.capture.snapshot().includes('PROGRAM'),'input shows full program invocation with line numbers');
+    assert.match(controls.capture.snapshot(),/│ 1 │ pnpm\s/,
+      'line numbers need one-cell left inset and a visible right separator');
+    const totalRows=Number(/INPUT[^\n]*0 \/ (\d+)/.exec(controls.capture.snapshot())?.[1]??0);
+    assert.ok(totalRows>0,'input inspector must expose scrollable full content');
+    for(let i=0;i<totalRows+3;i++)await controls.send('j');
+    await waitFor(()=>controls.capture.snapshot().includes(totalRows+' / '+totalRows),
+      'scrolling reaches the end of the complete input detail\n'+controls.capture.snapshot().slice(0,1100));
+    await controls.send('c');
+    await waitFor(()=>controls.capture.snapshot().includes('DEMO · 复制'),'c copies complete inspector content');
     await controls.send('\x1b');
+    await waitFor(()=>controls.capture.snapshot().includes('DETAIL'),'Esc returns to summary before switching pane');
 
     // Focus the task pane and prove x/X only show confirmation; n/Esc cancel it.
     await controls.send('\t');

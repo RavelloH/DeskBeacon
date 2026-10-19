@@ -14,19 +14,25 @@ const section=(title:string):DetailLine=>({text:title,section:title,tone:'muted'
 const combined=(segments:Segment[])=>segments.map(s=>s.text).join('');
 const parse=(raw?:string|null):Fields=>{try{const v=JSON.parse(raw??'{}');return v&&typeof v==='object'&&!Array.isArray(v)?v:{};}catch{return {};}};
 function clean(raw:string,max=300):string{
- return raw.replace(/\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))/g,'')
+ const scrubbed=raw.replace(/\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))/g,'')
   .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g,'')
   .replace(/\b(Bearer|Basic)\s+[^\s,;]+/gi,'$1 [redacted]')
   .replace(/\b(password|passwd|authorization|secret|token|api[_-]?key|private[_-]?key|dataBase64)\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi,'$1=[redacted]')
   .replace(/\b(sk-[a-z0-9_-]{12,}|gh[pousr]_[a-z0-9_]{12,})\b/gi,'[redacted]')
   .replace(/https?:\/\/[^\s]+/gi,match=>{try{const u=new URL(match);return u.origin+u.pathname;}catch{return match.split(/[?#]/)[0]??'';}})
-  .slice(0,max);
+  .replace(/\r/g,'');
+ return scrubbed.length>max?scrubbed.slice(0,max)+' ...剩余 '+(scrubbed.length-max)+' 字符':scrubbed;
+}
+/** Full inspector blocks do not impose the summary's 280-line/64K-character cap. */
+export function fullNumberedBlock(raw:unknown,language?:string,startLine:number|null=1):DetailLine[]{
+ return numberedBlock(raw,language,startLine,Infinity,Infinity);
 }
 export function numberedBlock(raw:unknown,language?:string,startLine:number|null=1,
  maxLines=280,maxChars=64000):DetailLine[]{
  if(typeof raw!=='string')return [line('（内容不可用）','muted',false,true)];
- const text=raw.slice(0,maxChars),lines=text.replace(/\r\n?/g,'\n').split('\n');
- const source=lines.slice(0,maxLines).map(value=>clean(value,500).replace(/\t/g,'  '));
+ const normalized=raw.replace(/\r\n?/g,'\n');
+ const text=normalized.slice(0,maxChars),lines=text.split('\n');
+ const source=lines.slice(0,maxLines).map(value=>clean(value,maxLines===Infinity&&maxChars===Infinity?Infinity:500).replace(/\t/g,'  '));
  const lineDigits=startLine===null?1:String(startLine+Math.max(0,source.length-1)).length;
  const highlighted=language?highlightCodeLines(source,language):undefined;
  const result:DetailLine[]=source.map((v,index)=>{
@@ -36,7 +42,13 @@ export function numberedBlock(raw:unknown,language?:string,startLine:number|null
   const comment=/^\s*(\/\/|#\s)/.test(v);
   return {...line(v,comment?'muted':tone,v.startsWith('@@'),comment),sourceLine:startLine===null?null:startLine+index,lineDigits};
  });
- if(raw.length>maxChars||lines.length>maxLines)result.push(line('… 内容过长，请使用文件或输出读取工具查看完整内容','warning'));
+ const shown=lines.slice(0,maxLines).join('\n').length;
+ const missingLines=lines.length-source.length;
+ const missingChars=Math.max(0,normalized.length-shown);
+ if(missingLines>0||missingChars>0)
+  result.push(line('...剩余 '+(missingLines>0?missingLines+' 行'+(missingChars>0?' / ':''):'')+
+   (missingChars>0?missingChars+' 字符':'')+'（详情预览限制）','warning'));
+
  return result;
 }
 function records(items:unknown,mapper:(v:Fields,n:number)=>string):DetailLine[]{
@@ -45,7 +57,7 @@ function records(items:unknown,mapper:(v:Fields,n:number)=>string):DetailLine[]{
   try{return line(clean(mapper(item,n),380),item?.error?'danger':'default');}
   catch{return line((n+1)+'. 记录','muted');}
  });
- if(items.length>120)visible.push(line('… 剩余 '+(items.length-120)+' 项','warning'));
+ if(items.length>120)visible.push(line('...剩余 '+(items.length-120)+' 行','warning'));
  return visible;
 }
 const loc=(x:Fields)=>x.path??x.name??x.sourcePath??x.filename??'';
@@ -220,7 +232,7 @@ export function wrapDetail(lines:DetailLine[],width:number):DetailLine[]{
   }
   // Source line numbers are attached before wrapping. Physical terminal wraps
   // get a continuation marker, never a counterfeit source line number.
-  const gutter=item.sourceLine!==undefined?(item.lineDigits??String(item.sourceLine??'?').length)+1:0;
+  const gutter=item.sourceLine!==undefined?(item.lineDigits??String(item.sourceLine??'?').length)+4:0;
   if(item.syntax)return wrapSyntaxLine(item,Math.max(1,w-gutter));
   return wrapLines([item.text],Math.max(1,w-gutter))
    .map((v,index)=>({...item,text:v,continued:index>0}));

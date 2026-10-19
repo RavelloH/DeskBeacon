@@ -13,10 +13,10 @@ import {demoScenarios, type DemoScenario} from './demo.js';
 
 // React's development reconciler records unbounded performance.measure entries
 // in long-lived Node TUI processes. Select production before loading Ink/React.
-async function showTui(scenario?:DemoScenario):Promise<void>{
+async function showTui(scenario?:DemoScenario,title?:string):Promise<void>{
  if(!process.env.NODE_ENV)process.env.NODE_ENV='production';
  const {showTui:launch}=await import('./tui.js');
- await launch(scenario);
+ await launch(scenario,title);
 }
 
 const url64=(value:Buffer)=>value.toString('base64url');
@@ -93,7 +93,7 @@ async function configured(){
 async function currentRuntime(timeout=700):Promise<any|null>{
   try{return await requestIpc({action:'status'},timeout);}catch{return null;}
 }
-async function ownerRuntime(background:boolean):Promise<void>{
+async function ownerRuntime(background:boolean,title?:string):Promise<void>{
   process.env.DESKBEACON_RUNTIME_MODE=background?'background':'foreground';
   const instance=new ClientDaemon(loadConfig());
   const server=startIpc(instance);
@@ -119,7 +119,7 @@ async function ownerRuntime(background:boolean):Promise<void>{
     process.once('SIGTERM',handleSignal);
     return;
   }
-  try{await showTui();}
+  try{await showTui(undefined,title);}
   finally{await shutdown();}
 }
 async function serviceStart(){
@@ -152,12 +152,13 @@ const usage=()=>{
  console.log([
   'DeskBeacon '+pkg.version+' — Your desktop, within your agent’s reach.',
   '',
-  'Usage: deskbeacon [command]',
+  'Usage: deskbeacon [command] [--title NAME]',
   '',
   '  (no command)            Open full-screen DeskBeacon. Own the Runtime unless',
   '                          an existing background service is running.',
   '  setup [--url URL]       Pair this device using OAuth (prompts for URL).',
   '  demo [scenario]        Offline, interactive TUI preview (for development).',
+  '  --title NAME           Terminal window title (also DESKBEACON_TITLE env).',
   '  service start           Start the Runtime in the background (no TUI).',
   '  service stop            Stop the running Runtime.',
   '  service restart         Restart the background service.',
@@ -180,7 +181,12 @@ async function updateCli(){
   else console.log('You are up to date.');
 }
 async function main(){
- const [action,...args]=process.argv.slice(2);
+ const argv=process.argv.slice(2);
+ const titleIndex=argv.indexOf('--title');
+ const title=titleIndex>=0?argv[titleIndex+1]:process.env.DESKBEACON_TITLE;
+ if(titleIndex>=0&&(!title||title.startsWith('--')))throw Error('Missing --title NAME');
+ if(titleIndex>=0)argv.splice(titleIndex,2);
+ const [action,...args]=argv;
  if(action==='help'||action==='-h'||action==='--help'){usage();return;}
  if(action==='version'||action==='-v'||action==='--version'){console.log(pkg.version);return;}
  if(action==='update'){await updateCli();return;}
@@ -190,7 +196,7 @@ async function main(){
    const scenario=args[0]??'connected';
    if(!demoScenarios.includes(scenario as DemoScenario))
      throw Error('Unknown demo scenario. Options: '+demoScenarios.join(', '));
-   await showTui(scenario as DemoScenario);
+   await showTui(scenario as DemoScenario,title);
    return;
  }
  if(action==='setup'){
@@ -221,8 +227,8 @@ async function main(){
    if(!process.stdin.isTTY||!process.stdout.isTTY)
      throw Error('The DeskBeacon app requires an interactive terminal. Use deskbeacon service start for headless operation.');
    await configured();
-   if(await currentRuntime(900)){await showTui();return;}
-   await ownerRuntime(false);return;
+   if(await currentRuntime(900)){await showTui(undefined,title);return;}
+   await ownerRuntime(false,title);return;
  }
  throw Error('Unknown command '+action+'. Use deskbeacon help.');
 }

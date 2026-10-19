@@ -111,8 +111,27 @@ export function highlightCodeLines(lines:string[],language:string):CodeSpan[][]{
 
 export function highlightCode(code:string,language:string):CodeSpan[]{
  if(!code||!hljs.getLanguage(language))return [{text:code,color:base}];
- // Bound synchronous lexical analysis; show unusually long previews in muted text.
- if(code.length>20000)return [{text:code,color:base}];
+ // For full INPUT / OUTPUT inspectors, lex large sources in bounded chunks
+ // instead of silently disabling all highlighting after 20k characters.
+ if(code.length>20000){
+  const result:CodeSpan[]=[];
+  let start=0;
+  while(start<code.length){
+   let end=Math.min(code.length,start+16000);
+   if(end<code.length){
+    const newline=code.lastIndexOf('\n',end);
+    if(newline>start+1000)end=newline+1;
+   }
+   const spans=highlightCode(code.slice(start,end),language);
+   for(const span of spans){
+    const last=result.at(-1);
+    if(last&&last.color===span.color)last.text+=span.text;
+    else result.push({...span});
+   }
+   start=end;
+  }
+  return result;
+ }
  const cacheKey=language+'\u0000'+code;
  const prior=lexCache.get(cacheKey);
  if(prior)return prior;

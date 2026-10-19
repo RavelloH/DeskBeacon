@@ -33,14 +33,15 @@ function safeOperationId(value:unknown):string{
 }
 function outputPage(operationId:unknown,stream:unknown,byteOffset:unknown,maxBytes:unknown){
  const safeId=safeOperationId(operationId);
- if(stream!=='stdout'&&stream!=='stderr')throw Error('INVALID_OUTPUT_STREAM');
+ if(stream!=='stdout'&&stream!=='stderr'&&stream!=='input')throw Error('INVALID_OUTPUT_STREAM');
  const offset=byteOffset===undefined?0:byteOffset;
  if(typeof offset!=='number'||!Number.isSafeInteger(offset)||offset<0)throw Error('INVALID_BYTE_OFFSET');
  const budget=maxBytes===undefined?defaultOutputBytes:maxBytes;
  if(typeof budget!=='number'||!Number.isSafeInteger(budget)||budget<1||budget>maxOutputBytes)
    throw Error('INVALID_OUTPUT_BUDGET');
  const root=join(dataDir,'output');
- const path=join(root,safeId+(stream==='stdout'?'.out':'.err'));
+ const path=join(root,safeId+(stream==='stdout'?'.out':stream==='stderr'?'.err':'.input.json'));
+ if(stream==='input'&&!existsSync(path))return {text:'',nextOffset:0,totalBytes:0,hasMore:false,stream,available:false};
  if(!existsSync(path)){
    if(offset!==0)throw Error('INVALID_BYTE_OFFSET');
    return{text:'',nextOffset:0,totalBytes:0,hasMore:false,stream};
@@ -151,7 +152,8 @@ export function startIpc(daemon:ClientDaemon){
              .map(task=>({id:task.id,line:daemon.supervisor.latestLine(task.id)}));
            else if(request.action==='stop')result=await daemon.supervisor.stop(String(request.taskId));
            else if(request.action==='exit') {result={stopping:true};setImmediate(()=>{void daemon.shutdown().finally(()=>server.close());});}
-           else if(request.action==='output')result=outputPage(request.operationId,request.stream,request.byteOffset,request.maxBytes);
+           else if(request.action==='output'||request.action==='input')result=outputPage(request.operationId,
+  request.action==='input'?'input':request.stream,request.byteOffset,request.maxBytes);
            else if(request.action==='logs') {
              const row=daemon.db.prepare('SELECT * FROM activity WHERE id=?').get(String(request.operationId));
              const id=String(request.operationId);
