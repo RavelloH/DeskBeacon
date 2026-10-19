@@ -91,7 +91,8 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: deskbeacon-native-c-binaries
-          path: .
+          # Upload's common root is packages/, so restore that root explicitly.
+          path: packages
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @deskbeacon/protocol build
       - run: pnpm check
@@ -120,7 +121,8 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: deskbeacon-native-c-binaries
-          path: .
+          # Upload's common root is packages/, so restore that root explicitly.
+          path: packages
       # workerd (server-only) does not publish a Windows ARM64 executable.
       # Install only the client dependency closure on the ARM64 runner.
       - run: pnpm --filter 'deskbeacon...' install --frozen-lockfile

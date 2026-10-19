@@ -6,7 +6,7 @@ import {toolRow, type Segment, type Tone} from './tool-presentation.js';
 import {detailPresentation, wrapDetail, type DetailLine} from './detail-presentation.js';
 import {ACTIVITY_PAGE_SIZE, sortActivityRows, compatibleDayStats, type ActivityPage, type ActivityDayStats} from './activity-query.js';
 import {createDemoStatus, advanceDemo, demoHelp, type DemoScenario, type DemoStatus} from './demo.js';
-import {cellWidth, fit, oneLine, paneLayout, tableColumns, detailScrollStatus, wrapLines, rightFit, activityTime, dateDivider, dateKey} from './tui-layout.js';
+import {cellWidth, fit, oneLine, paneLayout, tableColumns, detailScrollStatus, wrapLines, rightFit, activityTime, dateDivider, dateKey, type Column} from './tui-layout.js';
 import {copyText} from './clipboard.js';
 
 type Task={id:string;description:string;start:number;kind:'foreground'|'background';
@@ -178,6 +178,30 @@ function RichCell({segments,width,selected=false}:{segments:Segment[];width:numb
  }
  return <Text>{spans.map((part,index)=><Text key={index} color={toneColor[part.tone]}>{part.text}</Text>)}{' '.repeat(remaining)+' '}</Text>;
 }
+
+/** The history list is normally static: a status/clock tick should not reparse
+ * every visible row's request and result JSON or rerun unicode fitting. */
+const ActivityTableRow=React.memo(function ActivityTableRow({record,columns,isSelected,timeAnchor}:{
+ record:ActivityEntry;columns:Column[];isSelected:boolean;timeAnchor:number;
+}){
+ const a=activityPresentation(record,timeAnchor),visual=toolRow(record);
+ return <Box height={1} flexShrink={0} paddingX={1} backgroundColor={isSelected?palette.selection:undefined}>
+  <Text color={isSelected?palette.accent:palette.muted}>{isSelected?'▸ ':'  '}</Text>
+  {columns.map(c=>{
+   const width=c.width-1;
+   if(c.key==='action'||c.key==='result')return <RichCell key={c.key}
+    segments={c.key==='action'?visual.action:visual.result} width={width}/>;
+   const color=c.key==='state'?stateColor[a.state]:c.key==='elapsed'||c.key==='time'?palette.muted:palette.text;
+   if(c.key==='state'&&a.state==='running')return <SpinnerCell key={c.key} color={color}/>;
+   if(c.key==='elapsed'&&a.state==='running')return <RunningElapsedCell key={c.key}
+    entry={record} color={color} bold={isSelected} width={width}/>;
+   const value=c.key==='time'?activityTime(record.time,timeAnchor):c.key==='state'?a.symbol:
+    c.key==='tool'?visual.toolLabel:a[c.key];
+   const formatted=c.key==='elapsed'?rightFit(value,width):fit(value,width);
+   return <Text key={c.key} color={color} bold={isSelected}>{formatted+' '}</Text>;
+  })}
+ </Box>;
+});
 
 /** Two-column form rendering: field labels, separator, and values use separate tones. */
 const DetailCell=React.memo(function DetailCell({item,width}:{item:DetailLine;width:number}){
@@ -415,13 +439,20 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
   status:'running',time:task.start,finished_at:null,duration_ms:null}:undefined;
  const baseEntry=detailTask?taskEntry:selected;
  const entry=baseEntry;
- const model=entry?activityPresentation(entry,tick):null;
+ // Completed entries are immutable between activity revisions; do not parse their JSON on each clock tick.
+ const model=useMemo(()=>entry?activityPresentation(entry,entry.status==='running'?tick:0):null,
+  [entry,entry?.status==='running'?tick:0]);
  const wideFooter=w>=112;
  const footerRows=wideFooter?1:2;
  const taskSlots=Math.min(tasks.length,h>=22?3:h>=16?2:1);
  const taskHeight=1+(tasks.length?taskSlots:0);
  const bodyHeight=Math.max(1,h-4-taskHeight-footerRows);
- const longestTime=activities.reduce((max,a)=>Math.max(max,cellWidth(activityTime(a.time,tick))),8);
+ // TIME labels only change when the activity list changes or local midnight passes.
+ // A 2200-row scan takes ~118ms, so never repeat it for each status/clock update.
+ const localDay=dateKey(tick);
+ const timeAnchor=useMemo(()=>tick,[localDay]);
+ const longestTime=useMemo(()=>activities.reduce((max,a)=>Math.max(max,cellWidth(activityTime(a.time,timeAnchor))),8),
+  [activities,timeAnchor]);
  const layout=paneLayout(w,bodyHeight,h,longestTime+1);
  const horizontal=layout.sideBySide,aw=layout.activityWidth,dw=layout.detailWidth;
  const tableRows=Math.max(1,layout.activityHeight-2);
@@ -459,11 +490,11 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
   });
   return {rows:list,dailyCounts:counts};
  },[activities]);
- const fullDayStats=new Map((dayStats??[]).map(day=>[day.date,day]));
+ const fullDayStats=useMemo(()=>new Map((dayStats??[]).map(day=>[day.date,day])),[dayStats]);
  const dailyLabel=(ts:number)=>{
   const legacy=demo||dayStats===null;
   const n=legacy?dailyCounts.get(dateKey(ts)):fullDayStats.get(dateKey(ts));
-  return dateDivider(ts,tick)+' · '+(n?.total??0)+(legacy?' 已载入':' OPS')+' · '+(n?.success??0)+' OK · '+(n?.failed??0)+' FAIL'+
+  return dateDivider(ts,timeAnchor)+' · '+(n?.total??0)+(legacy?' 已载入':' OPS')+' · '+(n?.success??0)+' OK · '+(n?.failed??0)+' FAIL'+
    (('interrupted' in (n??{}) && Number((n as ActivityDayStats).interrupted)>0)?' · '+(n as ActivityDayStats).interrupted+' INT':'')+
    (n?.running?' · '+n.running+' RUN':'');
  };
@@ -472,7 +503,8 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
  const rowStart=selectedId===null?0:selectedRow<viewport?selectedRow:selectedRow>=viewport+tableRows?selectedRow-tableRows+1:viewport;
  viewportStartRef.current=Math.max(0,Math.min(rowStart,Math.max(0,rows.length-tableRows)));
  const visibleRows=rows.slice(rowStart,rowStart+tableRows);
- const columns=tableColumns(Math.max(1,aw-2),longestTime+1,layout.detailGain);
+ const columns=useMemo(()=>tableColumns(Math.max(1,aw-2),longestTime+1,layout.detailGain),
+  [aw,longestTime,layout.detailGain]);
  const detailRows=Math.max(1,layout.detailHeight-2);
  const pageOffset=offsets[offsets.length-1]??0;
  useEffect(()=>{
@@ -675,26 +707,8 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
    rightColor={selectedId===null?stateColor.success:undefined} active={focus==='activity'}/>
   <Box height={1} paddingX={1} flexShrink={0}><Text color={palette.muted}>{'  '+columns.map(c=>(c.key==='elapsed'?rightFit(c.title,c.width-1):fit(c.title,c.width-1))+' ').join('')}</Text></Box>
   {visibleRows.length?visibleRows.map(row=>'kind' in row&&row.kind==='date'?
-    <Line key={'day-'+row.timestamp} width={aw} text={' ┄ '+dailyLabel(row.timestamp)+' ┄'} color={palette.line}/>:(()=>{
-   const record=row as ActivityEntry;
-   const a=activityPresentation(record,tick),visual=toolRow(record),isSelected=record.id===selected?.id;
-   return <Box key={record.id} height={1} flexShrink={0} paddingX={1} backgroundColor={isSelected?palette.selection:undefined}>
-    <Text color={isSelected?palette.accent:palette.muted}>{isSelected?'▸ ':'  '}</Text>
-    {columns.map(c=>{
-     const width=c.width-1;
-     if(c.key==='action'||c.key==='result')return <RichCell key={c.key}
-      segments={c.key==='action'?visual.action:visual.result} width={width} />;
-     const color=c.key==='state'?stateColor[a.state]:c.key==='elapsed'||c.key==='time'?palette.muted:palette.text;
-     if(c.key==='state'&&a.state==='running')return <SpinnerCell key={c.key} color={color}/>;
-     if(c.key==='elapsed'&&a.state==='running')return <RunningElapsedCell key={c.key} entry={record}
-      color={color} bold={isSelected} width={width}/>;
-     const value=c.key==='time'?activityTime(record.time,tick):c.key==='state'?a.symbol:
-       c.key==='tool'?visual.toolLabel:a[c.key];
-     const formatted=c.key==='elapsed'?rightFit(value,width):fit(value,width);
-     return <Text key={c.key} color={color} bold={isSelected}>{formatted+' '}</Text>;
-    })}
-   </Box>;
-  })()):<Line width={aw} text={pageError?' 历史读取失败 · '+pageError:pageLoading?' 正在加载活动…':activeQuery?' 没有匹配记录 · Esc 清除筛选':' 暂无操作，等待 Agent 请求'} color={palette.muted}/>}
+    <Line key={'day-'+row.timestamp} width={aw} text={' ┄ '+dailyLabel(row.timestamp)+' ┄'} color={palette.line}/>:<ActivityTableRow key={(row as ActivityEntry).id} record={row as ActivityEntry}
+     columns={columns} isSelected={(row as ActivityEntry).id===selected?.id} timeAnchor={timeAnchor}/>):<Line width={aw} text={pageError?' 历史读取失败 · '+pageError:pageLoading?' 正在加载活动…':activeQuery?' 没有匹配记录 · Esc 清除筛选':' 暂无操作，等待 Agent 请求'} color={palette.muted}/>}
  </Box>;
  const detailPane=<Box flexDirection="column" width={dw} height={layout.detailHeight} overflow="hidden">
   <Title label={view==='config'?'CONNECTION':outputMode?'LOCAL OUTPUT':'DETAIL'} width={dw} active={focus==='detail'}

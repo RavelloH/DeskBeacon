@@ -9,7 +9,8 @@ export const oneLine=(value:string)=>safeText(value,100_000).replace(/[\r\n\t\u2
 export function fit(value:string,width:number,pad=true):string{
  const size=Math.max(0,Math.floor(width)),text=oneLine(value);
  if(!size)return '';
- if(stringWidth(text)<=size)return text+(pad?' '.repeat(size-stringWidth(text)):'');
+ const measured=stringWidth(text);
+ if(measured<=size)return text+(pad?' '.repeat(size-measured):'');
  let result='',used=0;
  for(const {segment} of segments.segment(text)){
   const length=stringWidth(segment);
@@ -37,13 +38,17 @@ export function rightFit(value:string,width:number):string{
  const clipped=fit(value,width,false);
  return ' '.repeat(Math.max(0,width-cellWidth(clipped)))+clipped;
 }
+// Reuse Intl formatters: repeatedly constructing toLocaleTimeString formatting
+// machinery dominates column-width scans for large activity histories.
+const activityClock=new Intl.DateTimeFormat('zh-CN',{hour:'numeric',minute:'numeric',second:'numeric',hour12:false});
+const activityShortClock=new Intl.DateTimeFormat('zh-CN',{hour:'2-digit',minute:'2-digit',hour12:false});
 export function activityTime(value:number,now=Date.now()):string{
  const date=new Date(value),today=new Date(now),prev=new Date(now);
  prev.setDate(prev.getDate()-1);
  const same=(a:Date,b:Date)=>a.getFullYear()===b.getFullYear()&&
   a.getMonth()===b.getMonth()&&a.getDate()===b.getDate();
- const hm=date.toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',hour12:false});
- if(same(date,today))return date.toLocaleTimeString('zh-CN',{hour12:false});
+ const hm=activityShortClock.format(date);
+ if(same(date,today))return activityClock.format(date);
  if(same(date,prev))return '昨天 '+hm;
  const two=(n:number)=>String(n).padStart(2,'0');
  const datePrefix=date.getFullYear()===today.getFullYear()
