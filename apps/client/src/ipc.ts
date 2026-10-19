@@ -4,7 +4,8 @@ import { join } from 'node:path';
 import { existsSync, rmSync, chmodSync, readdirSync, openSync, closeSync, readSync, statSync,
   mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import type { ClientDaemon } from './daemon.js';
-import { dataDir } from './daemon.js';
+import { dataDir, loadConfig, saveConfig } from './daemon.js';
+import {normalizeServerUrl} from './command-palette.js';
 import {detectFileOutputEncoding,decodeOutputPage} from './output-encoding.js';
 export const ipcPath=process.env.DESKBEACON_IPC_PATH ?? (platform()==='win32'?'\\\\.\\pipe\\deskbeacon-'+process.env.USERNAME:
   join(dataDir,'daemon.sock'));
@@ -209,7 +210,23 @@ export function startIpc(daemon:ClientDaemon){
              return;
            }
            if(request.action==='status')result=await daemon.status();
-           else if(request.action==='rename')result={name:await daemon.rename(String(request.name??''))};
+           else if(request.action==='config-get'){
+             const cfg=loadConfig();
+             result={url:cfg.pendingUrl??cfg.url,activeUrl:cfg.url,
+               pending:Boolean(cfg.pendingUrl),name:cfg.deviceName};
+           }
+           else if(request.action==='config-set'){
+             const key=request.key,value=String(request.value??'').trim();
+             if(key==='name')result={name:await daemon.rename(value)};
+             else if(key==='url'){
+               const url=normalizeServerUrl(value),cfg=loadConfig();
+               const pendingUrl=url===cfg.url?undefined:url;
+               // Keep the old connection alive until re-pairing.
+               // Never replay existing OAuth credentials to another origin.
+               saveConfig({...cfg,pendingUrl});
+               result={url:pendingUrl??cfg.url,activeUrl:cfg.url,pending:Boolean(pendingUrl)};
+             }else throw Error('UNKNOWN_CONFIG_KEY');
+           }
            else if(request.action==='activity-list')result=daemon.activityList({
              cursor:request.cursor,query:request.query,limit:request.limit,watchIds:request.watchIds
            });
