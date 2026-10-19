@@ -76,7 +76,7 @@ pnpm exec wrangler deploy
 
 ### 2. 安装并连接设备
 
-在需要远程控制的电脑上安装客户端。**npm 分发包不需要 pnpm、.NET SDK 或源码仓库**；要求 Node.js 24 或更新版本。当前开发版本通过 `@deskbeacon/win32-x64` / `@deskbeacon/win32-arm64` 按平台安装原生辅助程序；npm 上的 0.1.0 仍是旧版一体式 NativeAOT 包。
+在需要远程控制的电脑上安装客户端。**npm 分发包不需要 pnpm、.NET SDK 或源码仓库**；要求 Node.js 24 或更新版本。源码中的 `0.2.0` 候选版通过 `@deskbeacon/win32-x64` / `@deskbeacon/win32-arm64` 按平台安装原生辅助程序；从 npm 安装新版本前，必须先确认这两个分包以及主包的 `0.2.0` 均已发布。npm 上的 `0.1.0` 属于旧版一体式 NativeAOT 包。
 
 通过 npm 安装：
 
@@ -122,7 +122,9 @@ node apps/client/dist/index.js service stop
 
 其他常用命令有 help、version、doctor 和 update。
 
-终端界面中，`↑↓` 选择记录，`Tab` 切换活动、详情和后台任务，`/` 搜索，`>` 打开本地命令面板。详情支持滚动；`o` 查看本地输出，`e` 切换 stdout/stderr，`[` / `]` 翻页，`r` 刷新。`y` 复制命令或目标预览，`x` 停止选中进程，`X` 停止全部受管进程（本地确认），`f` 跟随最新活动，`?` 查看帮助。
+终端界面中，`↑↓` 选择活动记录或命令候选，`Tab` 切换活动、详情和后台任务；按 `s` 搜索活动内容，按 `/` 打开本地命令面板。候选命令以 `/` 开头，支持上下键选择、空格逐级补全参数及回车执行。详情支持滚动，`i` 查看完整输入，`o` 查看完整输出（非命令工具为 RESULT），`e` 切换 stdout/stderr，`c` 复制当前视图；`x` 停止选中进程，`X` 停止全部受管进程（需确认），`f` 跟随最新活动，`q` 退出，`?` 查看帮助。
+
+命令面板支持 `/config name [value]`、`/config url [value]`：不带值时查询当前配置；追加值时设置。设备名称变更会同步服务端；服务器 URL 变更会先暂存，重新 OAuth 授权后才生效。设备改名已不再提供独立的 CLI `rename` 命令。其它命令包括 `/help`、`/tasks`、`/latest`、`/stop selected|all`、`/view summary|input|output|stderr`、`/copy` 和 `/quit`。
 
 顶栏左侧显示 DeskBeacon，右侧显示连接状态与延迟；背景和前景会随连接状态保持绿、黄、红三种原有配色。宽终端底栏左右两侧共用蓝底白字，窄终端上下显示帮助提示和精简状态。底栏每秒刷新 CPU、整机可用/总内存、操作数和运行时间。
 
