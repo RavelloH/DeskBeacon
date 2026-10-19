@@ -42,6 +42,8 @@ export async function systemTool(name:string,i:I){
      pid:r.pid,process:r.process})),truncated:rows.length>(i.limit??200)};
  }
  case 'screen_capture':{
+   if(process.platform==='linux'&&!process.env.DISPLAY&&!process.env.WAYLAND_DISPLAY)
+     throw Error('SCREEN_UNAVAILABLE: no graphical desktop session (DISPLAY/WAYLAND_DISPLAY)');
    const monitors=await screen.listDisplays();
    const selected=i.monitor===undefined?undefined:monitors[i.monitor];
    if(i.monitor!==undefined&&!selected)throw Error('SCREEN_UNAVAILABLE: monitor not found');

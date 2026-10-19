@@ -19,6 +19,16 @@ try{
  assert.equal(result.cancelled,true,'Stopped command must report cancellation');
  assert.equal(manager.active().length,0,'Foreground process must be reaped');
  console.log('PASS Foreground cancellation reaps managed process');
+ if(process.platform!=='win32'){
+  const id='test-background-spawn-error';
+  await assert.rejects(manager.startBackground(id,'Invalid executable regression',
+   {mode:'program',program:'/definitely/nonexistent/deskbeacon-test-executable'}),
+   /SPAWN_FAILED/);
+  assert.equal(manager.get(id),null,'failed spawn must not register a phantom running task');
+  assert.equal(manager.active().some(t=>t.id===id),false);
+  console.log('PASS background invalid executable rejects and leaves no phantom task');
+ }
+
  const started=Date.now();
  const timedOut=await manager.foreground('test-timeout','Finite foreground timeout',
   {mode:'program',program:'node',args:['-e','setInterval(()=>{},1000)']},350);

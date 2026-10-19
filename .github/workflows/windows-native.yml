@@ -36,6 +36,11 @@ jobs:
       - run: pnpm test
       - run: pnpm check
       - run: pnpm build
+      - name: Linux workspace and background-process regression
+        run: |
+          node apps/client/test/workspace-command.mjs
+          node apps/client/test/supervisor.mjs
+          node apps/client/test/screen-headless.mjs
       - name: Install pinned LLVM-mingw UCRT cross toolchain
         shell: bash
         run: |

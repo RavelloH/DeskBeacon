@@ -124,10 +124,24 @@ export class TaskSupervisor{
    let timeout:NodeJS.Timeout|undefined;
    if(fg)timeout=setTimeout(()=>{timedOut=true;void stopTree(child,jobManaged);},timeoutMs);
    if(!fg){
+     // spawn() reports ENOENT/EACCES asynchronously. Do not acknowledge a
+     // phantom "running" task with pid 0 before the spawn event succeeds.
+     const failure=await new Promise<Error|null>(resolve=>{
+       child.once('spawn',()=>resolve(null));
+       child.once('error',error=>resolve(error));
+     });
+     if(failure){
+       this.bg.delete(id);
+       outFile.end();errFile.end();this.onChange();
+       throw Error('SPAWN_FAILED: '+String(failure));
+     }
      this.db.prepare('INSERT INTO background(id,operation_id,description,pid,status,start,stdout_path,stderr_path) VALUES(?,?,?,?,?,?,?,?)')
        .run(id,id,description,child.pid??0,'running',Date.now(),task.out,task.err);
-     child.on('exit',(code)=>this.db.prepare("UPDATE background SET status='exited',exit_code=? WHERE id=?").run(code,id));
-     child.on('close',()=>{outFile.end();errFile.end();this.bg.delete(id);this.onChange();});
+     // Unlike 'exit', 'close' is also emitted after a failed spawn.
+     child.on('close',(code)=>{
+       this.db.prepare("UPDATE background SET status='exited',exit_code=? WHERE id=?").run(code,id);
+       outFile.end();errFile.end();this.bg.delete(id);this.onChange();
+     });
      return {backgroundTaskId:id,pid:child.pid??null,description,status:'running',cwd:p.cwd,program:p.exe};
    }
    const code=await new Promise<number|null>(resolve=>child.once('close',(code)=>resolve(code)));

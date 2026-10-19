@@ -470,7 +470,10 @@ export class ClientDaemon extends EventEmitter {
       }
       return{workspaceId:row.id,cwd:row.cwd,shellProfile:row.shell,version:row.version};
     }
-    const id=input.workspaceId as string|undefined;
+    // Command schemas nest workspaceId under command; file tools keep it top-level.
+    // Reading only input.workspaceId silently ran commands in the daemon default cwd.
+    const id=(tool==='exec_foreground'||tool==='exec_background'
+      ?input.command?.workspaceId:input.workspaceId) as string|undefined;
     let workspace:string|undefined,profile:string|undefined;
     if(id){
       const row=this.db.prepare('SELECT * FROM workspaces WHERE id=? AND grant_id=?').get(id,grantId) as any;
