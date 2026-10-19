@@ -14,7 +14,7 @@ import {ACTIVITY_PAGE_SIZE, sortActivityRows, compatibleDayStats, type ActivityP
 import {createDemoStatus, advanceDemo, demoHelp, type DemoScenario, type DemoStatus} from './demo.js';
 import {cellWidth, fit, oneLine, paneLayout, tableColumns, detailScrollStatus, wrapLines, rightFit, activityTime, dateDivider, dateKey, type Column} from './tui-layout.js';
 import {copyText} from './clipboard.js';
-import {commandPalette,parseCommand} from './command-palette.js';
+import {commandPalette,parseCommand,type Option} from './command-palette.js';
 
 type Task={id:string;description:string;start:number;kind:'foreground'|'background';
  actorName?:string|null;grantId?:string;requestJson?:string|null;cwd?:string|null};
@@ -194,6 +194,27 @@ function Title({label,right='',rightColor,width,active=false,junctionAt}:{label:
 }
 function Line({text,width,color=palette.text,bold=false}:{text:string;width:number;color?:string;bold?:boolean}){
  return <Box height={1} flexShrink={0}><Text color={color} bold={bold}>{fit(text,width)}</Text></Box>;
+}
+
+/** Real two-column layout: the explanation never shifts with command length.
+ * The divider belongs to its own Ink Box, not spaces padded into a Text. */
+function CommandCandidateRow({option,width,active}:{option:Option;width:number;active:boolean}){
+ const nameWidth=Math.max(14,Math.min(39,Math.floor(width*.29)));
+ const descriptionWidth=Math.max(1,width-nameWidth-2);
+ return <Box width={width} height={1} flexShrink={0} overflow="hidden"
+   backgroundColor={active?palette.selection:undefined}>
+   <Box width={nameWidth} height={1} flexShrink={0} paddingLeft={1} overflow="hidden">
+    <Text color={active?palette.accent:option.selectable?palette.text:palette.muted}>
+     {fit((active?'› ':'  ')+option.label,Math.max(1,nameWidth-1),false)}
+    </Text>
+   </Box>
+   <Box width={1} height={1} flexShrink={0}>
+    <Text color={palette.line}>│</Text>
+   </Box>
+   <Box width={width-nameWidth-1} height={1} flexShrink={0} paddingLeft={1} overflow="hidden">
+    <Text color={palette.muted}>{fit(option.description,descriptionWidth,false)}</Text>
+   </Box>
+  </Box>;
 }
 
 /** Rich text clipped by terminal cells, never by UTF-16 length. */
@@ -1019,15 +1040,8 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
    {commandOptions.slice(Math.max(0,commandSelect-visibleOptions+1),
        Math.max(0,commandSelect-visibleOptions+1)+paletteCount).map((option,index)=>{
     const first=Math.max(0,commandSelect-visibleOptions+1);
-    const active=first+index===commandSelect&&option.selectable;
-    const labelWidth=Math.max(10,Math.min(29,Math.floor(w*.28)));
-    return <Box key={option.label+index} height={1} width={w} flexShrink={0}
-      backgroundColor={active?palette.selection:undefined}>
-      <Text color={active?palette.accent:option.selectable?palette.text:palette.muted}>
-       {fit((active?' › ':'   ')+option.label,labelWidth,false)}
-      </Text>
-      <Text color={palette.muted}>{fit(' '+option.description,Math.max(1,w-labelWidth-1))}</Text>
-     </Box>;
+    return <CommandCandidateRow key={option.label+index} option={option} width={w}
+      active={first+index===commandSelect&&option.selectable}/>;
    })}
    {commandOptions.length===0?<Line width={w} text="  无匹配候选，继续输入或按 Esc 返回" color={palette.muted}/>:null}
    <Line width={w} text={' '+(commandMenu?.hint??'')} color={palette.muted}/>

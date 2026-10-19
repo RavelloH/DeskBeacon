@@ -17,6 +17,22 @@ const {cellWidth,fit,paneLayout,tableColumns,detailScrollStatus}=await import('.
 
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const segmenter=new Intl.Segmenter(undefined,{granularity:'grapheme'});
+function assertCandidateColumns(snapshot,labels){
+ const lines=snapshot.split('\n');
+ const rows=labels.map(label=>{
+  const row=lines.find(line=>{
+   const nameAt=line.indexOf(label),dividerAt=line.indexOf('│');
+   return nameAt>=0&&dividerAt>nameAt;
+  });
+  assert.ok(row,'candidate "'+label+'" must have a separate divider and description');
+  const dividerAt=row.indexOf('│');
+  assert.ok(row.slice(dividerAt+1).trim().length>0,
+   'description for "'+label+'" must appear to the RIGHT of the column boundary');
+  return {label,divider:cellWidth(row.slice(0,dividerAt)),row};
+ });
+ assert.equal(new Set(rows.map(row=>row.divider)).size,1,
+  'candidate names of different lengths must share one physical column boundary: '+JSON.stringify(rows));
+}
 
 class TerminalCapture{
   constructor(output){this.output=output;this.raw='';output.on('data',chunk=>this.raw+=chunk.toString('utf8'));}
@@ -398,11 +414,15 @@ try{
     await commands.send('/');
     await waitFor(()=>commands.capture.snapshot().includes('COMMANDS'),
       'slash must insert a candidate panel between search and activity');
+    await waitFor(()=>commands.capture.snapshot().includes('/tasks'),
+      'multiple command candidates must render');
+    assertCandidateColumns(commands.capture.snapshot(),['/help','/config','/tasks']);
     await commands.send('\x1b[B');
     await commands.send(' ');
     await waitFor(()=>commands.capture.snapshot().includes('设备名称：')&&
       commands.capture.snapshot().includes('服务器地址：'),
       'down arrow plus space selects /config and advances to config keys');
+    assertCandidateColumns(commands.capture.snapshot(),['name','url']);
     await commands.send('\x1b');
     await commands.send('/');
     await waitFor(()=>commands.capture.snapshot().includes('COMMANDS'),
@@ -452,6 +472,21 @@ try{
       'Escape closes command choices without changing activity');
     console.log('PASS slash suggestions, config values, staged arguments and commands');
   }finally{await commands.close();}
+  for(const columns of [80,160]){
+    const layout=await mountDemo('connected',columns,32);
+    try{
+      await layout.send('/');
+      await waitFor(()=>layout.capture.snapshot().includes('/tasks'),
+        'candidate menu should render at '+columns+' columns');
+      assertCandidateColumns(layout.capture.snapshot(),['/help','/config','/tasks']);
+      await layout.send('config ');
+      await waitFor(()=>layout.capture.snapshot().includes('设备名称：')&&
+        layout.capture.snapshot().includes('服务器地址：'),
+        'parameter suggestions should render at '+columns+' columns');
+      assertCandidateColumns(layout.capture.snapshot(),['name','url']);
+    }finally{await layout.close();}
+  }
+  console.log('PASS command/parameter candidate columns align at 80, 120 and 160 terminal widths');
 
   const interrupted=await mountDemo('connected',120,32);
   try{
