@@ -181,7 +181,7 @@ function argvCommand(command:Record<string,any>):string{
  if(argv.length>visible.length)visible.push(`…(+${argv.length-visible.length} 参数)`);
  return visible.length?previewLine(visible.join(' '),320):'';
 }
-function elapsedText(ms:number|undefined):string{
+export function elapsedText(ms:number|undefined):string{
  if(ms===undefined)return '—';
  const value=Math.max(0,ms);
  if(value<1000)return `${Math.round(value)}ms`;

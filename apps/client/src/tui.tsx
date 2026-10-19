@@ -1,7 +1,7 @@
-import React, {useEffect, useMemo, useRef, useState} from 'react';
+import React, {useEffect, useMemo, useRef, useState, useSyncExternalStore} from 'react';
 import {render, Box, Text, useInput, useApp, useStdout, useStdin} from 'ink';
 import {requestIpc, subscribeIpc} from './ipc.js';
-import {activityPresentation, safeText, duration, type ActivityEntry} from './presenter.js';
+import {activityPresentation, safeText, duration, elapsedText, type ActivityEntry} from './presenter.js';
 import {toolRow, type Segment, type Tone} from './tool-presentation.js';
 import {detailPresentation, wrapDetail, type DetailLine} from './detail-presentation.js';
 import {ACTIVITY_PAGE_SIZE, sortActivityRows, compatibleDayStats, type ActivityPage, type ActivityDayStats} from './activity-query.js';
@@ -40,18 +40,38 @@ function liveElapsed(ms:number){
  if(minutes<60)return minutes+'m'+String(seconds).padStart(2,'0')+'s';
  return Math.floor(minutes/60)+'h'+String(minutes%60).padStart(2,'0')+'m'+String(seconds).padStart(2,'0')+'s';
 }
+// All visible spinners and sub-second elapsed labels share one animation clock.
+// Per-cell intervals previously triggered separate full Ink layout / ANSI diff
+// passes, even though the frames are identical.
+let animationFrame=0;
+const animationSubscribers=new Set<()=>void>();
+let animationTimer:ReturnType<typeof setInterval>|undefined;
+function subscribeAnimation(onChange:()=>void){
+ animationSubscribers.add(onChange);
+ if(!animationTimer)animationTimer=setInterval(()=>{
+  animationFrame=(animationFrame+1)%spinnerFrames.length;
+  for(const subscriber of animationSubscribers)subscriber();
+ },200);
+ return ()=>{
+  animationSubscribers.delete(onChange);
+  if(!animationSubscribers.size&&animationTimer){
+   clearInterval(animationTimer);
+   animationTimer=undefined;
+  }
+ };
+}
+const animationSnapshot=()=>animationFrame;
+function useAnimationFrame(){
+ return useSyncExternalStore(subscribeAnimation,animationSnapshot,()=>0);
+}
 function SpinnerCell({color}:{color:string}){
- const [frame,setFrame]=useState(0);
- useEffect(()=>{
-  const timer=setInterval(()=>setFrame(current=>(current+1)%spinnerFrames.length),160);
-  return()=>clearInterval(timer);
- },[]);
+ const frame=useAnimationFrame();
  return <Text color={color}>{spinnerFrames[frame]+' '}</Text>;
 }
 function RunningElapsedCell({entry,color,bold,width}:{entry:ActivityEntry;color:string;bold:boolean;width:number}){
  const [now,setNow]=useState(()=>Date.now());
  useEffect(()=>{
-  const timer=setInterval(()=>setNow(Date.now()),500);
+  const timer=setInterval(()=>setNow(Date.now()),1000);
   return()=>clearInterval(timer);
  },[]);
  return <Text color={color} bold={bold}>{rightFit(liveElapsed(now-entry.time),width)+' '}</Text>;
@@ -59,7 +79,7 @@ function RunningElapsedCell({entry,color,bold,width}:{entry:ActivityEntry;color:
 function RunningDetailHeading({entry,tool,status,width}:{entry:ActivityEntry;tool:string;status:string;width:number}){
  const [now,setNow]=useState(()=>Date.now());
  useEffect(()=>{
-  const timer=setInterval(()=>setNow(Date.now()),500);
+  const timer=setInterval(()=>setNow(Date.now()),1000);
   return()=>clearInterval(timer);
  },[]);
  return <Line text={tool+' · '+status+' · '+liveElapsed(now-entry.time)} width={width} color={stateColor.running} bold/>;
@@ -243,12 +263,11 @@ const DetailCell=React.memo(function DetailCell({item,width}:{item:DetailLine;wi
 
 /** The running duration advances independently of costly DETAIL rendering. */
 function RunningDurationDetailCell({entry,item,width}:{entry:ActivityEntry;item:DetailLine;width:number}){
- const [now,setNow]=useState(Date.now());
- useEffect(()=>{
-  const timer=setInterval(()=>setNow(Date.now()),100);
-  return()=>clearInterval(timer);
- },[]);
- return <DetailCell item={{...item,text:item.text.replace(/│.*/, '│ '+activityPresentation(entry,now).elapsed)}} width={width}/>;
+ useAnimationFrame();
+ // The running duration only needs the start timestamp, not a full
+ // activityPresentation() pass that reparses request/result JSON per frame.
+ const elapsed=elapsedText(Date.now()-entry.time);
+ return <DetailCell item={{...item,text:item.text.replace(/│.*/, '│ '+elapsed)}} width={width}/>;
 }
 export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
  const demo=demoScenario!==undefined;
