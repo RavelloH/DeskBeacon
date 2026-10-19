@@ -6,7 +6,7 @@ import {highlightCodeLines,languageForPath,languageForCommand,type CodeSpan} fro
 import {normalizeProcessStderr} from './terminal-errors.js';
 
 export type DetailLine={text:string;tone?:Tone;bold?:boolean;italic?:boolean;label?:string;section?:string;syntax?:CodeSpan[]|undefined;
- sourceLine?:number|null;continued?:boolean};
+ sourceLine?:number|null;continued?:boolean;lineDigits?:number};
 type Fields=Record<string,any>;
 const line=(text:string,tone:Tone='default',bold=false,italic=false):DetailLine=>({text,tone,bold,italic});
 const label=(key:string,value:unknown,tone:Tone='default'):DetailLine=>({text:clean(String(value??'—'),1000),label:key,tone});
@@ -27,13 +27,14 @@ export function numberedBlock(raw:unknown,language?:string,startLine:number|null
  if(typeof raw!=='string')return [line('（内容不可用）','muted',false,true)];
  const text=raw.slice(0,maxChars),lines=text.replace(/\r\n?/g,'\n').split('\n');
  const source=lines.slice(0,maxLines).map(value=>clean(value,500).replace(/\t/g,'  '));
+ const lineDigits=startLine===null?1:String(startLine+Math.max(0,source.length-1)).length;
  const highlighted=language?highlightCodeLines(source,language):undefined;
  const result:DetailLine[]=source.map((v,index)=>{
-  if(highlighted)return {...line(v,'muted'),syntax:highlighted[index],sourceLine:startLine===null?null:startLine+index};
+  if(highlighted)return {...line(v,'muted'),syntax:highlighted[index],sourceLine:startLine===null?null:startLine+index,lineDigits};
   const tone:Tone=v.startsWith('+++')||v.startsWith('+')?'success':
    v.startsWith('---')||v.startsWith('-')?'danger':v.startsWith('@@')?'warning':'default';
   const comment=/^\s*(\/\/|#\s)/.test(v);
-  return {...line(v,comment?'muted':tone,v.startsWith('@@'),comment),sourceLine:startLine===null?null:startLine+index};
+  return {...line(v,comment?'muted':tone,v.startsWith('@@'),comment),sourceLine:startLine===null?null:startLine+index,lineDigits};
  });
  if(raw.length>maxChars||lines.length>maxLines)result.push(line('… 内容过长，请使用文件或输出读取工具查看完整内容','warning'));
  return result;
@@ -219,7 +220,7 @@ export function wrapDetail(lines:DetailLine[],width:number):DetailLine[]{
   }
   // Source line numbers are attached before wrapping. Physical terminal wraps
   // get a continuation marker, never a counterfeit source line number.
-  const gutter=item.sourceLine!==undefined?Math.max(5,String(item.sourceLine??'?').length)+3:0;
+  const gutter=item.sourceLine!==undefined?(item.lineDigits??String(item.sourceLine??'?').length)+1:0;
   if(item.syntax)return wrapSyntaxLine(item,Math.max(1,w-gutter));
   return wrapLines([item.text],Math.max(1,w-gutter))
    .map((v,index)=>({...item,text:v,continued:index>0}));

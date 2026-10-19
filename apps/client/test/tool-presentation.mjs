@@ -39,9 +39,9 @@ assert.ok(!toolRow(make('fs_read',{}, {readBytes:12,truncated:true})).result[0].
 console.log('PASS command stdout preview replaces redundant duration and file diff uses colored line deltas');
 const auxiliary=toolRow(make('fs_edit',{path:'src/a.ts',mode:'replace'},{}));
 assert.ok(auxiliary.action.length>=2);
-assert.match(auxiliary.action[0].text,/修改 a\.ts/);
+assert.equal(auxiliary.action[0].text,'a.ts');
 assert.equal(auxiliary.action[0].tone,'default');
-assert.match(auxiliary.action[1].text,/· 文本替换/);
+assert.match(auxiliary.action[1].text,/· replace/);
 assert.equal(auxiliary.action[1].tone,'muted');
 const streamAction=toolRow(make('background_output',{backgroundTaskId:'abc',stream:'stdout'},{}));
 assert.equal(streamAction.action.at(-1).tone,'muted');

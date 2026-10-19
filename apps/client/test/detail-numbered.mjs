@@ -6,6 +6,11 @@ assert.deepEqual(plain.map(x=>x.sourceLine),[311,312,313]);
 const wrapped=wrapDetail(plain,17);
 assert.equal(wrapped[0].sourceLine,311);
 assert.ok(wrapped.some(x=>x.sourceLine===311&&x.continued));
+assert.ok(wrapped.filter(x=>x.sourceLine===311&&x.continued).every(x=>x.lineDigits===3),
+ 'soft-wrapped source rows retain width but render no extra line-number glyph');
+const digits=numberedBlock('a\nb\nc',undefined,998);
+assert.deepEqual(digits.map(item=>item.lineDigits),[4,4,4],
+ 'gutter width must accommodate the largest source line number without a five-cell minimum');
 assert.ok(wrapped.some(x=>x.sourceLine===312&&!x.continued));
 assert.equal(numberedBlock('unknown\nline',undefined,null)[0]?.sourceLine,null);
 const entry={id:'test',grant_id:'grant',actor_name:'ChatGPT',tool:'fs_read',status:'completed',

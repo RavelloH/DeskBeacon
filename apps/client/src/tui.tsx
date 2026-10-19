@@ -1,10 +1,12 @@
 import React, {useEffect, useMemo, useRef, useState, useSyncExternalStore} from 'react';
-import {render, Box, Text, useInput, useApp, useStdout, useStdin} from 'ink';
+import {render, Box, Text, useInput, useApp, useStdout} from 'ink';
 import {requestIpc, subscribeIpc} from './ipc.js';
 import {activityPresentation, safeText, duration, elapsedText, type ActivityEntry} from './presenter.js';
 import {toolRow, type Segment, type Tone} from './tool-presentation.js';
 import {detailPresentation, wrapDetail, numberedBlock, type DetailLine} from './detail-presentation.js';
 import {activityFileLink,openActivityFile,decodeSgrMouse} from './action-link.js';
+import {TuiInputBridge,stripMouseControlText} from './tui-input.js';
+import type {EventEmitter} from 'node:events';
 import {ACTIVITY_PAGE_SIZE, sortActivityRows, compatibleDayStats, type ActivityPage, type ActivityDayStats} from './activity-query.js';
 import {createDemoStatus, advanceDemo, demoHelp, type DemoScenario, type DemoStatus} from './demo.js';
 import {cellWidth, fit, oneLine, paneLayout, tableColumns, detailScrollStatus, wrapLines, rightFit, activityTime, dateDivider, dateKey, type Column} from './tui-layout.js';
@@ -241,17 +243,16 @@ const DetailCell=React.memo(function DetailCell({item,width}:{item:DetailLine;wi
  }
  const text=item.text;
  if(item.sourceLine!==undefined){
-  const digits=Math.max(5,String(item.sourceLine??'?').length);
-  const marker=item.continued?' '.repeat(digits-1)+'↳':String(item.sourceLine??'?').padStart(digits);
-  const gutter=marker+' │ ';
-  const used=cellWidth(gutter);
+  // Reserve exactly as many columns as the highest logical line number in
+  // this block. A soft wrap leaves the number blank, never adds a glyph.
+  const digits=item.lineDigits??String(item.sourceLine??'?').length;
+  const gutter=(item.continued?' '.repeat(digits):String(item.sourceLine??'?').padStart(digits))+' ';
+  const room=Math.max(0,width-cellWidth(gutter));
   return <Box height={1} flexShrink={0} width={width}>
-   <Text>{' '}</Text>
    <Text color={palette.line}>{gutter}</Text>
    {item.syntax?<Text>{item.syntax.map((segment,index)=><Text key={index} color={segment.color}>{segment.text}</Text>)}</Text>:
     <Text color={item.tone&&item.tone!=='default'?toneColor[item.tone]:palette.muted}
-     bold={item.bold===true}>{fit(text,Math.max(1,width-used-2))}</Text>}
-   <Text>{' '}</Text>
+     bold={item.bold===true}>{fit(text,room)}</Text>}
   </Box>;
  }
  if(item.syntax){
@@ -290,10 +291,10 @@ function RunningDurationDetailCell({entry,item,width}:{entry:ActivityEntry;item:
  const elapsed=elapsedText(Date.now()-entry.time);
  return <DetailCell item={{...item,text:item.text.replace(/│.*/, '│ '+elapsed)}} width={width}/>;
 }
-export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
+export function App({demoScenario,mouseEvents}:{demoScenario?:DemoScenario;mouseEvents?:EventEmitter}={}){
  const demo=demoScenario!==undefined;
  const [demoStatus,setDemoStatus]=useState<DemoStatus|null>(()=>demoScenario?createDemoStatus(demoScenario):null);
- const {exit}=useApp(),{stdin}=useStdin(),{w,h}=useSize();
+ const {exit}=useApp(),{w,h}=useSize();
  const [liveStatus,setLiveStatus]=useState<Status|null>(null);
  const status:Status|null=demo?demoStatus:liveStatus;
  const [loadedActivity,setLoadedActivity]=useState<ActivityEntry[]>(()=>demoStatus?.activity??[]);
@@ -641,15 +642,13 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
   }
  };
  useEffect(()=>{
-  const listener=(chunk:Buffer|string)=>{
-   for(const event of decodeSgrMouse(chunk.toString())){
-    if(event.kind==='wheel')wheelHandlerRef.current(event.direction,event.x,event.y);
-    else mouseHandlerRef.current(event);
-   }
+  const listener=(event:ReturnType<typeof decodeSgrMouse>[number])=>{
+   if(event.kind==='wheel')wheelHandlerRef.current(event.direction,event.x,event.y);
+   else mouseHandlerRef.current(event);
   };
-  stdin.on('data',listener);
-  return()=>{stdin.off('data',listener);};
- },[stdin]);
+  mouseEvents?.on('mouse',listener);
+  return()=>{mouseEvents?.off('mouse',listener);};
+ },[mouseEvents]);
  mouseHandlerRef.current=event=>{
   // Search occupies terminal rows 2–4; click to enter search editing.
   if(event.kind==='press'&&event.button===0&&event.y>=2&&event.y<=4){
@@ -719,7 +718,8 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
     setNotice('命令：config · tasks · clear · quit');return;
    }
    if(key.backspace||key.delete){setText(s=>Array.from(s).slice(0,-1).join(''));return;}
-   if(input&&!key.ctrl&&!key.meta)setText(s=>(s+oneLine(input)).slice(0,256));
+   if(input&&!key.ctrl&&!key.meta)
+    setText(s=>stripMouseControlText(s+oneLine(input)).slice(0,256));
    return;
   }
   if(confirm){
@@ -819,9 +819,9 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
  const headerRightWidth=Math.max(0,w-headerLeftWidth);
  const footerPrompt=confirm?
   '停止 '+confirm.length+' 个进程及其子进程？ y / Enter 确认 · n / Esc 返回':
-  notice||(pageError?'活动读取失败 · '+pageError:hoverLinkId?'Ctrl+点击文件名 · 在 VS Code 打开对应文件/行':
+  notice||(pageError?'活动读取失败 · '+pageError:
    w<64?'↑↓ 选择 · Tab 切换 · S 搜索 · / 指令 · q 退出':
-   '↑↓ 选择 · Tab 切换 · S 搜索 · / 指令 · f 最新 · x 停止 · Ctrl+点击文件 · q 退出');
+   '↑↓ 选择 · Tab 切换 · S 搜索 · / 指令 · f 最新 · x 停止 · q 退出');
  const compactMetrics=w<40?'CPU '+(status?.cpuPercent??0).toFixed(1)+'% · RAM '+ramText:
   w<72?'CPU '+(status?.cpuPercent??0).toFixed(1)+'% · RAM '+ramText+' · '+(status?.operationsTotal??0)+' OPS':metrics;
  const footerRightWidth=wideFooter?Math.min(64,Math.max(48,Math.floor(w*.48))):0;
@@ -867,11 +867,15 @@ export function App({demoScenario}:{demoScenario?:DemoScenario}={}){
 }
 
 export async function showTui(demoScenario?:DemoScenario){
+ const bridge=new TuiInputBridge(process.stdin);
  if(process.stdout.isTTY)process.stdout.write('\x1b[?1049h\x1b[?1003h\x1b[?1006h');
  try{
-  const app=render(demoScenario?<App demoScenario={demoScenario}/>:<App/>,{interactive:process.stdout.isTTY===true,exitOnCtrlC:false});
+  const app=render(<App {...(demoScenario?{demoScenario}:{})} mouseEvents={bridge.mouse}/>,{
+   stdin:bridge.keyboard as unknown as typeof process.stdin,
+   interactive:process.stdout.isTTY===true,exitOnCtrlC:false});
   await app.waitUntilExit();
  }finally{
+  bridge.dispose();
   if(process.stdout.isTTY)process.stdout.write('\x1b[?1006l\x1b[?1003l\x1b[?1049l');
  }
 }

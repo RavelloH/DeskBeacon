@@ -12,6 +12,7 @@ process.env.FORCE_COLOR='3';
 const React=(await import('react')).default;
 const {render,Box,Text}=await import('ink');
 const {App}=await import('../dist/tui.js');
+const {TuiInputBridge}=await import('../dist/tui-input.js');
 const {cellWidth,fit,paneLayout,tableColumns,detailScrollStatus}=await import('../dist/tui-layout.js');
 
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
@@ -109,8 +110,9 @@ function terminal(width,height){
 
 async function mountDemo(scenario,width,height){
   const io=terminal(width,height);
-  const app=render(React.createElement(App,{demoScenario:scenario}),{
-    stdin:io.input,stdout:io.output,exitOnCtrlC:false,
+  const bridge=new TuiInputBridge(io.input);
+  const app=render(React.createElement(App,{demoScenario:scenario,mouseEvents:bridge.mouse}),{
+    stdin:bridge.keyboard,stdout:io.output,exitOnCtrlC:false,
   });
   await waitFor(()=>io.capture.snapshot().includes('ACTIVITY'),`Ink did not render ${scenario}: ${io.capture.snapshot().slice(0,2500)}`);
   await sleep(160); // Wait for Ink input effects to attach after the initial paint.
@@ -120,7 +122,7 @@ async function mountDemo(scenario,width,height){
   };
   const close=async()=>{
     try{app.unmount();}catch{}
-    io.input.destroy();io.output.destroy();
+    bridge.dispose();io.input.destroy();io.output.destroy();
   };
   return {...io,app,send,resize,close};
 }
@@ -163,14 +165,15 @@ try{
     const panel=paneLayout(terminalWidth,24,36,12);
     const newColumns=tableColumns(Math.max(1,panel.activityWidth-2),12,panel.detailGain);
     const column=(list,name)=>list.find(item=>item.key===name)?.width??0;
-    assert.equal(column(newColumns,'action'),column(oldColumns,'action'),
-      'ACTION must not lose a single cell when widening DETAIL at width '+terminalWidth);
-    assert.equal(column(oldColumns,'result')-column(newColumns,'result'),panel.detailGain,
-      'DETAIL gains must be sourced exclusively from RESULT at width '+terminalWidth);
+    assert.equal(column(oldColumns,'action')-column(newColumns,'action'),panel.detailGain,
+      'DETAIL gains must come only from ACTION at width '+terminalWidth);
+    assert.equal(column(oldColumns,'result'),column(newColumns,'result'),
+      'RESULT column must not shrink to expand DETAIL at width '+terminalWidth);
+    assert.ok(column(newColumns,'action')>=12,'ACTION still has a readable minimum width');
     assert.equal(panel.detailWidth,terminalWidth-1-panel.activityWidth);
-    assert.ok(panel.detailGain<=4,'DETAIL should widen by at most four columns');
+    assert.ok(panel.detailGain<=9,'DETAIL should widen by at most nine columns');
   }
-  console.log('PASS DETAIL width transfer preserves ACTION and only reduces RESULT across terminal sizes');
+  console.log('PASS DETAIL width transfer only reduces ACTION, preserves RESULT and AGENT across terminal sizes');
   assert.equal(detailScrollStatus(124,27,0),'0 / 97');
   assert.equal(detailScrollStatus(124,27,40),'40 / 97');
   assert.equal(detailScrollStatus(124,27,99),'97 / 97','offset is clamped to actual scrollable rows');
@@ -214,8 +217,8 @@ try{
     assert.ok(!thinDivider.includes('━'),'section dividers must use light line glyphs');
     assert.ok(screenLines.some(row=>row.includes('│ TOOL')&&row.includes('│')),
       'tabular detail fields should retain a single left inner margin');
-    const runningRow=screenLines.find(row=>row.includes('构建桌面客户端')&&row.includes('17s'));
-    const finishedRow=screenLines.find(row=>row.includes('执行 TypeScript 类型检查')&&row.includes('2.6s'));
+    const runningRow=screenLines.find(row=>row.includes('17s')&&row.includes('ChatGPT'));
+    const finishedRow=screenLines.find(row=>row.includes('2.6s')&&row.includes('ChatGPT'));
     assert.ok(runningRow&&finishedRow,'fixture must render both running and completed DUR columns');
     const elapsedEnd=(row,value)=>cellWidth(row.slice(0,row.indexOf(value)))+cellWidth(value);
     assert.equal(elapsedEnd(runningRow,'17s'),elapsedEnd(finishedRow,'2.6s'),
@@ -280,29 +283,39 @@ try{
     // SGR mouse left-click inside the existing 3-row search box edits search.
     await search.send('\x1b[<0;10;3M');await search.send('Codex');
     await waitFor(()=>search.capture.snapshot().includes('ACTIVITY 1'),'search previews matches before Enter');
+    // Move the mouse repeatedly while editing: raw SGR packets must never
+    // appear in the search text or corrupt the live result query.
+    for(let n=0;n<18;n++)search.input.write('\x1b[<35;'+(59+n)+';3M');
+    search.input.write('\x1b[<35;59;');search.input.write('4M');
+    await sleep(160);
+    assert.ok(!search.capture.snapshot().includes('[<35;'),'search must discard mouse control sequences');
+    assert.ok(search.capture.snapshot().includes('ACTIVITY 1'),'mouse motion must not alter search result');
     await search.send('\r');
     await waitFor(()=>search.capture.snapshot().includes('ACTIVITY 1'),'search must match the OAuth actor name');
     assert.ok(search.capture.snapshot().includes('Codex'),'actor search result must be visible');
     await search.send('\x1b');
     await search.send('S');await search.send('pnpm');await search.send('\r');
-    await waitFor(()=>search.capture.snapshot().includes('ACTIVITY 1'),'search must match a command target');
+    await waitFor(()=>search.capture.snapshot().includes('ACTIVITY 1'),'search must match a command target\n'+search.capture.snapshot().slice(0,1200));
     assert.ok(search.capture.snapshot().includes('pnpm'),'command search result must be visible');
   }finally{await search.close();}
   console.log('PASS activity search by Actor and command');
   const mouse=await mountDemo('connected',160,38);
   try{
     let linkedY=0;
+    const beforeHover=mouse.capture.raw.length;
     for(let row=7;row<=15;row++){
       mouse.input.write('\x1b[<35;49;'+row+'M');
       await sleep(75);
-      if(mouse.capture.snapshot().includes('Ctrl+点击文件名')){linkedY=row;break;}
+      if(mouse.capture.raw.slice(beforeHover).includes('\x1b[4m')){linkedY=row;break;}
     }
-    assert.ok(linkedY,'hovering a file path should show a Ctrl+click hint');
+    assert.ok(linkedY,'hovering a file path must underline the filename');
+    assert.ok(!mouse.capture.snapshot().includes('Ctrl+点击文件'),'help bar must omit file shortcut');
     mouse.input.write('\x1b[<16;49;'+linkedY+'M');
     await waitFor(()=>mouse.capture.snapshot().includes('文件不存在'),
       'Ctrl+click should validate file existence without shell execution');
     mouse.input.write('\x1b[<35;10;2M');
-    await waitFor(()=>!mouse.capture.snapshot().includes('Ctrl+点击文件名'),'link hover should clear on exit');
+    await sleep(90);
+    assert.ok(!mouse.capture.snapshot().includes('Ctrl+点击文件'),'shortcut is not part of help bar');
     console.log('PASS file hover, Ctrl+click path validation and hover reset');
   }finally{await mouse.close();}
 
@@ -325,7 +338,7 @@ try{
     // Focus the task pane and prove x/X only show confirmation; n/Esc cancel it.
     await controls.send('\t');
     await controls.send('x');
-    await waitFor(()=>controls.capture.snapshot().includes('停止 1 个进程'),'x asks before stopping one task');
+    await waitFor(()=>controls.capture.snapshot().includes('停止 1 个进程'),'x asks before stopping one task\n'+controls.capture.snapshot().slice(0,1500));
     await controls.send('n');
     await waitFor(()=>!controls.capture.snapshot().includes('停止 1 个进程'),'n cancels stop confirmation');
     assert.ok(controls.capture.snapshot().includes('BACKGROUND 2'),'cancelling x leaves both tasks running');

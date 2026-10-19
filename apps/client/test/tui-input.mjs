@@ -1,0 +1,27 @@
+import assert from 'node:assert/strict';
+import {PassThrough} from 'node:stream';
+import {TuiInputBridge,stripMouseControlText} from '../dist/tui-input.js';
+const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+const source=new PassThrough();source.isTTY=true;source.setRawMode=()=>source;
+const bridge=new TuiInputBridge(source),chars=[],mouse=[];
+bridge.keyboard.on('data',chunk=>chars.push(chunk.toString('utf8')));
+bridge.mouse.on('mouse',ev=>mouse.push(ev));
+source.write('Codex');
+source.write('\x1b[<35;59;3M\x1b[<35;60;3M\x1b[<0;4;3M');
+source.write(' 中国\x1b[A');
+source.write(Buffer.from('\x1b[<65;20;8M').subarray(0,7));
+source.write(Buffer.from('\x1b[<65;20;8M').subarray(7));
+source.write('\x1b');await sleep(60);
+assert.equal(chars.join(''),'Codex 中国\x1b[A\x1b',JSON.stringify(chars));
+assert.deepEqual(mouse.map(event=>event.kind),['move','move','press','wheel']);
+assert.equal(mouse.at(-1)?.direction,1);
+// A click is still dispatched when the CSI mouse sequence is split after ESC.
+source.write('\x1b');source.write('[<16;4;3M');
+assert.equal(mouse.at(-1)?.ctrl,true);
+source.write('[<literal>');
+await sleep(50);
+assert.ok(chars.join('').includes('[<literal>'),'ordinary literal punctuation must survive');
+assert.equal(stripMouseControlText('Codex[<35;59;3M[<35;60;3m pnpm'),'Codex pnpm');
+assert.equal(stripMouseControlText('normal text [<hello>'),'normal text [<hello>');
+bridge.dispose();source.destroy();
+console.log('PASS mouse CSI cannot enter editable keyboard stream; split CSI, Escape, UTF-8 and wheel preserved');

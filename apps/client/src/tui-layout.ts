@@ -66,9 +66,9 @@ export function dateDivider(value:number,now=Date.now()):string{
  return key+(key===today?' · 今天':key===dateKey(yesterday.getTime())?' · 昨天':'');
 }
 export type Column={key:'time'|'state'|'agent'|'tool'|'elapsed'|'action'|'result';title:string;width:number};
-export function tableColumns(width:number,timeWidth=9,resultTransfer=0):Column[]{
+export function tableColumns(width:number,timeWidth=9,actionTransfer=0):Column[]{
  const available=Math.max(1,width-2),columns:Column[]=[];
- const structuralWidth=available+Math.max(0,resultTransfer);
+ const structuralWidth=available+Math.max(0,actionTransfer);
  const add=(key:Column['key'],title:string,width:number)=>columns.push({key,title,width});
  if(structuralWidth>=54)add('time','TIME',Math.min(16,Math.max(9,timeWidth)));
  add('state','S',2);
@@ -77,10 +77,11 @@ export function tableColumns(width:number,timeWidth=9,resultTransfer=0):Column[]
  if(structuralWidth>=35)add('tool','TOOL',structuralWidth>=110?10:9);
  if(structuralWidth>=54)add('elapsed','DUR',6);
  const remaining=Math.max(1,available-columns.reduce((n,c)=>n+c.width,0));
- // Preserve ACTION exactly when columns are transferred from RESULT to DETAIL.
- const initialRemaining=remaining+Math.max(0,resultTransfer);
+ // Keep RESULT and structural columns stable. Extra DETAIL space comes
+ // exclusively from ACTION, which now omits redundant verbs.
+ const initialRemaining=remaining+Math.max(0,actionTransfer);
  const initialResult=initialRemaining>=28?Math.max(12,Math.floor(initialRemaining*.37)):0;
- const result=initialResult?Math.max(0,initialResult-Math.max(0,resultTransfer)):0;
+ const result=Math.min(initialResult,Math.max(0,remaining-1));
  add('action','ACTION',remaining-result);
  if(result)add('result','RESULT',result);
  return columns;
@@ -94,10 +95,11 @@ export function paneLayout(width:number,height:number,terminalHeight=height,time
  const sideBySide=width>=96&&width>terminalHeight;
  const activityHeight=sideBySide?height:Math.max(3,Math.floor((height-1)*.55));
  const originalActivityWidth=sideBySide?Math.max(1,Math.floor((width-1)*.72)):width;
- const originalResult=sideBySide?
-  (tableColumns(Math.max(1,originalActivityWidth-2),timeWidth).find(c=>c.key==='result')?.width??0):0;
- // Take at most four cells from RESULT, never from ACTION, preserving at least 10 RESULT cells.
- const detailGain=sideBySide?Math.min(4,Math.max(0,originalResult-10)):0;
+ const originalAction=sideBySide?
+  (tableColumns(Math.max(1,originalActivityWidth-2),timeWidth).find(c=>c.key==='action')?.width??0):0;
+ // Transfer only spare ACTION width; keep >=12 ACTION cells and never
+ // steal space from AGENT or RESULT.
+ const detailGain=sideBySide?Math.min(9,Math.round(width*.052),Math.max(0,originalAction-12)):0;
  const activityWidth=originalActivityWidth-detailGain;
  return {sideBySide,activityWidth,detailWidth:sideBySide?Math.max(1,width-1-activityWidth):width,
   activityHeight,detailHeight:sideBySide?height:Math.max(1,height-1-activityHeight),detailGain};
