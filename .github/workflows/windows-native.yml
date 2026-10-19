@@ -11,12 +11,18 @@ on:
       - 'package.json'
       - 'pnpm-lock.yaml'
       - 'pnpm-workspace.yaml'
+      - 'scripts/**'
+      - 'README.md'
+      - 'CHANGELOG.md'
   pull_request:
     paths:
       - 'apps/client/**'
       - 'apps/server/**'
       - 'packages/**'
       - '.github/workflows/windows-native.yml'
+      - 'scripts/**'
+      - 'README.md'
+      - 'CHANGELOG.md'
 
 jobs:
   cross-build:
