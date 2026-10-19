@@ -776,30 +776,113 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
   const stopped=results.filter(r=>r.status==='fulfilled'&&r.value?.stopped===true).length;
   setNotice('已发送停止信号 '+stopped+'/'+ids.length+(stopped<ids.length?' · 其余任务已结束或停止失败':''));
  };
+ const executeSlash=(raw:string):boolean=>{
+  const parsed=parseCommand(raw);
+  if('error' in parsed){setNotice(parsed.error);return false;}
+  const {id,args,value}=parsed;
+  if(id==='help'){setNotice('命令：/config · /tasks · /latest · /stop · /view · /copy · /quit');return true;}
+  if(id==='quit'){exit();return true;}
+  if(id==='tasks'){
+   if(tasks.length){setFocus('tasks');setDetailTask(true);resetDetail();}
+   else setNotice('当前没有后台任务');
+   return true;
+  }
+  if(id==='latest'){setSelectedId(null);setFocus('activity');setDetailTask(false);resetDetail();return true;}
+  if(id==='stop'){
+   const ids=args[0]==='all'?[...new Set((status?.active??[]).map(t=>t.id))]:
+    (()=>{
+     const current=focus==='tasks'?task?.id:entry?.id;
+     return current&&(status?.active??[]).some(t=>t.id===current)?[current]:[];
+    })();
+   if(ids.length)setConfirm(ids);else setNotice('没有可停止的运行中进程');
+   return true;
+  }
+  if(id==='view'){
+   if(!entry){setNotice('请先选择活动记录');return true;}
+   const mode=args[0]==='output'?
+     ['exec_foreground','exec_background'].includes(entry.tool)?'stdout':'result':
+     args[0]==='stderr'?'stderr':args[0]==='input'?'input':'summary';
+   if(mode==='stderr'&&!['exec_foreground','exec_background'].includes(entry.tool)){
+    setNotice('此工具没有 stderr，请使用 /view output');return true;
+   }
+   setInspectorTab(mode);setFocus('detail');setDetailScroll(0);
+   if(selected&&selectedId===null)setSelectedId(selected.id);
+   return true;
+  }
+  if(id==='copy'){
+   const content=inspectorCopyText(inspectorTab,entry,inspectorSource,model?.command||model?.target||'');
+   if(!content){setNotice('当前视图没有可复制内容');return true;}
+   if(demo){setNotice('DEMO · 复制 '+content.length+' 字符');return true;}
+   void copyText(content).then(()=>setNotice('已复制 '+content.length+' 字符'))
+    .catch(error=>setNotice('复制失败：'+String(error)));
+   return true;
+  }
+  if(id==='config'){
+   const key=args[0]!;
+   if(!value){
+    if(demo){setNotice(key+' = '+(key==='name'?status?.deviceName:status?.server));return true;}
+    void requestIpc({action:'config-get'},3000).then(c=>{
+     setSettings(c);
+     setNotice(key+' = '+String(c[key]??'未配置')+(key==='url'&&c.pending?' · 待重新授权后切换':''));
+    }).catch(error=>setNotice('配置读取失败：'+String(error)));
+    return true;
+   }
+   if(demo){
+    setSettings(prev=>({...prev,[key]:value}));
+    setDemoStatus(prev=>prev?{...prev,...(key==='name'?{deviceName:value}:{server:value})}:prev);
+    setNotice('DEMO · 已设置 '+key+' = '+value);return true;
+   }
+   void requestIpc({action:'config-set',key,value},18000).then(c=>{
+    setSettings(prev=>({...prev,...c}));
+    if(key==='name')setNotice('设备名称已同步：'+c.name);
+    else setNotice(c.pending?'新 URL 已暂存，当前连接不变；运行 deskbeacon setup --url '+c.url+' 重新授权后切换':
+      'URL 未改变：'+c.url);
+   }).catch(error=>setNotice('设置 '+key+' 失败：'+String(error)));
+   return true;
+  }
+  return false;
+ };
  useInput((input,key)=>{
   if(key.ctrl&&input==='c'){
    if(Date.now()-exitArmedAt<2500){exit();return;}
    setExitArmedAt(Date.now());setNotice('再次按 Ctrl+C 退出 · 2 秒内有效');return;
   }
   if(edit){
-   if(key.escape){setEdit(null);setText('');return;}
-   if(key.return){
-    const value=text.trim(),kind=edit;setEdit(null);setText('');
-    if(kind==='search'){setQuery(value);setSelectedId(null);setDetailTask(false);setFocus('activity');resetDetail();return;}
-    if(value==='help'){setNotice(globalShortcuts(w));return;}
-    if(value==='config'){setView('config');setFocus('detail');setDetailScroll(0);return;}
-    if(value==='tasks'){
-     if(tasks.length){setFocus('tasks');setDetailTask(true);resetDetail();}
-     else setNotice('当前没有后台任务');
+   if(key.escape){setEdit(null);setText('');setCommandIndex(0);return;}
+   if(edit==='command'){
+    if(key.upArrow||key.downArrow){
+     const direction=key.upArrow?-1:1;
+     setCommandIndex(i=>Math.max(0,Math.min(commandOptions.length-1,i+direction)));
      return;
     }
-    if(value==='clear'){setQuery('');setSelectedId(null);return;}
-    if(value==='quit'||value==='exit'){exit();return;}
-    setNotice('命令：config · tasks · clear · quit');return;
+    if(key.tab||input===' '){
+     const candidate=commandOptions[commandSelect];
+     if(candidate?.selectable&&!text.endsWith(' ')&&candidate.insert.startsWith(text)){
+      setText(candidate.insert);setCommandIndex(0);
+     }else if(input===' '){setText(prev=>prev+' ');setCommandIndex(0);}
+     return;
+    }
+    if(key.return){
+     const candidate=commandOptions[commandSelect];
+     const partial=commandMenu?.stage!=='value'&&candidate?.selectable&&
+       candidate.insert.trim().startsWith(text.trim())&&candidate.insert.trim()!==text.trim();
+     const next=partial?candidate.insert.trim():text.trim();
+     if(executeSlash(next)){setEdit(null);setText('');setCommandIndex(0);}
+     else if(partial){setText(candidate!.insert);setCommandIndex(0);}
+     return;
+    }
+    if(key.backspace||key.delete){
+     setText(prev=>prev.length>1?Array.from(prev).slice(0,-1).join(''):'/');setCommandIndex(0);return;
+    }
+    if(input&&!key.ctrl&&!key.meta){
+     setText(prev=>stripMouseControlText(prev+oneLine(input)).slice(0,1024));setCommandIndex(0);
+    }
+    return;
    }
-   if(key.backspace||key.delete){setText(s=>Array.from(s).slice(0,-1).join(''));return;}
-   if(input&&!key.ctrl&&!key.meta)
-    setText(s=>stripMouseControlText(s+oneLine(input)).slice(0,256));
+   if(key.return){const value=text.trim();setEdit(null);setText('');setQuery(value);
+    setSelectedId(null);setDetailTask(false);setFocus('activity');resetDetail();return;}
+   if(key.backspace||key.delete){setText(prev=>Array.from(prev).slice(0,-1).join(''));return;}
+   if(input&&!key.ctrl&&!key.meta)setText(prev=>stripMouseControlText(prev+oneLine(input)).slice(0,256));
    return;
   }
   if(confirm){
@@ -817,7 +900,7 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
    setDemoStatus(prev=>prev?advanceDemo(prev,input):prev);setNotice('DEMO · 场景 '+input);return;
   }
   if(input==='s'||input==='S'){setEdit('search');setText(query);setNotice('');return;}
-  if(input==='/'||input===':'||input==='>'){setEdit('command');setText('');setNotice('');return;}
+  if(input==='/'){setEdit('command');setText('/');setCommandIndex(0);setNotice('');return;}
   if(input==='?'){setNotice(globalShortcuts(w));return;}
   if(key.tab){
    const order:Focus[]=tasks.length?['activity','detail','tasks']:['activity','detail'];
