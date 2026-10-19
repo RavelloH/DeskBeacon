@@ -6,6 +6,8 @@ import {join} from 'node:path';
 import {outputEncoding,decodeOutputText,decodeOutputPage,windowsLegacyEncoding,detectFileOutputEncoding} from '../dist/output-encoding.js';
 import {TaskSupervisor} from '../dist/process.js';
 
+// Test a GBK-emitting Windows program even on English-locale CI runners.
+if(process.platform==='win32')process.env.DESKBEACON_OEM_ENCODING='gb18030';
 const cp936=Buffer.from('d5fdd4da2050696e67203132372e302e302e3120bedfd3d020333220d7d6bddab5c4cafdbedd3a','hex');
 const chinese='正在 Ping 127.0.0.1 具有 32 字节的数据:';
 assert.equal(new TextDecoder('gb18030').decode(cp936),chinese);

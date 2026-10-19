@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const fixture=await mkdtemp(join(tmpdir(),'deskbeacon-output-paging-'));
+// Explicit Chinese OEM fixture; hosted Windows runners may use CP437 or 65001.
+if(process.platform==='win32')process.env.DESKBEACON_OEM_ENCODING='gb18030';
 process.env.DESKBEACON_DATA_DIR=join(fixture,'data');
 process.env.DESKBEACON_IPC_PATH=process.platform==='win32'
   ? `\\\\.\\pipe\\deskbeacon-output-paging-${process.pid}`
