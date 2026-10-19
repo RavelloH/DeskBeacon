@@ -44,7 +44,7 @@ writeFileSync(join(base,'package.json'),JSON.stringify(pkg,null,2)+'\n');
 writeFileSync(join(base,'launcher.js'),
  '#!/usr/bin/env node\nif(!process.env.NODE_ENV)process.env.NODE_ENV="production";\nawait import("./cli.js");\n',
  {mode:0o755});
-for(const name of ['README.md','LICENSE']){
+for(const name of ['README.md','LICENSE','CHANGELOG.md']){
  const original=join(root,name);if(existsSync(original))copyFileSync(original,join(base,name));
 }
 const bundled=readFileSync(join(base,'cli.js'),'utf8');
