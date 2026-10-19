@@ -109,7 +109,7 @@ export async function handleAuthorize(request: Request, env: Env, oauth: OAuthHe
 		const client = await oauth.lookupClient(approved.request.clientId);
 		const actorName = normalizeActorName(client?.clientName);
 		const props: GrantProps = scope === DEVICE_SCOPE
-		  ? { kind: "device", ownerId: "owner", deviceId: approved.request.clientId, deviceName: client?.clientName ?? "DeskBeacon device" }
+		  ? { kind: "device", ownerId: "owner", deviceId: approved.request.clientId }
 		  : { kind: "agent", ownerId: "owner", grantId: crypto.randomUUID(), ...(actorName ? { actorName } : {}) };
 		const { redirectTo } = await oauth.completeAuthorization({
 			request: approved.request,

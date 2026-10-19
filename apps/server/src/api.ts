@@ -149,17 +149,25 @@ export async function handleApiRequest(request: Request, env: Env, ctx: ApiCtx, 
   if (pathname === "/device/connect") {
     if (props?.kind !== "device" || !scopes.includes(scopeDevice)) return Response.json({ error: "FORBIDDEN" }, { status: 403 });
     if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") return Response.json({ error: "WebSocket required" }, { status: 426 });
+    // KV is the source of truth for the user-defined device label.
+    // OAuth grant metadata is only a fallback for devices paired before this registry existed.
+    const key = "device:" + props.deviceId;
+    const existing = await env.OAUTH_KV.get(key, "json") as DeviceRecord | null;
     const record: DeviceRecord = {
-      deviceId: props.deviceId, label: props.deviceName, lastSeenAt: new Date().toISOString(),
+      ...existing,
+      deviceId: props.deviceId,
+      label: existing?.label || props.deviceName || (await oauth.lookupClient(props.deviceId))?.clientName || "DeskBeacon device",
+      lastSeenAt: new Date().toISOString(),
       state: "unknown",
     };
-    await env.OAUTH_KV.put("device:" + props.deviceId, JSON.stringify(record));
+    await env.OAUTH_KV.put(key, JSON.stringify(record));
     const stub = env.DEVICE_SESSIONS.get(env.DEVICE_SESSIONS.idFromName(props.deviceId));
-    return stub.fetch(new Request("https://device.internal/connect", { headers: { upgrade: "websocket" } }));
+    return stub.fetch(new Request("https://device.internal/connect", { headers: { upgrade: "websocket", "x-device-id": props.deviceId } }));
   }
   if (pathname === "/device/info") {
     if (props?.kind !== "device" || !scopes.includes(scopeDevice)) return Response.json({ error: "FORBIDDEN" }, { status: 403 });
-    return Response.json({ deviceId: props.deviceId, protocolVersion: 1, label: props.deviceName });
+    const record = await env.OAUTH_KV.get("device:" + props.deviceId, "json") as DeviceRecord | null;
+    return Response.json({ deviceId: props.deviceId, protocolVersion: 1, label: record?.label ?? props.deviceName ?? (await oauth.lookupClient(props.deviceId))?.clientName ?? "DeskBeacon device" });
   }
   return new Response("Not found", { status: 404 });
 }

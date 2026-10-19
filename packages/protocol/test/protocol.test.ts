@@ -31,6 +31,17 @@ describe('protocol schemas', () => {
     expect(ProtocolMessageSchema.parse(JSON.parse(JSON.stringify(message)))).toEqual(message);
   });
 
+  it('validates device-initiated rename and server acknowledgment', () => {
+    const base = {version:PROTOCOL_VERSION,deviceId:'device-1',connectionEpoch:2,messageId:'rename-1'};
+    const rename = {...base,type:'device.rename',payload:{name:'My workstation'}};
+    expect(ProtocolMessageSchema.parse(rename)).toEqual(rename);
+    expect(ProtocolMessageSchema.safeParse({...rename,payload:{name:'  '}}).success).toBe(false);
+    expect(ProtocolMessageSchema.safeParse({...rename,payload:{name:'a'.repeat(129)}}).success).toBe(false);
+    expect(ProtocolMessageSchema.safeParse({...rename,payload:{name:'Valid',deviceId:'other'}}).success).toBe(false);
+    expect(ProtocolMessageSchema.parse({...base,type:'device.name.updated',payload:{name:'My workstation',inReplyTo:'rename-1'}})).toBeDefined();
+    expect(ProtocolMessageSchema.parse({...base,type:'device.ready',payload:{ready:true,deviceName:'My workstation'}})).toBeDefined();
+  });
+
   it('fails closed for unknown versions and message types', () => {
     const message = {
       version: 2,

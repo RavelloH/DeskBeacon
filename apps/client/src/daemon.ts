@@ -39,6 +39,7 @@ export class ClientDaemon extends EventEmitter {
   private epoch=0;
   private ready=false;
   private state='disconnected';
+  private renamePending=new Map<string,{resolve:(name:string)=>void;reject:(error:Error)=>void;timer:ReturnType<typeof setTimeout>}>();
   readonly db:DatabaseSync;
   readonly supervisor:TaskSupervisor;
   private workspaces=new Map<string,{cwd:string;version:number;shellProfile:string}>();
@@ -150,6 +151,32 @@ export class ClientDaemon extends EventEmitter {
     this.db.prepare('INSERT INTO connection_events(time,kind,detail) VALUES(?,?,?)').run(Date.now(),kind,detail.slice(0,160));
     this.db.exec('DELETE FROM connection_events WHERE id NOT IN (SELECT id FROM connection_events ORDER BY id DESC LIMIT 250)');
   }
+  private persistDeviceName(name:string){
+    if(this.config.deviceName===name)return;
+    this.config.deviceName=name;
+    if(existsSync(configPath)){
+      const saved=loadConfig();
+      if(saved.clientId===this.config.clientId)saveConfig({...saved,deviceName:name});
+    }
+    this.emit('change');
+  }
+  async rename(name:string):Promise<string>{
+    const normalized=name.trim();
+    if(!normalized||normalized.length>128||/[\u0000-\u001f\u007f]/u.test(normalized))
+      throw Error('Device name must be 1-128 characters without control characters');
+    if(!this.ready||this.ws?.readyState!==WebSocket.OPEN)throw Error('DEVICE_OFFLINE: start DeskBeacon and wait for a connected Runtime');
+    const messageId=this.send({type:'device.rename',payload:{name:normalized}});
+    return await new Promise<string>((resolve,reject)=>{
+      const timer=setTimeout(()=>{this.renamePending.delete(messageId);reject(Error('DEVICE_RENAME_TIMEOUT'));},12_000);
+      this.renamePending.set(messageId,{resolve,reject,timer});
+    });
+  }
+  private cancelRenames(reason:string){
+    for(const pending of this.renamePending.values()){
+      clearTimeout(pending.timer);pending.reject(Error(reason));
+    }
+    this.renamePending.clear();
+  }
   private scheduleReconnect(){
     if(this.stopped||this.reconnectTimer)return;
     const delay=this.reconnectDelayMs;
@@ -223,7 +250,10 @@ export class ClientDaemon extends EventEmitter {
       const pongAge=this.lastHeartbeatAt===null?'never':String(Date.now()-this.lastHeartbeatAt)+'ms';
       this.recordConnection('websocket_closed','code='+code+' age='+age+'ms pongAge='+pongAge+' awaiting='+this.heartbeatAwaiting+' misses='+this.heartbeatMisses+' reason='+reason.toString());
       console.error('DeskBeacon WebSocket closed:',code,reason.toString());this.ready=false;this.state='disconnected';
+      this.cancelRenames('DEVICE_DISCONNECTED');
       this.heartbeatAwaiting=false;this.latencyMs=null;this.emit('change');
+      // shutdown() closes the socket asynchronously; never create a new 60s timer afterward.
+      if(this.stopped)return;
       if(this.disconnectTimer)clearTimeout(this.disconnectTimer);
       this.disconnectTimer=setTimeout(()=>{
         if(this.ready||this.stopped)return;
@@ -242,6 +272,7 @@ export class ClientDaemon extends EventEmitter {
   }
   stop(){
     if(this.stopped)return;
+    this.cancelRenames('DEVICE_STOPPED');
     this.stopped=true;
     if(this.disconnectTimer)clearTimeout(this.disconnectTimer);
     if(this.keepaliveTimer)clearInterval(this.keepaliveTimer);
@@ -251,6 +282,7 @@ export class ClientDaemon extends EventEmitter {
   }
   async shutdown(){
     if(this.stopped)return;
+    this.cancelRenames('DEVICE_STOPPED');
     this.stopped=true;
     if(this.disconnectTimer)clearTimeout(this.disconnectTimer);
     if(this.keepaliveTimer)clearInterval(this.keepaliveTimer);
@@ -310,6 +342,7 @@ export class ClientDaemon extends EventEmitter {
     const m=msg.data;
     if(m.type==='device.ready'){
       this.epoch=m.connectionEpoch;this.ready=true;
+      if(m.payload.deviceName)this.persistDeviceName(m.payload.deviceName);
       this.recordConnection('device_ready','epoch='+this.epoch);
       this.state='connected';this.emit('change');
       if(this.handshakeTimer){clearTimeout(this.handshakeTimer);this.handshakeTimer=undefined;}
@@ -325,6 +358,16 @@ export class ClientDaemon extends EventEmitter {
       return;
     }
     if(m.connectionEpoch!==this.epoch)return;
+    if(m.type==='device.name.updated'){
+      const pending=this.renamePending.get(m.payload.inReplyTo);
+      if(pending){
+        clearTimeout(pending.timer);
+        this.renamePending.delete(m.payload.inReplyTo);
+        this.persistDeviceName(m.payload.name);
+        pending.resolve(m.payload.name);
+      }
+      return;
+    }
     if(m.type==='control.ack'){
       const id=this.resultAckIds.get(m.payload.inReplyTo);
       if(id){this.resultAckIds.delete(m.payload.inReplyTo);this.db.prepare('DELETE FROM unacked_results WHERE operation_id=?').run(id);}

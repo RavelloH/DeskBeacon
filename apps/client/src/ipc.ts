@@ -209,6 +209,7 @@ export function startIpc(daemon:ClientDaemon){
              return;
            }
            if(request.action==='status')result=await daemon.status();
+           else if(request.action==='rename')result={name:await daemon.rename(String(request.name??''))};
            else if(request.action==='activity-list')result=daemon.activityList({
              cursor:request.cursor,query:request.query,limit:request.limit,watchIds:request.watchIds
            });

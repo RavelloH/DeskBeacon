@@ -157,6 +157,7 @@ const usage=()=>{
   '  (no command)            Open full-screen DeskBeacon. Own the Runtime unless',
   '                          an existing background service is running.',
   '  setup [--url URL]       Pair this device using OAuth (prompts for URL).',
+  '  rename NAME             Rename this device and sync with the server.',
   '  demo [scenario]        Offline, interactive TUI preview (for development).',
   '  --title NAME           Terminal window title (also DESKBEACON_TITLE env).',
   '  service start           Start the Runtime in the background (no TUI).',
@@ -202,6 +203,25 @@ async function main(){
  if(action==='setup'){
    const index=args.indexOf('--url');
    await setup(index>=0&&args[index+1]?args[index+1]!:await promptUrl());
+   return;
+ }
+ if(action==='rename'){
+   const name=args.join(' ').trim();
+   if(!name)throw Error('Usage: deskbeacon rename <new name>');
+   if(!existsSync(configPath))throw Error('DEVICE_NOT_CONFIGURED: run deskbeacon setup first');
+   const running=await currentRuntime(1500);
+   if(running){
+     const result=await requestIpc({action:'rename',name},16_000) as {name:string};
+     console.log('Device renamed to '+result.name);
+     return;
+   }
+   // A short-lived Runtime lets rename work without a foreground TUI or service.
+   const instance=new ClientDaemon(loadConfig());
+   try{
+     await instance.connect();
+     for(let i=0;i<100 && (await instance.status()).state!=='connected';i++)await sleep(120);
+     console.log('Device renamed to '+await instance.rename(name));
+   }finally{await instance.shutdown();}
    return;
  }
  if(action==='status'||(action==='service'&&args[0]==='status')){

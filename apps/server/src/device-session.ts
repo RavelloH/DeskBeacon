@@ -1,6 +1,6 @@
 ﻿import { DurableObject } from "cloudflare:workers";
 import { LIMITS, PROTOCOL_VERSION, ProtocolMessageSchema, type ProtocolMessage } from "@deskbeacon/protocol";
-import type { Env } from "./env.js";
+import type { Env, DeviceRecord } from "./env.js";
 
 type Waiter = {
   resolve:(value:Record<string,unknown>)=>void;
@@ -108,6 +108,9 @@ export class DeviceSession extends DurableObject<Env> {
     const pathname = new URL(request.url).pathname;
     if (pathname === "/connect") {
       if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") return json(failure("INVALID_INPUT","Expected WebSocket upgrade"),426);
+      const deviceId = request.headers.get("x-device-id");
+      if (!deviceId || deviceId.length > 128) return json(failure("INVALID_INPUT","Missing authenticated device ID"),400);
+      const record = await this.env.OAUTH_KV.get("device:" + deviceId,"json") as DeviceRecord | null;
       const pair = new WebSocketPair();
       const client=pair[0]!;
       const server=pair[1]!;
@@ -125,10 +128,10 @@ export class DeviceSession extends DurableObject<Env> {
       }
       for(const old of this.ctx.getWebSockets()) if(old.readyState===WebSocket.OPEN) old.close(4001,"reconnected");
       this.ctx.storage.sql.exec("INSERT INTO state(key,value) VALUES('epoch',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", String(next));
-      server.serializeAttachment({ epoch:next });
+      server.serializeAttachment({ epoch:next, deviceId });
       this.ctx.acceptWebSocket(server);
       server.send(JSON.stringify({ version:PROTOCOL_VERSION, type:"device.ready", messageId:crypto.randomUUID(),
-        deviceId:"self", connectionEpoch:next, payload:{ready:true} }));
+        deviceId:"self", connectionEpoch:next, payload:{ready:true,...(record?.label?{deviceName:record.label}:{})} }));
       // Reconnection itself is the only retry trigger; no background polling or Alarm.
       for(const notify of [...this.socketWaiters])notify(server);
       for(const [id,pending] of this.pendingDispatches){
@@ -331,7 +334,7 @@ export class DeviceSession extends DurableObject<Env> {
   }
 
   async webSocketMessage(ws:WebSocket, raw:string|ArrayBuffer) {
-    const attachment=ws.deserializeAttachment() as {epoch:number}|null;
+    const attachment=ws.deserializeAttachment() as {epoch:number;deviceId?:string}|null;
     if(!attachment || attachment.epoch!==this.epoch()) {ws.close(4001,"stale device connection");return;}
     // File bytes are NEVER persisted; unsupported binary data must not be echoed into text tables.
     if(typeof raw!=="string") return;
@@ -339,7 +342,23 @@ export class DeviceSession extends DurableObject<Env> {
     let msg:ProtocolMessage;
     try {msg=ProtocolMessageSchema.parse(JSON.parse(raw));} catch{return;}
     if(msg.connectionEpoch!==attachment.epoch) return;
+    if(msg.deviceId!==attachment.deviceId){ws.close(1008,"device ID mismatch");return;}
     if(msg.type==="device.hello") return;
+    if(msg.type==="device.rename"){
+      const name=msg.payload.name.trim();
+      const key="device:"+attachment.deviceId;
+      const existing=await this.env.OAUTH_KV.get(key,"json") as DeviceRecord|null;
+      const record:DeviceRecord={
+        ...existing,deviceId:attachment.deviceId!,label:name,
+        lastSeenAt:existing?.lastSeenAt??new Date().toISOString(),
+        state:existing?.state??"unknown",
+      };
+      await this.env.OAUTH_KV.put(key,JSON.stringify(record));
+      ws.send(JSON.stringify({version:PROTOCOL_VERSION,type:"device.name.updated",
+        messageId:crypto.randomUUID(),deviceId:"self",connectionEpoch:attachment.epoch,
+        payload:{name,inReplyTo:msg.messageId}}));
+      return;
+    }
     if(msg.type==="operation.accepted") {
       this.pendingDispatches.delete(msg.operationId);
       this.ctx.storage.sql.exec("UPDATE ops SET status='accepted',accepted_at=COALESCE(accepted_at,?) WHERE id=? AND status IN ('dispatched','accepted')",Date.now(),msg.operationId);return;
