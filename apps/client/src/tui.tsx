@@ -14,6 +14,7 @@ import {ACTIVITY_PAGE_SIZE, sortActivityRows, compatibleDayStats, type ActivityP
 import {createDemoStatus, advanceDemo, demoHelp, type DemoScenario, type DemoStatus} from './demo.js';
 import {cellWidth, fit, oneLine, paneLayout, tableColumns, detailScrollStatus, wrapLines, rightFit, activityTime, dateDivider, dateKey, type Column} from './tui-layout.js';
 import {copyText} from './clipboard.js';
+import {commandPalette,parseCommand} from './command-palette.js';
 
 type Task={id:string;description:string;start:number;kind:'foreground'|'background';
  actorName?:string|null;grantId?:string;requestJson?:string|null;cwd?:string|null};
@@ -325,6 +326,20 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
  const [view,setView]=useState<'main'|'help'|'config'>('main');
  const [edit,setEdit]=useState<'command'|'search'|null>(null);
  const [text,setText]=useState(''),[query,setQuery]=useState('');
+ const [commandIndex,setCommandIndex]=useState(0);
+ const [settings,setSettings]=useState<{name?:string;url?:string;pending?:boolean;activeUrl?:string}>({});
+ const commandMenu=edit==='command'?commandPalette(text,{
+   name:settings.name??status?.deviceName,url:settings.url??status?.server}):null;
+ const commandOptions=commandMenu?.items??[];
+ const commandSelect=Math.min(commandIndex,Math.max(0,commandOptions.length-1));
+ useEffect(()=>{
+  if(edit!=='command')return;
+  if(demo){setSettings({name:status?.deviceName,url:status?.server});return;}
+  let alive=true;
+  void requestIpc({action:'config-get'},2500).then(result=>{if(alive)setSettings(result);})
+   .catch(error=>{if(alive)setNotice('读取配置失败：'+String(error));});
+  return()=>{alive=false;};
+ },[edit,demo]);
  const [notice,setNotice]=useState('');
  const [hoverLinkId,setHoverLinkId]=useState<string|null>(null);
  const [exitArmedAt,setExitArmedAt]=useState(0);
@@ -501,7 +516,10 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
  const footerRows=wideFooter?1:2;
  const taskSlots=Math.min(tasks.length,h>=22?3:h>=16?2:1);
  const taskHeight=1+(tasks.length?taskSlots:0);
- const bodyHeight=Math.max(1,h-4-taskHeight-footerRows);
+ const visibleOptions=Math.max(1,Math.min(8,h-4-taskHeight-footerRows-8));
+ const paletteCount=Math.min(visibleOptions,Math.max(1,commandOptions.length));
+ const commandPanelHeight=edit==='command'?paletteCount+2:0;
+ const bodyHeight=Math.max(1,h-4-taskHeight-footerRows-commandPanelHeight);
  // TIME labels only change when the activity list changes or local midnight passes.
  // A 2200-row scan takes ~118ms, so never repeat it for each status/clock update.
  const localDay=dateKey(tick);
