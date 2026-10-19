@@ -69,6 +69,26 @@ try{
   await expectIpcError({action:'output',operationId,stream:'stdout',maxBytes:0},'INVALID_OUTPUT_BUDGET');
   await expectIpcError({action:'output',operationId,stream:'stdout',maxBytes:64*1024+1},'INVALID_OUTPUT_BUDGET');
   console.log('PASS local output paging, UTF-8 boundaries, budgets, EOF and input validation');
+  if(process.platform==='win32'){
+   // Real CP936 bytes captured from Windows ping.exe; preserve the original
+   // historical .out file while decoding text for the TUI and Inspector.
+   const raw=Buffer.from('d5fdd4da2050696e67203132372e302e302e3120bedfd3d020333220d7d6bddab5c4cafdbedd3a','hex');
+   const expected='正在 Ping 127.0.0.1 具有 32 字节的数据:';
+   const legacyId='cp936-legacy-ping-fixture',legacyFile=join(outputDir,legacyId+'.out');
+   await writeFile(legacyFile,raw);
+   let cursor=0,combined='',rounds=0;
+   while(cursor<raw.length){
+    const page=await requestIpc({action:'output',operationId:legacyId,stream:'stdout',byteOffset:cursor,maxBytes:3});
+    assert.equal(page.encoding,'gb18030');
+    assert.ok(page.nextOffset>cursor,'CP936 page cursor must advance by input bytes');
+    combined+=page.text;cursor=page.nextOffset;
+    assert.ok(++rounds<raw.length,'CP936 output paging must terminate');
+   }
+   assert.equal(combined,expected,'the historical Chinese ping log must decode without mojibake');
+   assert.equal(cursor,raw.length,'last GBK page must end on the exact raw EOF');
+   console.log('PASS legacy CP936 local IPC reads original bytes with safe pagination');
+  }
+
 
   const grantId='trusted-actor-fixture';
   for(const [id,actorName] of [['old-null',null],['old-empty',''],['old-generic','Agent'],['other-grant',null]]){

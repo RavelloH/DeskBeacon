@@ -5,6 +5,7 @@ import { existsSync, rmSync, chmodSync, readdirSync, openSync, closeSync, readSy
   mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import type { ClientDaemon } from './daemon.js';
 import { dataDir } from './daemon.js';
+import {detectFileOutputEncoding,decodeOutputPage} from './output-encoding.js';
 export const ipcPath=process.env.DESKBEACON_IPC_PATH ?? (platform()==='win32'?'\\\\.\\pipe\\deskbeacon-'+process.env.USERNAME:
   join(dataDir,'daemon.sock'));
 
@@ -49,6 +50,21 @@ function outputPage(operationId:unknown,stream:unknown,byteOffset:unknown,maxByt
  const totalBytes=statSync(path).size;
  if(offset>totalBytes)throw Error('INVALID_BYTE_OFFSET');
  if(offset===totalBytes)return{text:'',nextOffset:offset,totalBytes,hasMore:false,stream};
+ // Historical Windows programs may emit raw OEM bytes (e.g. CP936/GBK).
+ // Preserve the original log on disk, decode it for IPC/TUI using byte
+ // cursors and a character-boundary-aware legacy-codepage decoder.
+ if(stream!=='input'){
+  const encoding=detectFileOutputEncoding(path,offset);
+  if(encoding!=='utf-8'){
+   const length=Math.min(totalBytes-offset,budget+3);
+   const bytes=Buffer.allocUnsafe(length),fd=openSync(path,'r');
+   try{readSync(fd,bytes,0,length,offset);}finally{closeSync(fd);}
+   const page=decodeOutputPage(bytes,budget,encoding);
+   if(page.used===0&&length>0)throw Error('INVALID_OUTPUT_ENCODING_BOUNDARY');
+   const nextOffset=offset+page.used;
+   return{text:page.text,nextOffset,totalBytes,hasMore:nextOffset<totalBytes,stream,encoding};
+  }
+ }
 
  // A caller-supplied cursor must point between UTF-8 code points. Cursors
  // returned below always do; reject hand-crafted offsets into a multibyte

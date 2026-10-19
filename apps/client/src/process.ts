@@ -1,5 +1,5 @@
 import { execFile, spawnSync } from 'node:child_process';
-import { StringDecoder } from 'node:string_decoder';
+import {decodeOutputText,detectFileOutputEncoding,decodeOutputPage} from './output-encoding.js';
 import spawn from 'cross-spawn';
 import {normalizeProcessStderr,errorSummary} from './terminal-errors.js';
 import { mkdirSync, createWriteStream, existsSync, openSync, closeSync, readSync, statSync } from 'node:fs';
@@ -101,7 +101,9 @@ export class TaskSupervisor{
    const outFile=createWriteStream(task.out),errFile=createWriteStream(task.err);
    let stdout='',stderr='',outputBytes=0,timedOut=false,outputLimitReached=false,spawnError='';
    let stdoutWritten=0,stderrWritten=0;
-   const decoders={stdout:new StringDecoder('utf8'),stderr:new StringDecoder('utf8')};
+   // Keep original bytes on disk. Decode once per completed foreground stream
+   // so OEM multibyte characters split between data events remain intact.
+   const chunks:{stdout:Buffer[];stderr:Buffer[]}={stdout:[],stderr:[]};
    const handle=(stream:'stdout'|'stderr',data:Buffer)=>{
      const prior=outputBytes;outputBytes+=data.byteLength;
      if(outputBytes>outputLimit&&fg&&!outputLimitReached){outputLimitReached=true;void stopTree(child,jobManaged);}
@@ -114,10 +116,9 @@ export class TaskSupervisor{
          this.db.prepare('UPDATE background SET '+(isOut?'stdout_truncated':'stderr_truncated')+'=1 WHERE id=?').run(id);
        }
      }
-     // A UTF-8 character can straddle stdout/stderr data events.
-     const text=decoders[stream].write(recorded);
-     if(isOut){if(stdout.length<outputLimit)stdout+=text.slice(0,outputLimit-stdout.length);if(recorded.length)outFile.write(recorded);}
-     else{if(stderr.length<outputLimit)stderr+=text.slice(0,outputLimit-stderr.length);if(recorded.length)errFile.write(recorded);}
+     if(fg&&recorded.length)chunks[stream].push(recorded);
+     if(isOut){if(recorded.length)outFile.write(recorded);}
+     else{if(recorded.length)errFile.write(recorded);}
    };
    child.stdout.on('data',(c:Buffer)=>handle('stdout',c));
    child.stderr.on('data',(c:Buffer)=>handle('stderr',c));
@@ -146,7 +147,8 @@ export class TaskSupervisor{
      return {backgroundTaskId:id,pid:child.pid??null,description,status:'running',cwd:p.cwd,program:p.exe};
    }
    const code=await new Promise<number|null>(resolve=>child.once('close',(code)=>resolve(code)));
-   stdout+=decoders.stdout.end();stderr+=decoders.stderr.end();
+   stdout=decodeOutputText(Buffer.concat(chunks.stdout));
+   stderr=decodeOutputText(Buffer.concat(chunks.stderr));
    if(timeout)clearTimeout(timeout);
    outFile.end();errFile.end();this.fg.delete(id);this.onChange();
    const readableStderr=normalizeProcessStderr(stderr);
@@ -177,7 +179,9 @@ export class TaskSupervisor{
      if(!length)continue;
      const buffer=Buffer.alloc(length),fd=openSync(path,'r');
      try{readSync(fd,buffer,0,length,info.size-length);}finally{closeSync(fd);}
-     const lines=buffer.toString('utf8').replace(/\r\n?/g,'\n').split('\n').filter(line=>line.trim().length>0);
+     const encoding=detectFileOutputEncoding(path,Math.max(0,info.size-length));
+     const lines=new TextDecoder(encoding).decode(buffer).replace(/\r\n?/g,'\n')
+       .split('\n').filter(line=>line.trim().length>0);
      const line=lines[lines.length-1]??'';
      if(line&&info.mtimeMs>=latest.mtime)latest={mtime:info.mtimeMs,line};
    }catch{}
@@ -190,12 +194,17 @@ export class TaskSupervisor{
    const paths=stream==='stderr'?[row.stderr_path]:stream==='stdout'?[row.stdout_path]:[row.stdout_path,row.stderr_path];
    const results=paths.map((p:string)=>{
      if(!existsSync(p))return{path:p,text:'',total:0,nextOffset:0,hasMore:false};
-     const st=statSync(p),start=Math.min(offset,st.size),length=Math.min(maxBytes,st.size-start);
+     const st=statSync(p),start=Math.min(offset,st.size),length=Math.min(maxBytes+3,st.size-start);
      const buf=Buffer.alloc(length),fd=openSync(p,'r');
      try{readSync(fd,buf,0,length,start);}finally{closeSync(fd);}
-     const text=buf.toString('utf8');
-     const selected=text.split(/(?<=\n)/).slice(0,maxLines).join('');
-     const used=Buffer.byteLength(selected);
+     const encoding=detectFileOutputEncoding(p,start);
+     const page=decodeOutputPage(buf,Math.min(maxBytes,st.size-start),encoding);
+     let used=page.used;
+     if(maxLines<5000){
+       let lines=0;
+       for(let i=0;i<used;i++)if(buf[i]===10&&++lines===maxLines){used=i+1;break;}
+     }
+     const selected=new TextDecoder(encoding).decode(buf.subarray(0,used));
      return{path:p,text:selected,total:st.size,nextOffset:start+used,hasMore:start+used<st.size,
        truncated:p===row.stdout_path?Boolean(row.stdout_truncated):Boolean(row.stderr_truncated)};
    });
