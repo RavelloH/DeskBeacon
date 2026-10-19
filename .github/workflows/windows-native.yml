@@ -140,6 +140,13 @@ jobs:
         run: |
           $env:DESKBEACON_JOB_BINARY = (Resolve-Path packages/win32-x64/deskbeacon-job.exe).Path
           pnpm test:local
+      - name: Download exact npm tarballs built on Linux
+        uses: actions/download-artifact@v4
+        with:
+          name: deskbeacon-npm-0.2.0
+          path: packed
+      - name: Fresh install of main CLI and x64 native package from tarballs
+        run: node scripts/test-release-install.mjs packed
 
   windows-arm64:
     name: Windows ARM64 / native execution + Job Object cleanup
@@ -192,3 +199,10 @@ jobs:
           $env:DESKBEACON_JOB_BINARY = (Resolve-Path packages/win32-arm64/deskbeacon-job.exe).Path
           node apps/client/test/job-tree.mjs
           node apps/client/test/job-daemon-crash.mjs
+      - name: Download exact npm tarballs built on Linux
+        uses: actions/download-artifact@v4
+        with:
+          name: deskbeacon-npm-0.2.0
+          path: packed
+      - name: Fresh install of main CLI and ARM64 native package from tarballs
+        run: node scripts/test-release-install.mjs packed
