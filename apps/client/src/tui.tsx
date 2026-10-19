@@ -686,12 +686,18 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
   }
  };
  wheelHandlerRef.current=(direction,x,y)=>{
-  if(edit||confirm)return;
-  if(y>=5&&y<5+bodyHeight){
+  if(confirm)return;
+  if(edit==='command'){
+   if(y>=6&&y<5+commandPanelHeight)
+    setCommandIndex(i=>Math.max(0,Math.min(commandOptions.length-1,i+direction)));
+   return;
+  }
+  if(edit)return;
+  if(y>=5+commandPanelHeight&&y<5+commandPanelHeight+bodyHeight){
    if((horizontal&&x>aw)||(!horizontal&&y>5+layout.activityHeight)){
     setFocus('detail');setDetailScroll(n=>Math.max(0,Math.min(Math.max(0,detail.length-detailRows),n+direction)));
    }else{setFocus('activity');move(direction,undefined,'activity');}
-  }else if(tasks.length&&y>=5+bodyHeight&&y<5+bodyHeight+taskHeight){
+  }else if(tasks.length&&y>=5+commandPanelHeight+bodyHeight&&y<5+commandPanelHeight+bodyHeight+taskHeight){
    setFocus('tasks');move(direction>0?1:-1,undefined,'tasks');
   }
  };
@@ -704,9 +710,18 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
   return()=>{mouseEvents?.off('mouse',listener);};
  },[mouseEvents]);
  mouseHandlerRef.current=event=>{
+  if(edit==='command'&&event.y>=5&&event.y<5+commandPanelHeight){
+   const firstVisible=Math.max(0,commandSelect-visibleOptions+1);
+   const index=firstVisible+event.y-6,option=commandOptions[index];
+   if(option?.selectable){
+    if(event.kind==='move')setCommandIndex(index);
+    if(event.kind==='press'&&event.button===0){setText(option.insert);setCommandIndex(0);}
+   }
+   return;
+  }
   // The inspector's visible tabs are clickable as well as keyboard-accessible.
   if(event.kind==='press'&&event.button===0&&horizontal&&event.y===6&&
-    event.x>aw&&inspectorTab!=='summary'){
+    event.x>aw&&inspectorTab!=='summary'&&edit!=='command'){
    const local=event.x-aw-1;
    const commandTool=entry&&['exec_foreground','exec_background'].includes(entry.tool);
    if(local>=0&&local<(commandTool?29:19)){
@@ -719,11 +734,11 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
   if(event.kind==='press'&&event.button===0&&event.y>=2&&event.y<=4){
    setEdit('search');setText(query);setNotice('');return;
   }
-  if(event.y<7||event.y>=7+tableRows||(horizontal&&event.x>aw)){
+  if(event.y<7+commandPanelHeight||event.y>=7+commandPanelHeight+tableRows||(horizontal&&event.x>aw)){
    if(event.kind==='move')setHoverLinkId(null);
    return;
   }
-  const record=visibleRows[event.y-7];
+  const record=visibleRows[event.y-7-commandPanelHeight];
   if(!record||'kind' in record){
    if(event.kind==='move')setHoverLinkId(null);
    return;
