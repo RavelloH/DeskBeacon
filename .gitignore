@@ -19,7 +19,9 @@ apps/client/native/win-job/obj/
 packages/win32-*/deskbeacon-job.exe
 .toolchains/
 
-.agent/*
-!.agent/README.md
+.agent/
 AGENTS.md
 .test-data-batch-detail/
+
+# Locally packed release-candidate tarballs
+packed/

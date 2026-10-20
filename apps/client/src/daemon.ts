@@ -17,6 +17,7 @@ import { fileTool } from './filesystem.js';
 import { systemTool, networkTool } from './system.js';
 import {activityPage, type ActivityPageOptions} from './activity-query.js';
 import {logEvent} from './diagnostics.js';
+import {codeVersion} from './version.js';
 
 
 
@@ -462,7 +463,7 @@ export class ClientDaemon extends EventEmitter {
       this.state='connected';this.emit('change');
       if(this.handshakeTimer){clearTimeout(this.handshakeTimer);this.handshakeTimer=undefined;}
       if(this.disconnectTimer){clearTimeout(this.disconnectTimer);this.disconnectTimer=undefined;}
-      this.send({type:'device.hello',payload:{deviceName:this.config.deviceName,platform:platform(),clientVersion:'0.1.0',protocolVersion:PROTOCOL_VERSION}});
+      this.send({type:'device.hello',payload:{deviceName:this.config.deviceName,platform:platform(),clientVersion:codeVersion(),protocolVersion:PROTOCOL_VERSION}});
       this.send({type:'device.capabilities',payload:{capabilities:['filesystem','foreground','batch','background','archive','network','system','transfer-inline']}});
       if(this.ws?.readyState===WebSocket.OPEN){
         this.heartbeatSentAt=performance.now();

@@ -19,12 +19,8 @@ function cmp(a:string,b:string):number{
  const x=split(a),y=split(b);for(let i=0;i<3;i++)if((x[i]??0)!==(y[i]??0))return (x[i]??0)<(y[i]??0)?-1:1;
  return 0;
 }
-declare const __DESKBEACON_PACKAGE_VERSION__:string;
-export function codeVersion():string{
- if(typeof __DESKBEACON_PACKAGE_VERSION__!=='undefined')return __DESKBEACON_PACKAGE_VERSION__;
- const p=JSON.parse(readFileSync(new URL('../package.json',import.meta.url),'utf8')) as {version:string};
- return p.version;
-}
+export {codeVersion} from './version.js';
+import {codeVersion} from './version.js';
 export function storedVersion(db:DatabaseSync):string{
  const table=db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='storage_metadata'").get();
  if(!table)return VERSION_FALLBACK;

@@ -59,7 +59,8 @@ try{
   join(native,'deskbeacon-job.exe'),'CLI must resolve its installed native Job Object helper');
  const launcher=join(client,'launcher.js');
  assert.equal(run(process.execPath,[launcher,'version']),version);
- assert.match(run(process.execPath,[launcher,'help']),/Usage: deskbeacon/);
+ assert.match(run(process.execPath,[launcher,'help']),/用法：deskbeacon/);
+ assert.ok(existsSync(join(client,'CHANGELOG.md')),'Missing release notes in published CLI');
  assert.match(run(process.execPath,[launcher,'doctor']),/Runtime\s+stopped/);
  console.log('PASS npm tarball install, CLI launcher, native binary and doctor: '+version+' '+nativeName);
 }finally{

@@ -59,16 +59,21 @@ test('two real local batches and a standalone command share one four-slot pool',
     stages:[{parallel:true,calls:Array.from({length:4},(_,i)=>({
       id:name+'-'+i,tool:'exec_foreground',input:{description:'并发测试 '+i,command:command(name+'-'+i)}
     }))}]});
+  // The real dispatch() opens the parent journal before execute().
+  const left=batch('left'),right=batch('right');
+  const leftId=randomUUID(),rightId=randomUUID();
+  daemon.journal.start(leftId,'batch',left);
+  daemon.journal.start(rightId,'batch',right);
   let max=0;
   const interval=setInterval(()=>{max=Math.max(max,daemon.supervisor.foregroundPool.active);},5);
   try{
     const [a,b,c]=await Promise.all([
-      daemon.execute('batch',batch('left'),randomUUID(),'grant'),
-      daemon.execute('batch',batch('right'),randomUUID(),'grant'),
+      daemon.execute('batch',left,leftId,'grant'),
+      daemon.execute('batch',right,rightId,'grant'),
       daemon.execute('exec_foreground',{description:'独立命令',command:command('single'),timeoutMs:10000},'standalone:fixture','grant'),
     ]);
-    assert.equal(a.completed,4);
-    assert.equal(b.completed,4);
+    assert.equal(a.completed,4,JSON.stringify(a));
+    assert.equal(b.completed,4,JSON.stringify(b));
     assert.equal(a.failed+b.failed,0);
     assert.equal(c.exitCode,0);
     assert.ok(max>=2 && max<=4,'observed concurrency '+max);
@@ -76,6 +81,7 @@ test('two real local batches and a standalone command share one four-slot pool',
     assert.equal(daemon.supervisor.foregroundPool.queued,0);
   }finally{
     clearInterval(interval);
+    daemon.journal.closeAll();
     daemon.db.close();
     rmSync(data,{recursive:true,force:true});
   }
