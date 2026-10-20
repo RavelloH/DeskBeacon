@@ -1,20 +1,32 @@
 #!/usr/bin/env node
-import { createServer } from 'node:http';
-import { createInterface } from 'node:readline/promises';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
-import { randomBytes, createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { hostname } from 'node:os';
 import { existsSync } from 'node:fs';
-import { configPath, loadConfig, saveConfig, ClientDaemon } from './daemon.js';
-import { requestIpc, startIpc, closeIpc } from './ipc.js';
+import stringWidth from 'string-width';
 import type {DemoScenario} from './demo.js';
 declare const __DESKBEACON_RELEASE__:boolean;
 const DEMO_ENABLED=typeof __DESKBEACON_RELEASE__==='undefined'||!__DESKBEACON_RELEASE__;
-import {superviseService,supervisorRunning,requestSupervisorStop} from './service-supervisor.js';
-import {migrateCommand,migrationRequired,codeVersion} from './migration-command.js';
-import {installDiagnostics,logEvent,flushLogs,closeLogs,discardLegacyLog,logsDir} from './diagnostics.js';
+
+// node:sqlite emits one known ExperimentalWarning on Node 24 even when it is
+// working correctly. Filter only that specific message during module loading,
+// then restore Node's warning behavior (including all other warnings).
+const originalEmitWarning=process.emitWarning;
+process.emitWarning=((warning:unknown,...args:unknown[])=>{
+ if(typeof warning==='string'&&warning==='SQLite is an experimental feature and might change at any time'&&
+    args[0]==='ExperimentalWarning')return;
+ return Reflect.apply(originalEmitWarning,process,[warning,...args]);
+}) as typeof process.emitWarning;
+const [
+ {configPath,loadConfig,saveConfig,ClientDaemon},
+ {requestIpc,startIpc,closeIpc},
+ {superviseService,supervisorRunning,requestSupervisorStop},
+ {migrateCommand,migrationRequired,codeVersion},
+ {installDiagnostics,logEvent,flushLogs,closeLogs,discardLegacyLog,logsDir}
+]=await Promise.all([
+ import('./daemon.js'),import('./ipc.js'),import('./service-supervisor.js'),
+ import('./migration-command.js'),import('./diagnostics.js')
+]).finally(()=>{process.emitWarning=originalEmitWarning;});
 
 // React's development reconciler records unbounded performance.measure entries
 // in long-lived Node TUI processes. Select production before loading Ink/React.
@@ -24,83 +36,31 @@ async function showTui(scenario?:DemoScenario,title?:string):Promise<void>{
  await launch(scenario,title);
 }
 
-const url64=(value:Buffer)=>value.toString('base64url');
 const sleep=(ms:number)=>new Promise(resolve=>setTimeout(resolve,ms));
-function openBrowser(url:string){
- if(process.platform==='win32')spawn('rundll32.exe',['url.dll,FileProtocolHandler',url],{detached:true,stdio:'ignore'}).unref();
- else spawn(process.platform==='darwin'?'open':'xdg-open',[url],{detached:true,stdio:'ignore'}).unref();
-}
-async function setup(base:string) {
- const parsed=new URL(base);
- if(parsed.protocol!=='https:'&&!(parsed.hostname==='127.0.0.1'||parsed.hostname==='localhost'))throw Error('HTTPS server required');
- base=parsed.origin;
- const codeVerifier=url64(randomBytes(32));
- const challenge=url64(createHash('sha256').update(codeVerifier).digest());
- const state=url64(randomBytes(24));
- let resolveCode!:(code:string)=>void, rejectCode!:(error:Error)=>void;
- const code=new Promise<string>((resolve,reject)=>{resolveCode=resolve;rejectCode=reject;});
- const callback=createServer((req,res)=>{
-   const params=new URL(req.url??'/',base);
-   if(params.pathname!=='/callback'){res.writeHead(404);res.end();return;}
-   if(params.searchParams.get('state')!==state){res.writeHead(403);res.end('OAuth state mismatch');rejectCode(Error('OAuth state mismatch'));return;}
-   const authorizationCode=params.searchParams.get('code');
-   if(!authorizationCode){res.writeHead(400);res.end('Missing OAuth code');rejectCode(Error('Missing OAuth code'));return;}
-   res.writeHead(200,{'content-type':'text/html; charset=utf-8'});
-   res.end('<h2>(( · )) DeskBeacon paired successfully.</h2><p>You can close this tab and return to the terminal.</p>');
-   resolveCode(authorizationCode);
- });
- await new Promise<void>(resolve=>callback.listen(0,'127.0.0.1',resolve));
- const addr=callback.address();if(!addr||typeof addr==='string')throw Error('Local callback unavailable');
- const redirect='http://127.0.0.1:'+addr.port+'/callback';
- try {
-   const register=await fetch(base+'/oauth/register',{method:'POST',headers:{'content-type':'application/json'},
-     body:JSON.stringify({client_name:'DeskBeacon Device '+hostname(),redirect_uris:[redirect],
-       token_endpoint_auth_method:'none',grant_types:['authorization_code','refresh_token'],response_types:['code']})});
-   if(!register.ok)throw Error('Device OAuth registration failed: HTTP '+register.status+' '+(await register.text()).slice(0,500));
-   const client=await register.json() as {client_id:string};
-   if(!client.client_id)throw Error('No OAuth client_id in registration result');
-   const authorize=new URL('/authorize',base);
-   authorize.searchParams.set('response_type','code');authorize.searchParams.set('client_id',client.client_id);
-   authorize.searchParams.set('redirect_uri',redirect);authorize.searchParams.set('scope','deskbeacon:device');
-   authorize.searchParams.set('resource',base); // Explicit legacy Device audience; older installed clients may still omit it.
-   authorize.searchParams.set('state',state);authorize.searchParams.set('code_challenge',challenge);
-   authorize.searchParams.set('code_challenge_method','S256');
-   console.log('Open the authorization page and enter your OAuth authorization secret:\n'+authorize.href);
-   openBrowser(authorize.href);
-   const authorizationCode=await Promise.race([code,new Promise<never>((_,reject)=>setTimeout(()=>reject(Error('OAuth callback timeout')),180_000))]);
-   const token=await fetch(base+'/oauth/token',{method:'POST',
-     headers:{'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({
-       grant_type:'authorization_code',client_id:client.client_id,code:authorizationCode,
-       redirect_uri:redirect,code_verifier:codeVerifier
-     })});
-   if(!token.ok)throw Error('OAuth token exchange failed: '+token.status+' '+(await token.text()).slice(0,300));
-   const credentials=await token.json() as {access_token:string;refresh_token?:string;expires_in?:number};
-   if(!credentials.access_token)throw Error('OAuth did not return access token');
-   saveConfig({url:base,clientId:client.client_id,deviceId:client.client_id,accessToken:credentials.access_token,
-     ...(credentials.refresh_token?{refreshToken:credentials.refresh_token}:{}),...(credentials.expires_in?{accessTokenExpiresAt:Date.now()+credentials.expires_in*1000}:{}),deviceName:hostname()});
-   logEvent('security','oauth.device_paired','info',{deviceId:client.client_id,server:base});
-   console.log('DeskBeacon device paired. Device ID: '+client.client_id);
- }catch(error){logEvent('security','oauth.setup_failed','error',{error,server:base});throw error;}
- finally{callback.close();}
+async function setup(base?:string):Promise<void>{
+ try{
+ if(process.stdin.isTTY&&process.stdout.isTTY){
+  const {setupTui}=await import('./setup-tui.js');
+  await setupTui(base);return;
+ }
+ if(!base)throw Error('非交互环境请使用 deskbeacon setup --url https://服务器地址');
+ const {runSetupFlow}=await import('./setup-flow.js');
+ const result=await runSetupFlow(base,{onProgress:p=>{
+  if(p.authorizeUrl)console.log('请在浏览器完成 OAuth 授权，如未自动打开请访问：\n'+p.authorizeUrl);
+  else console.log('设备授权：'+p.stage);
+ }});
+ console.log('设备授权已完成：'+result.deviceId);
+ }finally{await closeLogs();}
 }
 const pkg={version:codeVersion()};
 const entry=fileURLToPath(import.meta.url);
-async function promptUrl():Promise<string>{
-  if(!process.stdin.isTTY)throw Error('Run deskbeacon setup --url https://your-worker.example from a terminal');
-  const io=createInterface({input:process.stdin,output:process.stdout});
-  try{
-    const url=(await io.question('DeskBeacon Worker URL (https://...): ')).trim();
-    if(!url)throw Error('Worker URL is required');
-    return url;
-  }finally{io.close();}
-}
 async function configured(){
-  if(!existsSync(configPath)){await setup(await promptUrl());return;}
+  if(!existsSync(configPath)){await setup();return;}
   const cfg=loadConfig();
   if(cfg.pendingUrl&&!await currentRuntime(700)){
     if(!process.stdin.isTTY)
-      throw Error('SERVER_REAUTH_REQUIRED: run deskbeacon setup --url '+cfg.pendingUrl+' interactively');
-    console.log('DeskBeacon server change pending: '+cfg.pendingUrl+' · authorizing new server.');
+      throw Error('需要重新授权服务器，请运行 deskbeacon setup --url '+cfg.pendingUrl);
+    console.log('检测到待切换的服务器地址：'+cfg.pendingUrl+'，开始重新授权。');
     await setup(cfg.pendingUrl);
   }
 }
@@ -157,10 +117,16 @@ async function serviceStart(){
   if(supervisorRunning()&&migrationRequired())throw Error('Stop the existing service supervisor before migrating; run deskbeacon service stop.');
   if(!supervisorRunning()){
     await configured();
-    console.log('DeskBeacon：正在检查本地存储版本，完成必要的迁移后启动服务。');
-    installDiagnostics('migration');discardLegacyLog();
-    await migrateCommand(false);
-    await closeLogs();
+    if(migrationRequired()){
+      installDiagnostics('migration');discardLegacyLog();
+      await migrateCommand(false);
+      await closeLogs();
+    }else if(!existsSync((await import('node:path')).join((await import('./daemon.js')).dataDir,'state.sqlite'))){
+      // New installation: initialize storage quietly, with no legacy data to migrate.
+      const {runStorageMigrations}=await import('./storage-migrations.js');
+      await runStorageMigrations();
+      await closeLogs();
+    }
     const child=spawn(process.execPath,[entry,'__service_supervise'],{
       detached:true,stdio:'ignore',windowsHide:true,cwd:process.cwd(),env:process.env
     });
@@ -200,32 +166,49 @@ async function serviceStop(){
   logEvent('runtime','service.stop_timeout','error',{supervisorRunning:supervisorRunning()});
   throw Error('Service did not stop within 25 seconds. See deskbeacon service logs service.');
 }
+const logDomains=['service','runtime','connection','execution','migration','security','tui'];
 const usage=()=>{
+ // 按终端实际显示宽度对齐中文和 ASCII 命令。
+ const commandWidth=35;
+ const row=(command:string,description:string)=>'  '+command+' '.repeat(Math.max(2,commandWidth-stringWidth(command)))+description;
+ const detail=(label:string,values:readonly string[])=>'  '+' '.repeat(commandWidth)+'│ '+label+'：'+values.join(' | ');
  console.log([
-  'DeskBeacon '+pkg.version+' — Your desktop, within your agent’s reach.',
+  'DeskBeacon '+pkg.version+' — 让 Agent 连接并使用你的设备',
   '',
-  'Usage: deskbeacon [command] [--title NAME]',
+  '用法：deskbeacon [命令] [选项]',
   '',
-  '  (no command)            Open full-screen DeskBeacon. Own the Runtime unless',
-  '                          an existing background service is running.',
-  '  setup [--url URL]       Pair this device using OAuth (prompts for URL).',
-  '  config <name|url> [value]  查看或设置设备名称 / 服务器 URL，与 TUI /config 相同。',
-  ...(DEMO_ENABLED?['  demo [scenario]        Offline, interactive TUI preview (for development).',
-  '                          Use demo migration to preview the upgrade screen.']:[]),
-  '  --title NAME           Terminal window title (also DESKBEACON_TITLE env).',
-  '  service start           Migrate if needed, then start the background Runtime.',
-  '  migrate                 Upgrade local storage before starting a Runtime.',
-  '  service stop            Stop the running Runtime.',
-  '  service restart         Restart the background service.',
-  '  service logs [domain]   查看轮转的结构化诊断日志 (service/runtime/connection/execution/migration/security)。',
-  '  service status          Show background Runtime status.',
-  '  status                  Print connected device/Runtime status.',
-  '  doctor                  Check configuration and Runtime.',
-  '  update                  Check the latest npm release and show update steps.',
-  '  version, -v, --version  Show CLI version.',
-  '  help, -h, --help        Display this help.',
+  '交互界面',
+  row('(无命令)','启动全屏终端界面；已有后台服务时直接连接'),
   '',
-  'Inside TUI: ? for keys, /config for settings, q to close.',
+  '设备与配置',
+  row('setup [--url <地址>]','通过 OAuth 授权连接设备，可交互输入服务器地址'),
+  row('config <name|url> [值]','查看或修改设备名称、服务器地址'),
+  '',
+  '服务管理',
+  row('service <start|stop|restart>','启动、停止或重启后台服务'),
+  row('service status [--all|--full]','查看后台服务状态；选项可包含任务历史'),
+  row('status [--all|--full]','查看设备与 Runtime 状态；选项可包含任务历史'),
+  row('service logs [领域]','查看指定领域的诊断日志（默认 service）'),
+  detail('领域',logDomains),
+  '',
+  '维护工具',
+  row('migrate [--no-tui]','迁移本地存储；--no-tui 使用非交互式进度'),
+  row('doctor','检查本地配置和运行状态'),
+  row('update','检查 npm 最新版本并显示更新方式'),
+  row('version, -v, --version','查看版本号'),
+  row('help, -h, --help','显示此帮助'),
+  ...(DEMO_ENABLED?[
+   '',
+   '开发调试（仅开发构建）',
+   row('demo [场景]','启动离线 TUI 演示（默认 connected）'),
+   detail('场景',['connected','connecting','offline','busy','failed','transfers','crowded','migration','setup']),
+  ]:[]),
+  '',
+  '全局选项',
+  row('--title <名称>','设置终端窗口标题（也可使用 DESKBEACON_TITLE）'),
+  '',
+  '参数记法：<参数> 必填 · [参数] 可选 · | 表示枚举选项',
+  'TUI 操作：? 查看快捷键 · /config 修改配置 · q 退出',
  ].join('\n'));
 };
 async function updateCli(){
@@ -255,16 +238,22 @@ async function main(){
      const {showMigrationDemo}=await import('./migration-demo-ui.js');
      await showMigrationDemo();return;
    }
+   if(scenario==='setup'){
+     const {showSetupDemo}=await import('./setup-demo-ui.js');
+     await showSetupDemo();return;
+   }
    if(!demoScenarios.includes(scenario as DemoScenario))
-     throw Error('Unknown demo scenario. Options: '+[...demoScenarios,'migration'].join(', '));
+     throw Error('Unknown demo scenario. Options: '+[...demoScenarios,'migration','setup'].join(', '));
    await showTui(scenario as DemoScenario,title);
    return;
  }
  if(action==='migrate'){
    installDiagnostics('migration');discardLegacyLog();
    if(await currentRuntime(900)||supervisorRunning())throw Error('Stop the DeskBeacon service/Runtime before migrating.');
-   const result=await migrateCommand(!args.includes('--no-tui'));
-   console.log('DeskBeacon 存储版本 '+result.from+' → '+result.to+'；'+(result.changed?'迁移已完成':'已经是最新版本')+'。');
+   const interactive=!args.includes('--no-tui')&&process.stdin.isTTY===true&&process.stdout.isTTY===true;
+   const result=await migrateCommand(interactive);
+   // The interactive migration already leaves its compact two-line result in the terminal.
+   if(!interactive)console.log('DeskBeacon 存储版本 '+result.from+' → '+result.to+'；'+(result.changed?'迁移已完成':'已经是最新版本')+'。');
    await closeLogs();return;
  }
  if(action==='config'){
@@ -274,11 +263,13 @@ async function main(){
  }
  if(action==='setup'){
    const index=args.indexOf('--url');
-   await setup(index>=0&&args[index+1]?args[index+1]!:await promptUrl());
+   await setup(index>=0&&args[index+1]?args[index+1]!:undefined);
    return;
  }
  if(action==='status'||(action==='service'&&args[0]==='status')){
-   const status=await currentRuntime(1500);
+   const flags=action==='status'?args:args.slice(1);
+   const includeHistory=flags.includes('--all')||flags.includes('--full');
+   const status=await requestIpc({action:includeHistory?'status':'status-lite'},1500).catch(()=>null);
    if(!status){console.log(supervisorRunning()?'DeskBeacon Runtime is restarting under its supervisor.':'DeskBeacon Runtime is not running.');return;}
    console.log(JSON.stringify(status,null,2));return;
  }
@@ -292,7 +283,7 @@ async function main(){
  if(action==='service'&&args[0]==='logs'){
    const {readFileSync}=await import('node:fs');
    const {join}=await import('node:path');
-   const domains=['service','runtime','connection','execution','migration','security','tui'];
+   const domains=logDomains;
    const selected=args[1]??'service';
    if(!domains.includes(selected))throw Error('Unknown log domain. Choose: '+domains.join(', '));
    const path=join(logsDir,selected+'.jsonl');
@@ -316,10 +307,15 @@ async function main(){
    }
    if(supervisorRunning())throw Error('Service supervisor is starting; wait or stop the background service before migrating.');
    if(migrationRequired()){installDiagnostics('migration');discardLegacyLog();await migrateCommand(true);await closeLogs();}
-   else if(!existsSync((await import('node:path')).join((await import('./daemon.js')).dataDir,'state.sqlite'))){installDiagnostics('migration');await migrateCommand(false);await closeLogs();}
+   else if(!existsSync((await import('node:path')).join((await import('./daemon.js')).dataDir,'state.sqlite'))){
+     const {runStorageMigrations}=await import('./storage-migrations.js');
+     await runStorageMigrations();await closeLogs();
+   }
    await ownerRuntime(false,title);return;
  }
  throw Error('Unknown command '+action+'. Use deskbeacon help.');
 }
 void main().catch(async e=>{logEvent('runtime','cli.command_failed','error',{error:e});
-  console.error('DeskBeacon:',e instanceof Error?e.message:String(e));await flushLogs();process.exitCode=1;});
+  if(!(e as Error&{migrationScreenReported?:boolean;setupScreenReported?:boolean})?.migrationScreenReported&&!((e as Error&{setupScreenReported?:boolean})?.setupScreenReported))
+   console.error('DeskBeacon:',e instanceof Error?e.message:String(e));
+  await flushLogs();process.exitCode=1;});

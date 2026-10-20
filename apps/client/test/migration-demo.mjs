@@ -52,9 +52,8 @@ try{
  input.write('s');
  await waitFor('模拟迁移已完成，真实数据未改变。',from);
  const exit=app.waitUntilExit();
- input.write('q');
- await Promise.race([exit,pause(2000).then(()=>{throw Error('Demo did not exit on q');})]);
+ await Promise.race([exit,pause(2500).then(()=>{throw Error('Demo did not exit automatically after s');})]);
  assert.equal(existsSync(dataDir),false,'demo must not create SQLite, JSONL or config folders');
  assert.ok(!all.includes('ACTIVITY'),'the migration demo must not render the main TUI');
- console.log('PASS migration demo animation, stage navigation, pause, error, replay, finish, q-exit and zero filesystem writes');
+ console.log('PASS migration demo animation, stage navigation, pause, error, replay, finish, auto-exit and zero filesystem writes');
 }finally{app.unmount();input.destroy();output.destroy();rmSync(root,{recursive:true,force:true});}

@@ -100,14 +100,15 @@ function verifyRecord(ctx:Context,row:{id:string;record_path:string|null;outcome
  }
 }
 async function migrateTo020(ctx:Context):Promise<void>{
+ stageEmit(ctx,'准备本地存储',0,1);
  schema(ctx.db);
  const count=(ctx.db.prepare("SELECT count(*) n FROM activity WHERE record_path IS NULL").get() as {n:number}).n;
  const originalCount=(ctx.db.prepare("SELECT count(*) n FROM activity").get() as {n:number}).n;
  const out=join(ctx.root,'output'),outputFiles=listFiles(out);
- const progressTotal=Math.max(1,count+originalCount+outputFiles.length);
+ const progressTotal=Math.max(1,count+originalCount+outputFiles.length+1);
  let moved=0;stageEmit(ctx,'迁移操作记录',0,progressTotal);
  const report=await migrateLegacyRecords(ctx.db,ctx.journal,ctx.root,n=>{
-  moved+=n;stageEmit(ctx,'Migrating operation records',Math.min(moved,count),progressTotal);
+  moved+=n;stageEmit(ctx,'迁移操作记录',Math.min(moved,count),progressTotal);
  });
  if(report.errors)throw Error('LEGACY_MIGRATION_FAILED: '+report.errors+' record(s) could not be converted');
  // Completed/failed operations without a receipt/body still require a durable metadata record.
@@ -130,7 +131,7 @@ async function migrateTo020(ctx:Context):Promise<void>{
   verifyRecord(ctx,row);i++;
   if(i%32===0){stageEmit(ctx,'校验 JSONL 日志',moved+i,progressTotal);await new Promise<void>(resolve=>setImmediate(resolve));}
  }
- stageEmit(ctx,'Verifying journal records',moved+rows.length,progressTotal);
+ stageEmit(ctx,'校验 JSONL 日志',moved+rows.length,progressTotal);
  if(outputFiles.length){
   // Preserve files that have no matching operation ID, including orphan batch sub-operation files.
   const known=(ctx.db.prepare("SELECT id,record_path FROM activity WHERE record_path IS NOT NULL").all() as {id:string;record_path:string}[]);
@@ -159,18 +160,19 @@ async function migrateTo020(ctx:Context):Promise<void>{
    }
    if(!covered)migrateOrphan(ctx,base,files);
    processed+=files.size;
-   if(processed%16<=files.size){stageEmit(ctx,'Checking legacy output files',moved+rows.length+processed,progressTotal);
+   if(processed%16<=files.size){stageEmit(ctx,'检查旧版输出文件',moved+rows.length+processed,progressTotal);
     await new Promise<void>(resolve=>setImmediate(resolve));}
   }
-  stageEmit(ctx,'Checking legacy output files',moved+rows.length+outputFiles.length,progressTotal);
+  stageEmit(ctx,'检查旧版输出文件',moved+rows.length+outputFiles.length,progressTotal);
   // Each legacy file now has a recoverable journal record. Only then remove the obsolete directory.
   rmSync(out,{recursive:true,force:false,maxRetries:4,retryDelay:100});
   if(existsSync(out))throw Error('LEGACY_OUTPUT_NOT_REMOVED');
- }
- stageEmit(ctx,'压缩 SQLite 数据库',progressTotal,progressTotal);
+ }else stageEmit(ctx,'检查旧版输出文件',moved+rows.length,progressTotal,'无旧文件');
+ stageEmit(ctx,'压缩 SQLite 数据库',progressTotal-1,progressTotal);
  ctx.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
  ctx.db.exec('VACUUM');
  ctx.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+ stageEmit(ctx,'压缩 SQLite 数据库',progressTotal,progressTotal);
 }
 const migrations:Step[]=[{version:'0.2.0',run:migrateTo020}];
 export function migrationRequired(root=dataDir,target=codeVersion()):boolean{

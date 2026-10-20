@@ -19,11 +19,28 @@ const run=(...args)=>{
  const durationMs=Date.now()-begun;
  if(r.error)throw r.error;
  assert.equal(r.status,0,args.join(' ')+' failed after '+durationMs+'ms\n'+r.stdout+'\n'+r.stderr);
- return {stdout:r.stdout,durationMs};
+ return {stdout:r.stdout,stderr:r.stderr,durationMs};
 };
 const lock=(name)=>JSON.parse(readFileSync(join(root,name+'.lock'),'utf8')).pid;
 try{
- run('service','start');
+ const initial=run('service','start');
+ assert.doesNotMatch(initial.stdout,/正在检查本地存储版本|数据迁移|migration/i,
+  'fresh installation must initialize storage quietly');
+ assert.doesNotMatch(initial.stderr,/SQLite is an experimental feature/,
+  'CLI must not print SQLite ExperimentalWarning');
+ const {DatabaseSync}=await import('node:sqlite');
+ const initialDb=new DatabaseSync(join(root,'state.sqlite'));
+ const stored=initialDb.prepare("SELECT value FROM storage_metadata WHERE key='storage_version'").get();
+ assert.equal(stored?.value,'0.2.0','fresh install must write the current storage version');
+ initialDb.prepare('INSERT INTO background(id,operation_id,description,pid,status,start,exit_code) VALUES(?,?,?,?,?,?,?)')
+  .run('previous-task','previous-task','finished historical background',1234,'exited',Date.now()-60000,0);
+ initialDb.close();
+ const summary=run('service','status');
+ const full=run('service','status','--all');
+ assert.doesNotMatch(summary.stdout,/"background"\s*:/,'normal status should omit completed background history');
+ assert.match(full.stdout,/"background"\s*:/,'explicit --all must retain background history');
+ assert.match(full.stdout,/finished historical background/);
+ assert.doesNotMatch(summary.stderr,/SQLite is an experimental feature/);
  const original=lock('runtime');
  for(let i=0;i<5;i++){
   let disconnected=false;
@@ -35,6 +52,8 @@ try{
   unsubscribe();
   assert.ok(r.stdout.includes('service stopped'),r.stdout);
   assert.ok(r.stdout.includes('service started'),r.stdout);
+  assert.doesNotMatch(r.stdout,/正在检查本地存储版本|数据迁移|migration/i);
+  assert.doesNotMatch(r.stderr,/SQLite is an experimental feature/);
   assert.ok(disconnected,'Long-running IPC subscriber remained connected during restart '+i);
   const current=await requestIpc({action:'status'},1500);
   assert.equal(current.runtimeMode,'background');

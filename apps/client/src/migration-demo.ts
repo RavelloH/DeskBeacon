@@ -1,13 +1,14 @@
 import type {MigrationProgress} from './storage-migrations.js';
+import {MIGRATION_PHASES} from './migration-phases.js';
 
 /** Pure, deterministic migration preview. No SQLite, filesystem or Runtime access. */
 export const MIGRATION_DEMO_DURATION_MS=24_000;
 export const MIGRATION_DEMO_STEPS=[
-  {stage:'准备本地存储',start:0,end:1500,doneStart:0,doneEnd:0},
-  {stage:'迁移操作记录',start:1500,end:10000,doneStart:0,doneEnd:4180},
-  {stage:'校验 JSONL 日志',start:10000,end:16000,doneStart:4180,doneEnd:8360},
-  {stage:'检查旧版输出文件',start:16000,end:22000,doneStart:8360,doneEnd:11905},
-  {stage:'压缩 SQLite 数据库',start:22000,end:23500,doneStart:11905,doneEnd:11905},
+  {stage:MIGRATION_PHASES[0],start:0,end:1500,doneStart:0,doneEnd:0},
+  {stage:MIGRATION_PHASES[1],start:1500,end:10000,doneStart:0,doneEnd:4180},
+  {stage:MIGRATION_PHASES[2],start:10000,end:16000,doneStart:4180,doneEnd:8360},
+  {stage:MIGRATION_PHASES[3],start:16000,end:22000,doneStart:8360,doneEnd:11905},
+  {stage:MIGRATION_PHASES[4],start:22000,end:23500,doneStart:11905,doneEnd:11905},
   {stage:'已完成 0.2.0 升级',start:23500,end:MIGRATION_DEMO_DURATION_MS,doneStart:11905,doneEnd:11905}
 ] as const;
 const total=11905;

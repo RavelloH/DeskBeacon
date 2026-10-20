@@ -52,7 +52,7 @@ try{
  await disconnected();
  assert.equal(existsSync(join(dir,'runtime.lock')),false);
  console.log('PASS service stop releases runtime lock and IPC');
- assert.match(call('help'),/service start/);
+ assert.match(call('help'),/service <start\|stop\|restart>/);
  assert.match(call('--version'),/\d+\.\d+\.\d+/);
  const noTty=spawnSync(process.execPath,[cli],{cwd:dir,env,encoding:'utf8',windowsHide:true,timeout:6000});
  assert.equal(noTty.status,1);

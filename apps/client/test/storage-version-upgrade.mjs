@@ -28,6 +28,11 @@ try{
  assert.equal(outcome.from,'0.1.0');assert.equal(outcome.to,'0.2.0');
  assert.equal(outcome.removedOldOutput,true);assert.equal(existsSync(output),false);
  assert.ok(seen.length>1);assert.ok(seen.every((p,i)=>i===0||p.percent>=seen[i-1].percent),'percentage must never go backwards');
+ for(const stage of ['准备本地存储','迁移操作记录','校验 JSONL 日志','检查旧版输出文件','压缩 SQLite 数据库','已完成 0.2.0 升级'])
+  assert.ok(seen.some(p=>p.stage===stage),'Missing real migration tree phase: '+stage);
+ const compacting=seen.filter(p=>p.stage==='压缩 SQLite 数据库');
+ assert.ok(compacting.some(p=>p.percent<100),'database compaction must begin before showing 100%');
+ assert.equal(compacting.at(-1).percent,100,'show 100% only after SQLite compaction ends');
  assert.equal(seen.at(-1).percent,100);
  const upgraded=new DatabaseSync(join(root,'state.sqlite'));
  assert.equal(storedVersion(upgraded),'0.2.0');

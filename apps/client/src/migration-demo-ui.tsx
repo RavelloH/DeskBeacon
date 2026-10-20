@@ -9,15 +9,29 @@ export function MigrationDemoApp(){
  const [paused,setPaused]=useState(false);
  const [error,setError]=useState('');
  const [speed,setSpeed]=useState(1);
+ const [leaving,setLeaving]=useState(false);
  const {exit}=useApp();
  const done=migrationDemoFinished(elapsed);
+ // Show the compact result, then automatically return to the terminal.
  useEffect(()=>{
-  if(paused||Boolean(error)||done)return;
+  if(!done||leaving)return;
+  const timer=setTimeout(()=>exit(),1100);
+  return()=>clearTimeout(timer);
+ },[done,leaving,exit]);
+ useEffect(()=>{
+  if(!leaving)return;
+  // Commit the compact two-line result before releasing Ink's screen area.
+  const timer=setTimeout(()=>exit(),250);
+  return ()=>clearTimeout(timer);
+ },[leaving,exit]);
+ useEffect(()=>{
+  if(paused||Boolean(error)||done||leaving)return;
   const timer=setInterval(()=>setElapsed(previous=>Math.min(MIGRATION_DEMO_DURATION_MS,previous+100*speed)),100);
   return ()=>clearInterval(timer);
- },[paused,error,done,speed]);
+ },[paused,error,done,speed,leaving]);
  useInput((input,key)=>{
-  if(input==='q'||key.escape){exit();return;}
+  if(leaving)return;
+  if(input==='q'||key.escape){setLeaving(true);return;}
   if(input==='r'){
    setError('');setPaused(false);setElapsed(0);return;
   }
@@ -36,7 +50,7 @@ export function MigrationDemoApp(){
   }
  });
  return <MigrationScreen progress={migrationDemoProgress(elapsed)} done={done} error={error}
-  demo paused={paused} speed={speed}/>;
+  demo paused={paused} speed={speed} finalMessage={leaving?'— 已退出迁移演示，真实数据未改变。':''}/>;
 }
 
 export async function showMigrationDemo():Promise<void>{

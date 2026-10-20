@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 const auth = readFileSync(new URL('../src/auth.ts', import.meta.url), 'utf8');
 const entry = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
 const environment = readFileSync(new URL('../src/env.ts', import.meta.url), 'utf8');
-const client = readFileSync(new URL('../../client/src/index.ts', import.meta.url), 'utf8');
+const client = readFileSync(new URL('../../client/src/setup-flow.ts', import.meta.url), 'utf8');
 
 describe('upstream cf-browser-mcp OAuth contract', () => {
   it('uses one upstream-style secret consent and KV rate limiting', () => {
@@ -38,7 +38,7 @@ describe('upstream cf-browser-mcp OAuth contract', () => {
     expect(entry).toContain('clientIdMetadataDocumentEnabled: true');
     expect(entry).toContain('legacyGrantResource: origin');
     expect(entry).toContain('requiredScopes: ["deskbeacon:agent"]');
-    expect(client).toContain("base+'/oauth/register'");
-    expect(client).toContain("base+'/oauth/token'");
+    expect(client).toContain("server+'/oauth/register'");
+    expect(client).toContain("server+'/oauth/token'");
   });
 });

@@ -29,12 +29,14 @@ const release=await build({
  plugins:[{
    name:'omit-demo-from-release',
    setup(builder){
-     builder.onResolve({filter:/^\.\/(?:demo|migration-demo|migration-demo-ui)\.js$/},
+     builder.onResolve({filter:/^\.\/(?:demo|migration-demo|migration-demo-ui|setup-demo-ui)\.js$/},
        args=>({path:args.path,namespace:'release-no-demo'}));
      builder.onLoad({filter:/.*/,namespace:'release-no-demo'},args=>({
        contents:args.path==='./demo.js'?
         'export const demoScenarios=[]; export const demoHelp=[]; export const createDemoStatus=()=>null; export const advanceDemo=x=>x;':
-        'export const MIGRATION_DEMO_DURATION_MS=0;export const MIGRATION_DEMO_STEPS=[];export const migrationDemoFinished=()=>true;export const migrationDemoProgress=()=>null;export const showMigrationDemo=()=>{throw Error("Unavailable in release")};',
+        args.path==='./setup-demo-ui.js'?
+         'export const showSetupDemo=()=>{throw Error("Unavailable in release")};':
+         'export const MIGRATION_DEMO_DURATION_MS=0;export const MIGRATION_DEMO_STEPS=[];export const migrationDemoFinished=()=>true;export const migrationDemoProgress=()=>null;export const showMigrationDemo=()=>{throw Error("Unavailable in release")};',
        loader:'js'
      }));
    }
@@ -43,11 +45,11 @@ const release=await build({
 });
 // Fails the release if demo modules are still reachable by the bundled entrypoint.
 const demoInputPaths=Object.keys(release.metafile.inputs).filter(path=>
- /(?:^|[\\/])(?:demo|migration-demo|migration-demo-ui)\.(?:ts|tsx)$/.test(path));
+ /(?:^|[\\/])(?:demo|migration-demo|migration-demo-ui|setup-demo-ui)\.(?:ts|tsx)$/.test(path));
 if(demoInputPaths.length)throw Error('Demo source was bundled: '+demoInputPaths.join(', '));
 const demoBytes=Object.values(release.metafile.outputs).flatMap(output=>
  Object.entries(output.inputs??{}).filter(([path])=>
- /(?:^|[\\/])(?:demo|migration-demo|migration-demo-ui)\.(?:ts|tsx)$/.test(path))
+ /(?:^|[\\/])(?:demo|migration-demo|migration-demo-ui|setup-demo-ui)\.(?:ts|tsx)$/.test(path))
   .map(([path,info])=>({path,bytes:info.bytesInOutput})));
 if(demoBytes.some(item=>item.bytes>0))throw Error('Release includes Demo bytes: '+JSON.stringify(demoBytes));
 const optionalDependencies=Object.fromEntries(
@@ -66,7 +68,17 @@ writeFileSync(join(base,'package.json'),JSON.stringify(pkg,null,2)+'\n');
 // A separate ESM bootstrap is essential: bundled ESM imports are evaluated
 // before module code, so setting NODE_ENV inside cli.js is too late for React.
 writeFileSync(join(base,'launcher.js'),
- '#!/usr/bin/env node\nif(!process.env.NODE_ENV)process.env.NODE_ENV="production";\nawait import("./cli.js");\n',
+ [
+  '#!/usr/bin/env node',
+  'if(!process.env.NODE_ENV)process.env.NODE_ENV="production";',
+  'const originalEmitWarning=process.emitWarning;',
+  'process.emitWarning=function(warning,...options){',
+  ' if(typeof warning==="string"&&warning==="SQLite is an experimental feature and might change at any time"&&options[0]==="ExperimentalWarning")return;',
+  ' return Reflect.apply(originalEmitWarning,process,[warning,...options]);',
+  '};',
+  'try{await import("./cli.js");}finally{process.emitWarning=originalEmitWarning;}',
+  ''
+ ].join('\n'),
  {mode:0o755});
 for(const name of ['README.md','LICENSE']){
  const original=join(root,name);if(existsSync(original))copyFileSync(original,join(base,name));
