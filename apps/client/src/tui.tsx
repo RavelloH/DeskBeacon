@@ -9,6 +9,7 @@ import {inspectorInput,inspectorResult,inspectorOutput,inspectorCopyText,storedO
 import {readEntireLocalStream} from './local-stream.js';
 import {terminalWindowTitle,writeTerminalTitle} from './terminal-title.js';
 import {activityFileLink,openActivityFile,decodeSgrMouse} from './action-link.js';
+import {logEvent,flushLogs} from './diagnostics.js';
 import {TuiInputBridge,stripMouseControlText} from './tui-input.js';
 import type {EventEmitter} from 'node:events';
 import {ACTIVITY_PAGE_SIZE, sortActivityRows, compatibleDayStats, type ActivityPage, type ActivityDayStats} from './activity-query.js';
@@ -883,7 +884,7 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
   if('error' in parsed){setNotice(parsed.error);return false;}
   const {id,args,value}=parsed;
   if(id==='help'){setNotice('命令：/config · /tasks · /latest · /stop · /view · /copy · /quit');return true;}
-  if(id==='quit'){exit();return true;}
+  if(id==='quit'){if(!demo)logEvent('tui','exit.requested','info',{reason:'slash_quit'});exit();return true;}
   if(id==='tasks'){
    if(tasks.length){setFocus('tasks');setDetailTask(true);resetDetail();}
    else setNotice('当前没有后台任务');
@@ -946,7 +947,7 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
  };
  useInput((input,key)=>{
   if(key.ctrl&&input==='c'){
-   if(Date.now()-exitArmedAt<2500){exit();return;}
+   if(Date.now()-exitArmedAt<2500){if(!demo)logEvent('tui','exit.requested','info',{reason:'double_ctrl_c'});exit();return;}
    setExitArmedAt(Date.now());setNotice('再次按 Ctrl+C 退出 · 2 秒内有效');return;
   }
   if(edit){
@@ -992,7 +993,7 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
    if(input==='n'||key.escape)setConfirm(null);
    return;
   }
-  if(input==='q'){exit();return;}
+  if(input==='q'){if(!demo)logEvent('tui','exit.requested','info',{reason:'q'});exit();return;}
   if(key.escape){
    if(view!=='main'||inspectorTab!=='summary'){resetDetail();return;}
    if(query){setQuery('');setSelectedId(null);return;}
@@ -1160,15 +1161,22 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
 
 export async function showTui(demoScenario?:DemoScenario,terminalTitle='DeskBeacon'){
  const bridge=new TuiInputBridge(process.stdin);
+ const startedAt=Date.now();
+ logEvent('tui','session.started','info',{pid:process.pid,terminal:process.env.TERM_PROGRAM??'unknown',isTTY:process.stdout.isTTY===true});
  if(process.stdout.isTTY)process.stdout.write('\x1b[?1049h\x1b[?1003h\x1b[?1006h');
  try{
   const app=render(<App {...(demoScenario?{demoScenario}:{})} mouseEvents={bridge.mouse} terminalTitle={terminalTitle}/>,{
    stdin:bridge.keyboard as unknown as typeof process.stdin,
    interactive:process.stdout.isTTY===true,exitOnCtrlC:false});
   await app.waitUntilExit();
- }finally{
+  logEvent('tui','session.exited','info',{durationMs:Date.now()-startedAt});
+ }catch(error){logEvent('tui','session.failed','error',{error,durationMs:Date.now()-startedAt});throw error;}
+ finally{
+  // Turn off reporting before removing the input handler, or late SGR mouse packets
+  // leak into the PowerShell prompt while the terminal is still processing teardown.
+  if(process.stdout.isTTY)await new Promise<void>(resolve=>process.stdout.write('\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1049l',()=>resolve()));
   bridge.dispose();
-  if(process.stdout.isTTY)process.stdout.write('\x1b[?1006l\x1b[?1003l\x1b[?1049l');
   writeTerminalTitle('DeskBeacon');
+  await flushLogs();
  }
 }

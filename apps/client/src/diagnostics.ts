@@ -6,7 +6,7 @@ export const diagnosticDataDir=process.env.DESKBEACON_DATA_DIR??join(homedir(),'
 const dataDir=diagnosticDataDir;
 
 export const logsDir=join(dataDir,'logs');
-export type LogDomain='service'|'runtime'|'connection'|'execution'|'migration'|'security';
+export type LogDomain='service'|'runtime'|'connection'|'execution'|'migration'|'security'|'tui';
 export type Severity='debug'|'info'|'warn'|'error'|'fatal';
 const budgets:Record<LogDomain,{maxBytes:number;maxFiles:number}>={
  service:{maxBytes:2*1024*1024,maxFiles:3},
@@ -15,6 +15,7 @@ const budgets:Record<LogDomain,{maxBytes:number;maxFiles:number}>={
  execution:{maxBytes:4*1024*1024,maxFiles:3},
  migration:{maxBytes:2*1024*1024,maxFiles:2},
  security:{maxBytes:2*1024*1024,maxFiles:3},
+ tui:{maxBytes:2*1024*1024,maxFiles:2},
 };
 const secrets=/token|secret|password|authorization|cookie|privatekey|private_key|apikey|api_key|dataBase64|refresh|credential/i;
 const tokenInText=/(Bearer\s+)[a-z0-9._~+/-]+|((?:access_token|refresh_token|client_secret|authorization|password|api[_-]?key)\s*[:=]\s*["']?)[^\s"'&,;}]+/gi;

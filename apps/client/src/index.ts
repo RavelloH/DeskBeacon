@@ -292,7 +292,7 @@ async function main(){
  if(action==='service'&&args[0]==='logs'){
    const {readFileSync}=await import('node:fs');
    const {join}=await import('node:path');
-   const domains=['service','runtime','connection','execution','migration','security'];
+   const domains=['service','runtime','connection','execution','migration','security','tui'];
    const selected=args[1]??'service';
    if(!domains.includes(selected))throw Error('Unknown log domain. Choose: '+domains.join(', '));
    const path=join(logsDir,selected+'.jsonl');

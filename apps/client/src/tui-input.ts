@@ -34,10 +34,18 @@ export class TuiInputBridge {
  }
  private scheduleFlush(){
   if(this.flushTimer)clearTimeout(this.flushTimer);
-  if(this.pending)this.flushTimer=setTimeout(()=>{
-   this.flushTimer=undefined;
-   if(this.pending){this.keyboard.write(this.pending);this.pending='';}
-  },0);
+  if(this.pending){
+   // Mouse CSI reports may arrive in fragments across event-loop turns.
+   // Never forward incomplete mouse reports to Ink as keyboard input.
+   const mousePrefix=/^\x1b\[<[0-9;]*$/.test(this.pending);
+   const introducer='\x1b[<'.startsWith(this.pending);
+   this.flushTimer=setTimeout(()=>{
+    this.flushTimer=undefined;
+    if(!this.pending)return;
+    if(/^\x1b\[<[0-9;]*$/.test(this.pending))this.pending='';
+    else {this.keyboard.write(this.pending);this.pending='';}
+   },mousePrefix?80:introducer?25:0);
+  }
  }
  feed(chunk:Buffer|string){
   this.pending+=this.decoder.write(typeof chunk==='string'?Buffer.from(chunk):chunk);
@@ -71,7 +79,7 @@ export class TuiInputBridge {
  dispose(){
   this.source.off('data',this.onData);
   if(this.flushTimer)clearTimeout(this.flushTimer);
-  if(this.pending)this.keyboard.write(this.pending);
+  // No keyboard consumers remain: discard incomplete mouse CSI on teardown.
   this.pending='';
   this.keyboard.end();
   this.mouse.removeAllListeners();
