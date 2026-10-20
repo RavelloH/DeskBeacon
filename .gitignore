@@ -19,6 +19,7 @@ apps/client/native/win-job/obj/
 packages/win32-*/deskbeacon-job.exe
 .toolchains/
 
-.agent/
+.agent/*
+!.agent/README.md
 AGENTS.md
 .test-data-batch-detail/
