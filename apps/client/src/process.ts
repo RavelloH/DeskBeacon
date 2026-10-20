@@ -9,6 +9,8 @@ import { createRequire } from 'node:module';
 import { platform, tmpdir } from 'node:os';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { DatabaseSync } from 'node:sqlite';
+import { ForegroundPool } from './foreground-pool.js';
+import { LIMITS } from '@deskbeacon/protocol';
 
 export type Input = Record<string,any>;
 type Running = { proc: ChildProcessWithoutNullStreams; id:string; description:string; since:number; out:string; err:string; jobManaged:boolean };
@@ -66,8 +68,9 @@ function shellPlan(c:Input):{exe:string;args:string[];cwd:string}{
 }
 
 export class TaskSupervisor{
- private fgActive=false;
+ readonly foregroundPool=new ForegroundPool(LIMITS.foregroundConcurrency,32);
  private cancelled=new Set<string>();
+ private batches=new Set<string>();
  private fg=new Map<string,Running>();
  private bg=new Map<string,Running>();
  constructor(private db:DatabaseSync,private outputDir:string,private onChange:()=>void=()=>{}) {
@@ -81,13 +84,16 @@ export class TaskSupervisor{
    this.db.prepare('INSERT INTO receipts(id,status,created,result) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status,result=excluded.result')
      .run(id,status,Date.now(),JSON.stringify(value));
  }
- async foreground(id:string,description:string,command:Input,deadlineMs=120_000){
-   const began=Date.now();
-   while(this.fgActive){if(Date.now()-began>10_000)throw Error('FOREGROUND_BUSY');await new Promise(r=>setTimeout(r,50));}
-   this.fgActive=true;
-   try{return await this.runProcess(id,description,command,Math.max(1,deadlineMs),true);}
-   finally{this.fgActive=false;this.cancelled.delete(id);}
+ async foreground(id:string,description:string,command:Input,deadlineMs=120_000,onStart?:()=>void){
+   return this.foregroundPool.run(id,()=>{
+     if(this.isCancelled(id))throw Error('CANCELLED: Foreground operation cancelled');
+     return this.runProcess(id,description,command,Math.max(1,deadlineMs),true);
+   },onStart);
  }
+ isCancelled(id:string){return [...this.cancelled].some(x=>id===x||id.startsWith(x+':'));}
+ clearCancelled(id:string){this.cancelled.delete(id);}
+ trackBatch(id:string,active:boolean){if(active)this.batches.add(id);else{this.batches.delete(id);this.clearCancelled(id);}}
+
  async runProcess(id:string,description:string,c:Input,timeoutMs:number,fg:boolean){
    const p=shellPlan(c);let child:ChildProcessWithoutNullStreams;
    const jobManaged=process.platform==='win32';
@@ -162,10 +168,11 @@ export class TaskSupervisor{
  async startBackground(id:string,description:string,c:Input){return this.runProcess(id,description,c,0,false);}
  async stop(id:string) {
    const tasks=[...this.bg.values(),...this.fg.values()].filter(t=>t.id===id||t.id.startsWith(id+":"));
-   if(tasks.length===0)return {stopped:false,reason:'not-running'};
+   const queued=this.foregroundPool.cancelPending(id);
+   if(tasks.length===0&&queued===0&&!this.batches.has(id))return {stopped:false,reason:'not-running'};
    this.cancelled.add(id);
    await Promise.all(tasks.map(async task=>stopTree(task.proc,task.jobManaged)));
-   return {stopped:true,taskId:id,processesSignalled:tasks.length};
+   return {stopped:true,taskId:id,processesSignalled:tasks.length,queuedCancelled:queued};
  }
  list(){
    return this.db.prepare('SELECT id,description,pid,status,start,exit_code FROM background ORDER BY start DESC LIMIT 200').all();

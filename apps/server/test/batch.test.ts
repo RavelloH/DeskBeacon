@@ -13,7 +13,7 @@ describe('General-purpose MCP batch',()=>{
    expect(TOOL_NAMES).toContain('exec_foreground');
    expect(TOOL_NAMES).not.toContain('exec_batch');
  });
- it('disallows recursive batches, duplicate IDs and unsafe parallel mutation',()=>{
+ it('disallows recursive batches and duplicate IDs while allowing parallel commands',()=>{
    const stage=(calls:any[],parallel=false)=>[{parallel,calls}];
    expect(toolInputSchemas.batch.safeParse({deviceId:'d',description:'x',stages:stage([
      {id:'bad',tool:'batch',input:{}}])}).success).toBe(false);
@@ -21,7 +21,7 @@ describe('General-purpose MCP batch',()=>{
      {id:'twice',tool:'fs_read',input:{path:'x'}},
      {id:'twice',tool:'fs_read',input:{path:'y'}}])}).success).toBe(false);
    expect(toolInputSchemas.batch.safeParse({deviceId:'d',description:'x',stages:stage([
-     {id:'write',tool:'fs_write',input:{path:'x',mode:'create',content:'a'}}],true)}).success).toBe(false);
+     {id:'write',tool:'fs_write',input:{path:'x',mode:'create',content:'a'}}],true)}).success).toBe(true);
  });
  it('runs independent read tools concurrently and stages sequentially',async()=>{
    const order:string[]=[];
@@ -85,7 +85,7 @@ describe('General-purpose MCP batch',()=>{
    expect(x?.operationId).toBe('op-123');
    expect(JSON.stringify(x)).not.toContain('x'.repeat(200));
  });
- it('limits parallel fanout to four and skips unsent work on fail-fast',async()=>{
+ it('does not impose an independent batch command pool or skip active parallel calls',async()=>{
    let active=0,maxActive=0;
    const seen:string[]=[];
    const requests=Array.from({length:6},(_,i)=>({id:'r'+i,tool:'fs_read' as const,input:{path:'f'+i}}));
@@ -97,10 +97,10 @@ describe('General-purpose MCP batch',()=>{
      active--;
      return input.path==='f0'?{isError:true,code:'ENOENT',message:'Not found'}:{status:'completed',data:{content:'ok'}};
    });
-   expect(maxActive).toBe(4);
-   expect(seen).toHaveLength(4);
+   expect(maxActive).toBe(6);
+   expect(seen).toHaveLength(6);
    expect(out.failed).toBe(1);
-   expect(out.skipped).toBe(2);
+   expect(out.skipped).toBe(0);
    expect(out.stoppedEarly).toBe(true);
  });
  it('retains Agent authorization scope, device identity and sub-tool validation',async()=>{
@@ -110,7 +110,9 @@ describe('General-purpose MCP batch',()=>{
        idFromName:(id:string)=>id,
        get:()=>({fetch:async(_url:string,init:any)=>{
          const request=JSON.parse(init.body);seen.push(request);
-         return Response.json({operationId:request.operationId,status:'completed',data:{path:request.input.path}});
+         const invalid=JSON.stringify(request.input).includes('unknownParam');
+         return Response.json({operationId:request.operationId,status:'completed',
+           data:{stages:[],completed:invalid?0:1,failed:invalid?1:0,skipped:0,stoppedEarly:invalid,durationMs:1}});
        }})
      }
    };
@@ -120,11 +122,13 @@ describe('General-purpose MCP batch',()=>{
    expect(out.completed).toBe(1);expect(seen).toHaveLength(1);
    expect(seen[0].grantId).toBe('grant-42');
    expect(seen[0].actorName).toBe('ChatGPT');
+   expect(seen[0].name).toBe('batch');
    expect(seen[0].input.deviceId).toBe('dev-1');
+   expect(seen[0].input.stages[0].calls[0].input.path).toBe('src/index.ts');
    const invalid=await dispatchTool(env as any,'batch',{deviceId:'dev-1',description:'invalid',stages:[
      {calls:[{id:'bad',tool:'fs_read',input:{path:'a',unknownParam:true}}]}
    ]},'grant-42','ChatGPT');
    expect(invalid.failed).toBe(1);
-   expect(seen).toHaveLength(1);
+   expect(seen).toHaveLength(2);
  });
 });

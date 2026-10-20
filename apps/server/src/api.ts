@@ -1,8 +1,8 @@
 import { createMcpHandler } from "@modelcontextprotocol/server";
 import { McpServer } from "@modelcontextprotocol/server";
-import { toolInputSchemas, TOOL_NAMES, type ToolName } from "@deskbeacon/protocol";
+import { toolInputSchemas, TOOL_NAMES, LIMITS, type ToolName } from "@deskbeacon/protocol";
 import type { Env, GrantProps, DeviceRecord } from "./env.js";
-import { executeToolBatch } from "./batch.js";
+import { executeToolBatch } from '@deskbeacon/protocol';
 import type { BatchInput } from "@deskbeacon/protocol";
 import { resolveActorName } from "./oauth-actor.js";
 import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
@@ -34,8 +34,12 @@ export async function dispatchTool(env: Env, name: ToolName, input: unknown, gra
   if (!validated.success) return secureError("INVALID_INPUT", validated.error.message.slice(0, 1500));
   const data = validated.data as Record<string, unknown>;
   if (name === "batch") {
-    return executeToolBatch(data as unknown as BatchInput,
-      (tool,subInput) => dispatchTool(env,tool,subInput,grantId,actorName));
+    const batch = data as unknown as BatchInput;
+    // History is stored by the DO, not on the device. Rare history-containing
+    // batches retain the server orchestrator; commands still use the device pool.
+    if(batch.stages.some(s=>s.calls.some(c=>c.tool==='operation_get'||c.tool==='operation_output')) ||
+       new TextEncoder().encode(JSON.stringify(batch)).byteLength>LIMITS.controlFrameBytes-16_384)
+      return executeToolBatch(batch,(tool,subInput)=>dispatchTool(env,tool,subInput,grantId,actorName));
   }
   if (name === "device_list") {
     const records = await registry(env);
@@ -65,6 +69,9 @@ export async function dispatchTool(env: Env, name: ToolName, input: unknown, gra
     body: JSON.stringify({ name, input: data, grantId, actorName, operationId: crypto.randomUUID() }),
   });
   const body = await result.json() as Record<string, unknown>;
+  if (name==='batch' && body.status==='completed' && body.data &&
+      typeof body.data==='object' && 'stages' in body.data)
+    return { ...(body.data as Record<string, unknown>), operationId: body.operationId };
   if (body.isError === true && body.code === "DEVICE_OFFLINE") {
     return { ...body, nextStep: "The target device has no active WebSocket. On that computer, launch deskbeacon (foreground) or deskbeacon service start (background). Confirm network and power; then retry device_list before retrying the operation." };
   }
@@ -112,7 +119,7 @@ const descriptions: Record<string,string> = {
   fs_manage: "Create directories, copy, move, rename or remove files; destructive actions are explicit. Do not use for archive extraction.",
   fs_archive: "Create, list or extract ZIP/TAR archives on the selected device. Specify paths and operation explicitly; archive data remains on that device.",
   exec_foreground: "Run a finite command and WAIT for its final exit, stdout, stderr and exit code in the SAME MCP call. Description is mandatory; use program+args to avoid shell escaping. Timeout is separate from front-end wait. No automatic background.",
-  batch: "Compose multiple DeskBeacon tools on ONE device in serial stages or parallel read-only stages. Supports fs_read, fs_edit, exec_foreground, net_probe, etc. Use unique call ids; each input matches the standalone tool schema WITHOUT deviceId. Parallel stages permit read-only tools only. Per-call success, errors, and bounded result previews are returned; failFast stops subsequent stages. Outputs are not automatically passed as inputs to later calls. Use serial exec_foreground calls for command execution.",
+  batch: "Compose multiple DeskBeacon tools on ONE device in serial or parallel stages. Independent parallel foreground commands share the device's four execution slots with all Agents; a batch itself occupies no slot. Each nested input matches the standalone tool schema WITHOUT deviceId. failFast stops later stages, not already running parallel calls. Results are bounded and not passed to subsequent stages.",
   exec_background: "EXPLICITLY start a long-running process, get backgroundTaskId, then poll its output using cursor and stop when done. Never use for ordinary short commands.",
   background_list: "List local background process records and statuses, including exited tasks.",
   background_get: "Inspect a specific background task by backgroundTaskId.",

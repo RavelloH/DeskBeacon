@@ -7,7 +7,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { WebSocket } from 'ws';
 import si from 'systeminformation';
-import { PROTOCOL_VERSION, LIMITS, ProtocolMessageSchema, type ProtocolMessage } from '@deskbeacon/protocol';
+import { PROTOCOL_VERSION, LIMITS, ProtocolMessageSchema, toolInputSchemas, executeToolBatch, type ProtocolMessage, type BatchInput } from '@deskbeacon/protocol';
 import { TaskSupervisor } from './process.js';
 import { fileTool } from './filesystem.js';
 import { systemTool, networkTool } from './system.js';
@@ -114,7 +114,7 @@ export class ClientDaemon extends EventEmitter {
     this.db.exec("CREATE INDEX IF NOT EXISTS activity_running_time_id_desc ON activity ((CASE WHEN status='running' THEN 1 ELSE 0 END) DESC,time DESC,id DESC)");
     // This Runtime owns its process tree. A prior Runtime's unfinished activity cannot still be running here.
     // Mark it interrupted (unknown result), not failed or successfully completed.
-    this.db.prepare("UPDATE activity SET status='interrupted' WHERE status IN ('running','accepted','started')").run();
+    this.db.prepare("UPDATE activity SET status='interrupted' WHERE status IN ('queued','running','accepted','started')").run();
     this.activityRevision=(this.db.prepare('SELECT COUNT(*) AS total FROM activity').get() as {total:number}).total;
     this.db.exec('CREATE TABLE IF NOT EXISTS workspaces(id TEXT PRIMARY KEY, grant_id TEXT, cwd TEXT, shell TEXT, version INTEGER)');
     this.db.exec('CREATE TABLE IF NOT EXISTS unacked_results (operation_id TEXT PRIMARY KEY, tool TEXT NOT NULL, created INTEGER NOT NULL)');
@@ -417,9 +417,10 @@ export class ClientDaemon extends EventEmitter {
     if(prev){
       if(prev.status==='completed'&&prev.result)await this.final(opId,tool,JSON.parse(prev.result));
       else if(prev.status==='accepted'&&this.operationInFlight.has(opId)){
-        // A DO delivery retry is a receipt request, not a second execution.
+        // A reconnect may observe a locally queued (not yet started) command.
         this.send({type:'operation.accepted',operationId:opId,payload:{acceptedAt:now()}});
-        this.send({type:'operation.started',operationId:opId,payload:{startedAt:now()}});
+        const row=this.db.prepare('SELECT status FROM activity WHERE id=?').get(opId) as {status:string}|undefined;
+        if(row?.status==='running')this.send({type:'operation.started',operationId:opId,payload:{startedAt:now()}});
       }else this.send({type:'operation.failed',operationId:opId,payload:{code:'OPERATION_UNKNOWN',message:'A previous execution is no longer live; check its result before retrying',retryable:false}});
       return;
     }
@@ -455,7 +456,7 @@ export class ClientDaemon extends EventEmitter {
       (fileAction&&typeof pathHint==='string'?dirname(pathHint):pathHint)??process.cwd());
     const requestPreview=JSON.stringify(safeInput);
     this.db.prepare('INSERT OR REPLACE INTO activity(id,grant_id,actor_name,tool,description,status,time,cwd,request_json) VALUES(?,?,?,?,?,?,?,?,?)')
-      .run(opId,m.grantId,actorName,tool,description,'running',started,cwd,
+      .run(opId,m.grantId,actorName,tool,description,tool==='exec_foreground'?'queued':'running',started,cwd,
         requestPreview.length>(tool==='fs_write'?12000:6000)?JSON.stringify({summary:'参数过大，详情已省略，...剩余 '+requestPreview.length+' 字符'}):requestPreview);
     this.activityRevision++;
     this.emit('change');
@@ -463,8 +464,10 @@ export class ClientDaemon extends EventEmitter {
     // must not silently prevent an otherwise valid, once-only execution.
     try{this.send({type:'operation.accepted',operationId:opId,payload:{acceptedAt:now()}});}
     catch{this.recordConnection('operation_ack_deferred','accepted '+opId);}
-    try{this.send({type:'operation.started',operationId:opId,payload:{startedAt:now()}});}
-    catch{this.recordConnection('operation_ack_deferred','started '+opId);}
+    if(tool!=='exec_foreground'){
+      try{this.send({type:'operation.started',operationId:opId,payload:{startedAt:now()}});}
+      catch{this.recordConnection('operation_ack_deferred','started '+opId);}
+    }
     try{
       const result=await this.execute(tool,input,opId,m.grantId);
       this.supervisor.record(opId,'completed',result);
@@ -497,7 +500,7 @@ export class ClientDaemon extends EventEmitter {
       if(this.ws?.readyState===WebSocket.OPEN){
         this.send({type:'operation.failed',operationId:opId,payload:{code:message.split(':')[0]?.slice(0,64)||'INTERNAL',message:message.slice(0,2000),retryable:false}});
       }
-    }finally{this.operationInFlight.delete(opId);}
+    }finally{this.operationInFlight.delete(opId);this.supervisor.clearCancelled(opId);}
   }
   private async final(id:string,tool:string,result:any){
     if(tool==='exec_foreground'){
@@ -526,6 +529,30 @@ export class ClientDaemon extends EventEmitter {
     }
   }
   private async execute(tool:string,input:Record<string,any>,operationId:string,grantId:string):Promise<any>{
+    if(tool==='batch'){
+      const batch=input as BatchInput;
+      this.supervisor.trackBatch(operationId,true);
+      try{
+        return await executeToolBatch(batch,async(name,subInput,callId)=>{
+          const parsed=toolInputSchemas[name].safeParse(subInput);
+          if(!parsed.success)return {isError:true,code:'INVALID_INPUT',message:parsed.error.message.slice(0,1500)};
+          if(name==='operation_get'||name==='operation_output')
+            return {isError:true,code:'UNSUPPORTED_TOOL',message:'Use DO history tools outside a device-local batch'};
+          // A sub-operation has a stable local identity, but no separate DO operation.
+          const localId=operationId+':'+callId;
+          const result=await this.execute(name,parsed.data as Record<string,any>,localId,grantId);
+          if(name==='exec_foreground'){
+            const {stdout,stderr,...metadata}=result;
+            const budget=Math.min(batch.maxResultBytes,8192);
+            const out=String(stdout??''),err=String(stderr??'');
+            const preview=Math.max(128,Math.floor((budget-1024)/2));
+            return {status:'completed',data:{...metadata,stdout:out.slice(0,preview),stderr:err.slice(0,preview),
+              stdoutTruncated:out.length>preview,stderrTruncated:err.length>preview}};
+          }
+          return {status:'completed',data:result};
+        },()=>this.supervisor.isCancelled(operationId));
+      }finally{this.supervisor.trackBatch(operationId,false);}
+    }
     if(tool==='device_info')return{deviceId:this.config.deviceId,name:this.config.deviceName,platform:platform(),
       architecture:arch(),hostname:hostname(),cpuCount:cpus().length,freeMemoryBytes:freemem(),
       totalMemoryBytes:totalmem(),defaultCwd:process.cwd(),nodeVersion:process.version,
@@ -561,7 +588,13 @@ export class ClientDaemon extends EventEmitter {
     if(tool.startsWith('fs_'))return fileTool(tool,input,workspace);
     if(tool==='exec_foreground'){
       const command={...input.command,cwd:input.command.cwd??workspace??process.cwd(),shellProfile:input.command.shellProfile??profile};
-      return await this.supervisor.foreground(operationId,input.description,command,input.timeoutMs);
+      return await this.supervisor.foreground(operationId,input.description,command,input.timeoutMs,
+        operationId.includes(':')?undefined:()=>{
+          this.db.prepare("UPDATE activity SET status='running' WHERE id=?").run(operationId);
+          this.activityRevision++;this.emit('change');
+          try{this.send({type:'operation.started',operationId,payload:{startedAt:now()}});}
+          catch{this.recordConnection('operation_ack_deferred','started '+operationId);}
+        });
     }
     if(tool==='exec_background'){
       const cmd={...input.command,cwd:input.command.cwd??workspace??process.cwd(),shellProfile:input.command.shellProfile??profile};

@@ -15,8 +15,9 @@ export const LIMITS = {
   defaultForegroundTimeoutMs: 120_000,
   // Tolerate transient outages while the client retries on its fixed one-second schedule.
   shortDisconnectGraceMs: 60_000,
-  // A queued command may be behind one foreground call lasting the full 300s maximum.
-  queueTtlMs: 330_000,
+  // Local queue is the sole foreground admission controller; RPC budget includes its wait.
+  localQueueWaitMs: 60_000,
+  foregroundConcurrency: 4,
 } as const;
 
 export const ERROR_CODES = [

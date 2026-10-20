@@ -29,9 +29,7 @@ export const batchInputSchema=z.object({
       tool:z.enum(names),
       input:z.record(z.string(),z.unknown()).default({})
     }).strict()).min(1).max(6)
-  }).strict().refine(stage=>!stage.parallel||
-    stage.calls.every(call=>BATCH_PARALLEL_TOOLS.has(call.tool)),
-    'Parallel stages accept read-only tools only; use a serial stage for commands and mutations.')).min(1).max(6),
+  }).strict()).min(1).max(6),
   maxResultBytes:z.number().int().min(1024).max(8192).default(4096)
 }).strict().superRefine((data,ctx)=>{
   const calls=data.stages.flatMap(stage=>stage.calls);
