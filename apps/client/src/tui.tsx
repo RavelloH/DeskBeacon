@@ -305,9 +305,11 @@ function RunningDurationDetailCell({entry,item,width}:{entry:ActivityEntry;item:
  const elapsed=elapsedText(Date.now()-entry.time);
  return <DetailCell item={{...item,text:item.text.replace(/│.*/, '│ '+elapsed)}} width={width}/>;
 }
+declare const __DESKBEACON_RELEASE__:boolean;
+const DEMO_ENABLED=typeof __DESKBEACON_RELEASE__==='undefined'||!__DESKBEACON_RELEASE__;
 export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoScenario?:DemoScenario;mouseEvents?:EventEmitter;terminalTitle?:string}={}){
- const demo=demoScenario!==undefined;
- const [demoStatus,setDemoStatus]=useState<DemoStatus|null>(()=>demoScenario?createDemoStatus(demoScenario):null);
+ const demo=DEMO_ENABLED&&demoScenario!==undefined;
+ const [demoStatus,setDemoStatus]=useState<DemoStatus|null>(()=>demo&&demoScenario?createDemoStatus(demoScenario):null);
  const {exit}=useApp(),{w,h}=useSize();
  const [liveStatus,setLiveStatus]=useState<Status|null>(null);
  const ipcClientRef=useRef<LiveIpcClient|null>(null);

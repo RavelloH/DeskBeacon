@@ -10,6 +10,7 @@ import { platform, tmpdir } from 'node:os';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { DatabaseSync } from 'node:sqlite';
 import type {RecordJournal} from './record-journal.js';
+import {logEvent} from './diagnostics.js';
 import { ForegroundPool } from './foreground-pool.js';
 import { LIMITS } from '@deskbeacon/protocol';
 
@@ -102,7 +103,7 @@ export class TaskSupervisor{
    const exe=jobManaged?resolveWindowsJobBinary():p.exe;
    const args=jobManaged?[Buffer.from(JSON.stringify({File:p.exe,Args:p.args,Cwd:p.cwd,ParentPid:process.pid}),'utf8').toString('base64')]:p.args;
    try{child=spawn(exe,args,{cwd:p.cwd,env:{...process.env,...c.env},windowsHide:true,detached:process.platform!=='win32',stdio:'pipe'}) as ChildProcessWithoutNullStreams;}
-   catch(e){throw Error('SPAWN_FAILED: '+String(e));}
+   catch(e){logEvent('execution','process.spawn_failed','error',{operationId:id,error:e,program:p.exe,cwd:p.cwd});throw Error('SPAWN_FAILED: '+String(e));}
    const safeId=id.replace(/[^a-zA-Z0-9_.-]/g,'_');
    const task:Running={proc:child,id,description,since:Date.now(),out:join(this.outputDir,safeId+'.out'),err:join(this.outputDir,safeId+'.err'),jobManaged};
    if(fg)this.fg.set(id,task);else this.bg.set(id,task);
@@ -116,13 +117,14 @@ export class TaskSupervisor{
    const chunks:{stdout:Buffer[];stderr:Buffer[]}={stdout:[],stderr:[]};
    const handle=(stream:'stdout'|'stderr',data:Buffer)=>{
      const prior=outputBytes;outputBytes+=data.byteLength;
-     if(outputBytes>outputLimit&&fg&&!outputLimitReached){outputLimitReached=true;void stopTree(child,jobManaged);}
+     if(outputBytes>outputLimit&&fg&&!outputLimitReached){outputLimitReached=true;logEvent('execution','foreground.output_limit','warn',{operationId:id,limitBytes:outputLimit,actualBytes:outputBytes});void stopTree(child,jobManaged);}
      const isOut=stream==='stdout';
      const limit=fg?Math.max(0,outputLimit-prior):Math.max(0,backgroundFileLimit-(isOut?stdoutWritten:stderrWritten));
      const recorded=data.subarray(0,Math.min(data.byteLength,limit));
      if(!fg){
        if(isOut)stdoutWritten+=recorded.byteLength;else stderrWritten+=recorded.byteLength;
        if(recorded.byteLength<data.byteLength){
+         if((isOut?stdoutWritten:stderrWritten)===backgroundFileLimit)logEvent('execution','background.output_truncated','warn',{operationId:id,stream,limitBytes:backgroundFileLimit});
          this.db.prepare('UPDATE background SET '+(isOut?'stdout_truncated':'stderr_truncated')+'=1 WHERE id=?').run(id);
        }
      }
@@ -130,6 +132,7 @@ export class TaskSupervisor{
      if(recorded.length&&journaled){
        try{this.journal!.stream(id,stream,recorded);}catch(e){
          spawnError='RECORD_WRITE_FAILED: '+String(e);
+         logEvent('execution','journal.write_failed','error',{operationId:id,stream,error:e});
          void stopTree(child,jobManaged);
        }
      }
@@ -138,9 +141,9 @@ export class TaskSupervisor{
    };
    child.stdout.on('data',(c:Buffer)=>handle('stdout',c));
    child.stderr.on('data',(c:Buffer)=>handle('stderr',c));
-   child.on('error',(e)=>{spawnError=String(e);});
+   child.on('error',(e)=>{spawnError=String(e);logEvent('execution','process.error','error',{operationId:id,error:e,program:p.exe});});
    let timeout:NodeJS.Timeout|undefined;
-   if(fg)timeout=setTimeout(()=>{timedOut=true;void stopTree(child,jobManaged);},timeoutMs);
+   if(fg)timeout=setTimeout(()=>{timedOut=true;logEvent('execution','foreground.timeout','warn',{operationId:id,timeoutMs,program:p.exe});void stopTree(child,jobManaged);},timeoutMs);
    if(!fg){
      // spawn() reports ENOENT/EACCES asynchronously. Do not acknowledge a
      // phantom "running" task with pid 0 before the spawn event succeeds.
@@ -151,6 +154,7 @@ export class TaskSupervisor{
      if(failure){
        this.bg.delete(id);
        outFile?.end();errFile?.end();this.onChange();
+       logEvent('execution','background.spawn_failed','error',{operationId:id,error:failure,program:p.exe});
        throw Error('SPAWN_FAILED: '+String(failure));
      }
      this.db.prepare('INSERT INTO background(id,operation_id,description,pid,status,start,stdout_path,stderr_path,record_path) VALUES(?,?,?,?,?,?,?,?,?)')
@@ -158,6 +162,7 @@ export class TaskSupervisor{
      // Unlike 'exit', 'close' is also emitted after a failed spawn.
      child.on('close',(code)=>{
        this.db.prepare("UPDATE background SET status='exited',exit_code=? WHERE id=?").run(code,id);
+       logEvent('execution','background.exited',code===0?'info':'warn',{operationId:id,pid:child.pid,exitCode:code,durationMs:Date.now()-task.since});
        outFile?.end();errFile?.end();this.journal?.processExit(id,code);this.bg.delete(id);this.onChange();
      });
      return {backgroundTaskId:id,pid:child.pid??null,description,status:'running',cwd:p.cwd,program:p.exe};
@@ -168,6 +173,9 @@ export class TaskSupervisor{
    if(timeout)clearTimeout(timeout);
    outFile?.end();errFile?.end();this.fg.delete(id);this.onChange();
    const readableStderr=normalizeProcessStderr(stderr);
+   if(code!==0||timedOut||outputLimitReached||spawnError)logEvent('execution','foreground.completed_abnormally',timedOut||spawnError?'error':'warn',
+     {operationId:id,exitCode:code,durationMs:Date.now()-task.since,timedOut,outputLimitReached,spawnError,program:p.exe,cwd:p.cwd,
+       stderrSummary:errorSummary(readableStderr,code)?.slice(0,1500)??null});
    return {exitCode:code,stdout,stderr:readableStderr,
      ...(code!==0&&readableStderr?{errorSummary:errorSummary(readableStderr,code)}:{}),
      timedOut,outputLimit:outputLimitReached,spawnError,
@@ -182,6 +190,7 @@ export class TaskSupervisor{
    if(tasks.length===0&&queued===0&&!this.batches.has(id))return {stopped:false,reason:'not-running'};
    this.cancelled.add(id);
    await Promise.all(tasks.map(async task=>stopTree(task.proc,task.jobManaged)));
+   logEvent('execution','process.stop_requested','info',{operationId:id,matched:tasks.length,cancelledQueued:queued});
    return {stopped:true,taskId:id,processesSignalled:tasks.length,queuedCancelled:queued};
  }
  list(){

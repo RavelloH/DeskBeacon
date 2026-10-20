@@ -5,6 +5,7 @@ import {join,resolve} from 'node:path';
 import {dataDir} from './daemon.js';
 import {RecordJournal,recordRelativePath} from './record-journal.js';
 import {migrateLegacyRecords} from './legacy-migration.js';
+import {logEvent,diagnosticDataDir} from './diagnostics.js';
 
 export type MigrationProgress={stage:string;from:string;to:string;completed:number;total:number;percent:number;elapsedMs:number;etaMs:number|null;detail?:string|undefined};
 export type MigrationResult={from:string;to:string;steps:string[];changed:boolean;removedOldOutput:boolean};
@@ -18,7 +19,9 @@ function cmp(a:string,b:string):number{
  const x=split(a),y=split(b);for(let i=0;i<3;i++)if((x[i]??0)!==(y[i]??0))return (x[i]??0)<(y[i]??0)?-1:1;
  return 0;
 }
+declare const __DESKBEACON_PACKAGE_VERSION__:string;
 export function codeVersion():string{
+ if(typeof __DESKBEACON_PACKAGE_VERSION__!=='undefined')return __DESKBEACON_PACKAGE_VERSION__;
  const p=JSON.parse(readFileSync(new URL('../package.json',import.meta.url),'utf8')) as {version:string};
  return p.version;
 }
@@ -197,30 +200,43 @@ export async function runStorageMigrations(options:{root?:string;target?:string;
  }
  if(fd===undefined)throw Error('MIGRATION_LOCK_UNAVAILABLE');
  const started=Date.now();
+ const logMigration=(name:string,level:'info'|'warn'|'error',fields:Record<string,unknown>)=>{
+  if(resolve(root)===resolve(diagnosticDataDir))logEvent('migration',name,level,fields);
+ };
  let db:DatabaseSync|undefined;
  try{
   writeSync(fd,JSON.stringify({pid:process.pid,startedAt:started}));
   db=new DatabaseSync(join(root,'state.sqlite'));
   db.exec('PRAGMA journal_mode=WAL');
   const initial=storedVersion(db);if(cmp(initial,target)>0)throw Error('STORAGE_FROM_NEWER_VERSION: '+initial+' > '+target);
+  logMigration('upgrade.started','info',{from:initial,to:target});
   const executed:string[]=[];
   let last=initial;
   const journal=new RecordJournal(join(root,'records'));
   for(const step of migrations){
    if(cmp(step.version,last)<=0||cmp(step.version,target)>0)continue;
-   const stepStarted=Date.now();
+   const stepStarted=Date.now(),loggedBuckets=new Set<number>();
+   logMigration('step.started','info',{from:last,to:step.version});
    const emit=(stage:string,completed:number,total:number,detail?:string)=>{
     const progress=Math.max(0,Math.min(1,total?completed/total:1));
     const elapsedMs=Date.now()-stepStarted;
     const etaMs=completed>0&&completed<total?Math.round(elapsedMs/completed*(total-completed)):null;
+    const bucket=Math.floor(progress*10);
+    if(!loggedBuckets.has(bucket)){
+      loggedBuckets.add(bucket);
+      logMigration('step.progress','info',{stage,from:last,to:step.version,percent:Math.floor(progress*100),completed,total,etaMs});
+    }
     options.onProgress?.({stage,from:last,to:step.version,completed,total,percent:Math.floor(progress*100),elapsedMs,etaMs,detail});
    };
    await step.run({db,journal,root,emit});
    putVersion(db,step.version);db.exec('PRAGMA wal_checkpoint(TRUNCATE)');last=step.version;executed.push(step.version);
+   logMigration('step.completed','info',{version:step.version,durationMs:Date.now()-stepStarted});
    emit('已完成 '+step.version+' 升级',1,1);
   }
   if(cmp(last,target)<0){putVersion(db,target);last=target;}
   db.close();db=undefined;
+  logMigration('upgrade.completed','info',{from:initial,to:last,steps:executed,durationMs:Date.now()-started});
   return{from:initial,to:last,steps:executed,changed:cmp(initial,last)<0,removedOldOutput:!existsSync(join(root,'output'))};
- }finally{try{db?.close();}catch{}try{closeSync(fd!);}catch{}rmSync(lock,{force:true});}
+ }catch(error){logMigration('upgrade.failed','error',{error,durationMs:Date.now()-started});throw error;}
+ finally{try{db?.close();}catch{}try{closeSync(fd!);}catch{}rmSync(lock,{force:true});}
 }

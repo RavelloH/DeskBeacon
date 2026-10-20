@@ -2,6 +2,7 @@ import {existsSync,openSync,closeSync,readSync,readFileSync,renameSync,statSync}
 import {join,resolve,sep} from 'node:path';
 import type {DatabaseSync} from 'node:sqlite';
 import {RecordJournal,recordRelativePath} from './record-journal.js';
+import {logEvent,diagnosticDataDir} from './diagnostics.js';
 
 type LegacyRow={id:string;tool:string|null;status:string|null;time:number|null;request_json:string|null;result:string|null;
  receipt_result:string|null;receipt_status:string|null};
@@ -132,7 +133,7 @@ export async function migrateLegacyRecords(db:DatabaseSync,journal:RecordJournal
    catch(e){
     report.errors++;
     db.prepare("UPDATE activity SET record_state='migration_error' WHERE id=?").run(row.id);
-    console.error('Legacy record migration failed:',row.id,e instanceof Error?e.message:String(e));
+    if(resolve(dataDir)===resolve(diagnosticDataDir))logEvent('migration','legacy.record_failed','error',{operationId:row.id,error:e});
    }
   }
   onProgress?.(rows.length);

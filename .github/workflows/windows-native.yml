@@ -57,6 +57,8 @@ jobs:
           node apps/client/scripts/build-native.mjs win32-arm64
       - name: Stage main package without unpublished protocol dependency
         run: node apps/client/scripts/stage-npm.mjs
+      - name: Verify published CLI excludes Demo implementation and commands
+        run: node apps/client/test/release-no-demo.mjs
       - name: Pack all three independently versioned npm packages (no publish)
         shell: bash
         run: |

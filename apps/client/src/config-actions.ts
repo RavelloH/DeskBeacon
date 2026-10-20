@@ -1,5 +1,6 @@
 import {loadConfig,saveConfig} from './daemon.js';
 import {normalizeServerUrl} from './command-palette.js';
+import {logEvent} from './diagnostics.js';
 
 /** The same display shape served to the TUI by config-get and to the CLI offline. */
 export type ConfigView={name:string;url:string;activeUrl:string;pending:boolean};
@@ -13,5 +14,6 @@ export function setPendingServerUrl(value:string):Pick<ConfigView,'url'|'activeU
  const url=normalizeServerUrl(value),cfg=loadConfig();
  const pendingUrl=url===cfg.url?undefined:url;
  saveConfig({...cfg,pendingUrl});
+ if(pendingUrl)logEvent('security','server.origin_change_pending','warn',{previousOrigin:cfg.url,pendingOrigin:pendingUrl});
  return {url:pendingUrl??cfg.url,activeUrl:cfg.url,pending:Boolean(pendingUrl)};
 }

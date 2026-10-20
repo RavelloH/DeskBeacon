@@ -16,6 +16,7 @@ import { batchActivityInput, batchActivityResult } from './batch-activity.js';
 import { fileTool } from './filesystem.js';
 import { systemTool, networkTool } from './system.js';
 import {activityPage, type ActivityPageOptions} from './activity-query.js';
+import {logEvent} from './diagnostics.js';
 
 
 
@@ -110,7 +111,8 @@ export class ClientDaemon extends EventEmitter {
     mkdirSync(dataDir,{recursive:true});
     this.db=new DatabaseSync(join(dataDir,'state.sqlite'));
     this.db.exec('PRAGMA journal_mode=WAL');
-    this.db.exec('CREATE TABLE IF NOT EXISTS connection_events (id INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL, kind TEXT NOT NULL, detail TEXT NOT NULL)');
+    // Connection diagnostics now live in logs/connection.jsonl, never SQLite.
+    this.db.exec('DROP TABLE IF EXISTS connection_events');
     this.db.exec('CREATE TABLE IF NOT EXISTS activity (id TEXT PRIMARY KEY, grant_id TEXT, tool TEXT, description TEXT, status TEXT, time INTEGER, result TEXT)');
     for(const column of ['request_json TEXT','finished_at INTEGER','duration_ms INTEGER','cwd TEXT','actor_name TEXT']){
       try{this.db.exec('ALTER TABLE activity ADD COLUMN '+column);}catch{}
@@ -154,7 +156,7 @@ export class ClientDaemon extends EventEmitter {
               .run(row.id,row.tool,Date.now(),this.config.deviceId);
           this.db.exec('COMMIT');
         }catch(e){this.db.exec('ROLLBACK');throw e;}
-      }catch(e){console.error('Journal receipt reconciliation failed:',row.id,err(e));}
+      }catch(e){logEvent('execution','receipt.reconciliation_failed','error',{operationId:row.id,error:e});}
     }
   }
 
@@ -232,14 +234,11 @@ export class ClientDaemon extends EventEmitter {
   }
   private recordConnection(kind:string,detail=''){
     if(this.stopped)return;
-    try{
-      this.db.prepare('INSERT INTO connection_events(time,kind,detail) VALUES(?,?,?)').run(Date.now(),kind,detail.slice(0,160));
-      this.db.exec('DELETE FROM connection_events WHERE id NOT IN (SELECT id FROM connection_events ORDER BY id DESC LIMIT 250)');
-    }catch(error){
-      // Transient SQLite contention must never kill the entire Runtime from a
-      // WebSocket callback or leave it unable to reconnect.
-      console.error('Connection event diagnostic failed:',err(error));
-    }
+    const level=/error|exception|failed/.test(kind)?'error':
+      /timeout|closed|reconnect_scheduled|ack_deferred|disconnect/.test(kind)?'warn':'info';
+    logEvent('connection',kind,level,{detail,epoch:this.epoch,ready:this.ready,state:this.state,
+      awaitingPong:this.heartbeatAwaiting,heartbeatMisses:this.heartbeatMisses,
+      latencyMs:this.latencyMs,connectedForMs:this.socketOpenedAt?Date.now()-this.socketOpenedAt:null});
   }
   private persistDeviceName(name:string){
     if(this.config.deviceName===name)return;
@@ -284,7 +283,7 @@ export class ClientDaemon extends EventEmitter {
       if(this.stopped)return;
       this.recordConnection('connect_exception',err(error));
       this.state='error: '+err(error);
-      console.error('DeskBeacon connect recovered from:',err(error));
+      logEvent('connection','connect.retryable_exception','error',{error});
       // A failed WebSocket constructor or local OS error is retryable, not a
       // fatal unhandled Promise rejection that kills the unattended service.
       const previous=this.ws;this.ws=null;
@@ -302,7 +301,7 @@ export class ClientDaemon extends EventEmitter {
       this.connecting=false;
       this.state='error: '+err(e);this.emit('change');
       this.recordConnection('token_refresh_failed',err(e));
-      console.error('DeskBeacon token refresh:',err(e));
+      logEvent('security','oauth.refresh_failed','error',{error:e});
       this.scheduleReconnect();
       return;
     }
@@ -347,7 +346,7 @@ export class ClientDaemon extends EventEmitter {
       this.keepaliveTimer=setInterval(heartbeat,10_000);
       this.keepaliveTimer.unref();
     });
-    socket.on('message',raw=>{void this.message(raw.toString()).catch(e=>{console.error('Remote message:',err(e));});});
+    socket.on('message',raw=>{void this.message(raw.toString()).catch(e=>{logEvent('connection','message.handler_failed','error',{error:e});});});
     socket.on('close',(code,reason)=>{
       if(this.ws!==socket)return;
       if(this.handshakeTimer){clearTimeout(this.handshakeTimer);this.handshakeTimer=undefined;}
@@ -355,7 +354,7 @@ export class ClientDaemon extends EventEmitter {
       const age=Date.now()-this.socketOpenedAt;
       const pongAge=this.lastHeartbeatAt===null?'never':String(Date.now()-this.lastHeartbeatAt)+'ms';
       this.recordConnection('websocket_closed','code='+code+' age='+age+'ms pongAge='+pongAge+' awaiting='+this.heartbeatAwaiting+' misses='+this.heartbeatMisses+' reason='+reason.toString());
-      console.error('DeskBeacon WebSocket closed:',code,reason.toString());this.ready=false;this.state='disconnected';
+      this.ready=false;this.state='disconnected';
       this.cancelRenames('DEVICE_DISCONNECTED');
       this.heartbeatAwaiting=false;this.latencyMs=null;this.emit('change');
       // shutdown() closes the socket asynchronously; never create a new 60s timer afterward.
@@ -365,7 +364,7 @@ export class ClientDaemon extends EventEmitter {
         if(this.ready||this.stopped)return;
         this.recordConnection('disconnect_grace_expired','foreground cancellation');
         for(const task of this.supervisor.active().filter(x=>x.kind==='foreground')){
-          void this.supervisor.stop(task.id).catch(e=>console.error('Disconnected foreground stop:',err(e)));
+          void this.supervisor.stop(task.id).catch(e=>logEvent('execution','foreground.stop_failed','error',{operationId:task.id,error:e}));
         }
       },LIMITS.shortDisconnectGraceMs);
       this.scheduleReconnect();
@@ -373,7 +372,7 @@ export class ClientDaemon extends EventEmitter {
     socket.on('unexpected-response',(_req,response)=>{if(response.statusCode===401)this.forceRefresh=true;});
     socket.on('error',e=>{
       this.recordConnection('websocket_error',err(e));
-      this.state='error: '+err(e);console.error('DeskBeacon WebSocket:',err(e));
+      this.state='error: '+err(e);
     });
   }
   stop(){
@@ -394,7 +393,9 @@ export class ClientDaemon extends EventEmitter {
     if(this.keepaliveTimer)clearInterval(this.keepaliveTimer);
     if(this.handshakeTimer)clearTimeout(this.handshakeTimer);
     if(this.reconnectTimer)clearTimeout(this.reconnectTimer);
-    this.ws?.close();
+    // Shutdown does not require a WebSocket close handshake. terminate() releases
+    // the transport immediately rather than waiting up to 30 seconds.
+    this.ws?.terminate();
     const ids=new Set(this.supervisor.active().map(task=>task.id.split(':')[0]!));
     await Promise.allSettled([...ids].map(id=>this.supervisor.stop(id)));
     const deadline=Date.now()+7500;
@@ -434,7 +435,7 @@ export class ClientDaemon extends EventEmitter {
         const result=this.restoredResult(item.operation_id,receipt);
         if(result===null)continue;
         try{await this.final(item.operation_id,item.tool,result);}
-        catch(e){console.error('Result replay suspended:',err(e));break;}
+        catch(e){logEvent('execution','result.replay_suspended','error',{error:e});break;}
       }
     }finally{this.replayInProgress=false;}
   }
@@ -555,7 +556,7 @@ export class ClientDaemon extends EventEmitter {
       this.emit('change');
       this.db.prepare('INSERT OR IGNORE INTO unacked_results(operation_id,tool,created,device_id) VALUES(?,?,?,?)').run(opId,tool,Date.now(),this.config.deviceId);
       try{await this.final(opId,tool,result);}
-      catch(e){console.error('Completed operation result awaiting retry:',err(e));}
+      catch(e){logEvent('execution','result.awaiting_retry','warn',{operationId:opId,error:e});}
     }catch(e){
       const message=err(e);
       try{this.journal.finish(opId,{error:message},'failed');}catch{}

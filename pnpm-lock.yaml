@@ -38,6 +38,9 @@ importers:
       react:
         specifier: ^19.3.1
         version: 19.3.1
+      rlog-js:
+        specifier: ^3.0.0
+        version: 3.0.0
       screenshot-desktop:
         specifier: ^1.15.7
         version: 1.15.7
@@ -1529,6 +1532,10 @@ packages:
     deprecated: Rimraf versions prior to v4 are no longer supported
     hasBin: true
 
+  rlog-js@3.0.0:
+    resolution: {integrity: sha512-R/efGtzg5ja1KEABHGWa3V1B5IjwW7E1IPDNsX1wzgUv9vBuVcbxH3ubZy4nO2IJ6r+B22lkUT4/idmSDo7H4w==}
+    engines: {node: '>=20'}
+
   rolldown@1.2.14:
     resolution: {integrity: sha512-eTBTTqMR6uHKLgcUqpJP8ntzDI6V4LYA8negAMBEI7gkgVvOdrx6VsvS2Ym+83KhOPdLCHWJu0w7UQFJZhHKNw==}
     engines: {node: ^20.19.0 || >=22.12.0}
@@ -2909,6 +2916,8 @@ snapshots:
   rimraf@2.6.3:
     dependencies:
       glob: 7.2.3
+
+  rlog-js@3.0.0: {}
 
   rolldown@1.2.14:
     dependencies:

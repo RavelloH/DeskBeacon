@@ -1,4 +1,4 @@
-import { createServer, createConnection } from 'node:net';
+import { createServer, createConnection, type Server, type Socket } from 'node:net';
 import {OutputWatchHub} from './output-watch.js';
 import { platform, homedir } from 'node:os';
 import { join } from 'node:path';
@@ -154,7 +154,17 @@ function resultPage(daemon:ClientDaemon,operationId:unknown,byteOffset:unknown,m
  return{text:bytes.subarray(offset,nextOffset).toString('utf8'),nextOffset,totalBytes,
   hasMore:nextOffset<totalBytes,stream:'result',available:true};
 }
-export function startIpc(daemon:ClientDaemon){
+const ipcClients=new WeakMap<Server,Set<Socket>>();
+/** Close the listener and disconnect subscriptions so the IPC drain cannot stall. */
+export function closeIpc(server:Server):Promise<void>{
+ const clients=ipcClients.get(server);
+ return new Promise((resolve,reject)=>{
+  if(!server.listening){for(const socket of clients??[])socket.destroy();resolve();return;}
+  server.close(error=>error?reject(error):resolve());
+  for(const socket of clients??[])socket.destroy();
+ });
+}
+export function startIpc(daemon:ClientDaemon,onExit?:()=>Promise<void>){
  // Exclusive atomic lock prevents two TUI windows from opening separate device
  // connections, including on Unix where deleting an active socket is unsafe.
  mkdirSync(dataDir,{recursive:true,mode:0o700});
@@ -186,7 +196,9 @@ export function startIpc(daemon:ClientDaemon){
  if(!owned)throw Error('RUNTIME_LOCK_UNAVAILABLE');
  if(process.platform!=='win32'&&existsSync(ipcPath))rmSync(ipcPath,{force:true});
  const outputHub=new OutputWatchHub(join(dataDir,'output'));
+ const clients=new Set<Socket>();
  const server=createServer(socket=>{
+   clients.add(socket);socket.once('close',()=>clients.delete(socket));
    let buffer='';
    let watchedTopics=new Set<string>();
    let subscribed=false;
@@ -286,7 +298,12 @@ export function startIpc(daemon:ClientDaemon){
              .filter(task=>task.kind==='background'&&(!Array.isArray(request.taskIds)||request.taskIds.includes(task.id)))
              .map(task=>({id:task.id,line:daemon.supervisor.latestLine(task.id)}));
            else if(request.action==='stop')result=await daemon.supervisor.stop(String(request.taskId));
-           else if(request.action==='exit') {result={stopping:true};setImmediate(()=>{void daemon.shutdown().finally(()=>server.close());});}
+           else if(request.action==='exit'){
+             result={stopping:true};
+             setImmediate(()=>{void (onExit?onExit():daemon.shutdown().then(()=>closeIpc(server)))
+               .catch(error=>{console.error('IPC exit shutdown failed:',error);});
+             });
+           }
            else if(request.action==='output-tail'){
              const head=outputPage(daemon,request.operationId,request.stream,0,1);
              const start=Math.max(0,head.totalBytes-4096);
@@ -326,6 +343,7 @@ export function startIpc(daemon:ClientDaemon){
    }catch{}
    if(process.platform!=='win32')try{rmSync(ipcPath,{force:true});}catch{}
  };
+ ipcClients.set(server,clients);
  server.once('close',releaseLock);
  server.once('error',releaseLock);
  server.listen(ipcPath,()=>{

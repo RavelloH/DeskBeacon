@@ -21,3 +21,4 @@ packages/win32-*/deskbeacon-job.exe
 
 .agent/
 AGENTS.md
+.test-data-batch-detail/

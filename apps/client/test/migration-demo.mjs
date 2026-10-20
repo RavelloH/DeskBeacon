@@ -7,7 +7,7 @@ import React from 'react';
 import {render} from 'ink';
 import {MIGRATION_DEMO_DURATION_MS,MIGRATION_DEMO_STEPS,migrationDemoProgress,migrationDemoFinished}
  from '../dist/migration-demo.js';
-import {MigrationDemoApp} from '../dist/migration-tui.js';
+import {MigrationDemoApp} from '../dist/migration-demo-ui.js';
 
 const root=mkdtempSync(join(tmpdir(),'deskbeacon-demo-migration-'));
 const dataDir=join(root,'no-real-storage');

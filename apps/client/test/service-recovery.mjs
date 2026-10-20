@@ -91,15 +91,15 @@ try{
  await delay(750);
  assert.ok(!existsSync(pidFile)&&!existsSync(supervisorFile),
   'normal service stop must not trigger another restart');
- const log=readFileSync(join(root,'service.log'),'utf8');
- assert.match(log,/restart scheduled/);
- assert.match(log,/runtime spawned/);
- assert.match(log,/supervisor stopped/);
+ const log=readFileSync(join(root,'logs','service.jsonl'),'utf8');
+ assert.match(log,/worker.restart_scheduled/);
+ assert.match(log,/worker.spawned/);
+ assert.match(log,/supervisor.stopped/);
  console.log('PASS normal service stop prevents restarts and bounded diagnostics retained');
 }catch(e){
  console.error('SUPERVISOR_CI_FAILED',e);
  if(existsSync(root)){
-  const logPath=join(root,'service.log');
+  const logPath=join(root,'logs','service.jsonl');
   if(existsSync(logPath))console.error(readFileSync(logPath,'utf8').slice(-4000));
  }
  process.exitCode=1;

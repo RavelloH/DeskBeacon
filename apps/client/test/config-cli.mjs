@@ -14,6 +14,7 @@ const entry=fileURLToPath(new URL('../dist/index.js',import.meta.url));
 const env={...process.env,DESKBEACON_DATA_DIR:root,DESKBEACON_IPC_PATH:process.env.DESKBEACON_IPC_PATH};
 const {ClientDaemon,saveConfig,loadConfig}=await import('../dist/daemon.js');
 const {startIpc}=await import('../dist/ipc.js');
+const {closeLogs}=await import('../dist/diagnostics.js');
 const base={deviceName:'ASUS 原设备',url:'https://original.example',deviceId:'test-id',clientId:'test-id',
  accessToken:'DO_NOT_LEAK_ACCESS',refreshToken:'DO_NOT_LEAK_REFRESH'};
 saveConfig(base);
@@ -81,5 +82,6 @@ try{
 }finally{
  if(server)await new Promise(resolve=>server.close(resolve));
  if(daemon)await daemon.shutdown();
+ await closeLogs();
  rmSync(root,{recursive:true,force:true});
 }

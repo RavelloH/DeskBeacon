@@ -21,12 +21,35 @@ for(const arch of platforms){
 }
 rmSync(base,{recursive:true,force:true});
 mkdirSync(base,{recursive:true});
-await build({
+const release=await build({
  entryPoints:[join(client,'src','index.ts')],
  outfile:join(base,'cli.js'),
  bundle:true,platform:'node',format:'esm',target:'node24',jsx:'automatic',legalComments:'none',
+ minify:true,metafile:true,define:{__DESKBEACON_RELEASE__:'true',__DESKBEACON_PACKAGE_VERSION__:JSON.stringify(source.version)},
+ plugins:[{
+   name:'omit-demo-from-release',
+   setup(builder){
+     builder.onResolve({filter:/^\.\/(?:demo|migration-demo|migration-demo-ui)\.js$/},
+       args=>({path:args.path,namespace:'release-no-demo'}));
+     builder.onLoad({filter:/.*/,namespace:'release-no-demo'},args=>({
+       contents:args.path==='./demo.js'?
+        'export const demoScenarios=[]; export const demoHelp=[]; export const createDemoStatus=()=>null; export const advanceDemo=x=>x;':
+        'export const MIGRATION_DEMO_DURATION_MS=0;export const MIGRATION_DEMO_STEPS=[];export const migrationDemoFinished=()=>true;export const migrationDemoProgress=()=>null;export const showMigrationDemo=()=>{throw Error("Unavailable in release")};',
+       loader:'js'
+     }));
+   }
+ }],
  external:[...Object.keys(source.dependencies).filter(n=>n!=='@deskbeacon/protocol'),...Object.keys(source.optionalDependencies)]
 });
+// Fails the release if demo modules are still reachable by the bundled entrypoint.
+const demoInputPaths=Object.keys(release.metafile.inputs).filter(path=>
+ /(?:^|[\\/])(?:demo|migration-demo|migration-demo-ui)\.(?:ts|tsx)$/.test(path));
+if(demoInputPaths.length)throw Error('Demo source was bundled: '+demoInputPaths.join(', '));
+const demoBytes=Object.values(release.metafile.outputs).flatMap(output=>
+ Object.entries(output.inputs??{}).filter(([path])=>
+ /(?:^|[\\/])(?:demo|migration-demo|migration-demo-ui)\.(?:ts|tsx)$/.test(path))
+  .map(([path,info])=>({path,bytes:info.bytesInOutput})));
+if(demoBytes.some(item=>item.bytes>0))throw Error('Release includes Demo bytes: '+JSON.stringify(demoBytes));
 const optionalDependencies=Object.fromEntries(
  Object.keys(source.optionalDependencies).map(name=>[name,source.version]));
 const pkg={
