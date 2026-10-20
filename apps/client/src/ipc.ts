@@ -1,4 +1,5 @@
 import { createServer, createConnection } from 'node:net';
+import {OutputWatchHub} from './output-watch.js';
 import { platform, homedir } from 'node:os';
 import { join } from 'node:path';
 import { existsSync, rmSync, chmodSync, readdirSync, openSync, closeSync, readSync, statSync,
@@ -180,8 +181,26 @@ export function startIpc(daemon:ClientDaemon){
  }
  if(!owned)throw Error('RUNTIME_LOCK_UNAVAILABLE');
  if(process.platform!=='win32'&&existsSync(ipcPath))rmSync(ipcPath,{force:true});
+ const outputHub=new OutputWatchHub(join(dataDir,'output'));
  const server=createServer(socket=>{
    let buffer='';
+   let watchedTopics=new Set<string>();
+   let subscribed=false;
+   let metricsTimer:ReturnType<typeof setInterval>|undefined;
+   const sendEvent=(value:Record<string,unknown>)=>{
+     if(socket.destroyed)return;
+     // Never drop a change silently: force snapshot resync on a stalled consumer.
+     if(socket.writableLength>=1024*1024){socket.destroy();return;}
+     socket.write(JSON.stringify({type:'event',...value})+'\n');
+   };
+   const onChange=()=>{
+     if(watchedTopics.has('runtime'))sendEvent({topic:'runtime.changed'});
+   };
+   socket.once('close',()=>{
+     if(subscribed)daemon.off('change',onChange);
+     if(metricsTimer)clearInterval(metricsTimer);
+     outputHub.delete(socket);
+   });
    socket.on('data',data=>{
      buffer+=data.toString('utf8');if(buffer.length>64*1024){socket.destroy();return;}
      for(let position;(position=buffer.indexOf('\n'))>=0;){
@@ -191,7 +210,26 @@ export function startIpc(daemon:ClientDaemon){
          try{request=JSON.parse(line);}catch{socket.write(JSON.stringify({error:'INVALID_JSON'})+'\n');return;}
          try{
            let result:any;
-           if(request.action==='subscribe'){
+           if(request.action==='watch'){
+             if(!Array.isArray(request.topics)||request.topics.length>16||
+               request.topics.some((topic:unknown)=>!['runtime','system.metrics'].includes(String(topic))))
+               throw Error('INVALID_IPC_TOPICS');
+             watchedTopics=new Set(request.topics as string[]);
+             if(watchedTopics.size&&!subscribed){daemon.on('change',onChange);subscribed=true;}
+             if(!watchedTopics.size&&subscribed){daemon.off('change',onChange);subscribed=false;}
+             if(metricsTimer){clearInterval(metricsTimer);metricsTimer=undefined;}
+             if(watchedTopics.has('system.metrics'))
+               metricsTimer=setInterval(()=>sendEvent({topic:'metrics.changed'}),4000);
+             result={topics:[...watchedTopics]};
+           }
+           else if(request.action==='output.watchSet'){
+             if(!Array.isArray(request.taskIds)||request.taskIds.length>16||
+               request.taskIds.some((id:unknown)=>typeof id!=='string'||!/^[a-zA-Z0-9_.:-]{1,128}$/.test(id)))
+               throw Error('INVALID_WATCH_SET');
+             outputHub.set(socket,request.taskIds,(change)=>sendEvent({topic:'output.changed',...change}));
+             result={taskIds:request.taskIds};
+           }
+           else if(request.action==='subscribe'){
              let statusReadPending=false,statusDirty=false;
              const notify=()=>{
                if(socket.destroyed)return;
@@ -209,7 +247,8 @@ export function startIpc(daemon:ClientDaemon){
              notify();
              return;
            }
-           if(request.action==='status')result=await daemon.status();
+           else if(request.action==='status-lite')result=await daemon.status(false);
+           else if(request.action==='status')result=await daemon.status();
            else if(request.action==='config-get'){
              const cfg=loadConfig();
              result={url:cfg.pendingUrl??cfg.url,activeUrl:cfg.url,
@@ -231,10 +270,21 @@ export function startIpc(daemon:ClientDaemon){
              cursor:request.cursor,query:request.query,limit:request.limit,watchIds:request.watchIds
            });
            else if(request.action==='task-logs')result=daemon.supervisor.active()
-             .filter(task=>task.kind==='background')
+             .filter(task=>task.kind==='background'&&(!Array.isArray(request.taskIds)||request.taskIds.includes(task.id)))
              .map(task=>({id:task.id,line:daemon.supervisor.latestLine(task.id)}));
            else if(request.action==='stop')result=await daemon.supervisor.stop(String(request.taskId));
            else if(request.action==='exit') {result={stopping:true};setImmediate(()=>{void daemon.shutdown().finally(()=>server.close());});}
+           else if(request.action==='output-tail'){
+             const head=outputPage(request.operationId,request.stream,0,1);
+             const start=Math.max(0,head.totalBytes-4096);
+             let tail:any;
+             for(let skip=0;skip<=4;skip++)try{
+               tail=outputPage(request.operationId,request.stream,start+skip,8192);break;
+             }catch(error){
+               if(!String(error).includes('INVALID_BYTE_OFFSET')||skip===4)throw error;
+             }
+             result=tail;
+           }
            else if(request.action==='output'||request.action==='input')result=outputPage(request.operationId,
   request.action==='input'?'input':request.stream,request.byteOffset,request.maxBytes);
            else if(request.action==='result')result=resultPage(daemon,request.operationId,request.byteOffset,request.maxBytes);
@@ -250,8 +300,8 @@ export function startIpc(daemon:ClientDaemon){
              })};
            }
            else result={error:'UNKNOWN_LOCAL_COMMAND'};
-           socket.write(JSON.stringify({result})+'\n');
-         }catch(e){socket.write(JSON.stringify({error:String(e)})+'\n');}
+           socket.write(JSON.stringify(request.id===undefined?{result}:{id:request.id,result})+'\n');
+         }catch(e){socket.write(JSON.stringify(request.id===undefined?{error:String(e)}:{id:request.id,error:String(e)})+'\n');}
        })();
      }
    });

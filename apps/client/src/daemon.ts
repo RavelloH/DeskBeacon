@@ -122,7 +122,7 @@ export class ClientDaemon extends EventEmitter {
     this.db.prepare('DELETE FROM unacked_results WHERE device_id IS NULL OR device_id<>?').run(config.deviceId);
     this.supervisor=new TaskSupervisor(this.db,join(dataDir,'output'),()=>this.emit('change'));
   }
-  async status(){
+  async status(includeBackground=true){
     const systemMemory=this.refreshSystemMemory();
     const current=process.cpuUsage(),clock=process.hrtime.bigint();
     const elapsedUs=Number(clock-this.cpuSampleAt)/1000;
@@ -140,7 +140,7 @@ export class ClientDaemon extends EventEmitter {
         const row=this.db.prepare('SELECT actor_name,grant_id,request_json,cwd FROM activity WHERE id=?').get(task.id) as
           {actor_name:string|null;grant_id:string;request_json:string|null;cwd:string|null}|undefined;
         return {...task,...(row?{actorName:row.actor_name,grantId:row.grant_id,requestJson:row.request_json,cwd:row.cwd}:{})};
-      }),background:this.supervisor.list(),
+      }),...(includeBackground?{background:this.supervisor.list()}:{}),
       transfers:[...this.transfers].map(([id,t])=>({id,...t}))};
   }
   activityList(options:ActivityPageOptions={}){

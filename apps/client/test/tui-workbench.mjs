@@ -402,12 +402,29 @@ try{
 
     await controls.send('7');
     await waitFor(()=>controls.capture.snapshot().includes('BACKGROUND 9'),'demo can show nine background tasks');
+    await waitFor(()=>controls.capture.snapshot().includes('…以及剩余 7 个'),'compact terminal reserves final row for seven hidden tasks');
     for(let i=0;i<8;i++)await controls.send('j');
     await waitFor(()=>controls.capture.snapshot().includes('后台服务 #9'),
       'task navigation reaches the last of nine tasks\n'+controls.capture.snapshot());
     assert.ok(controls.capture.snapshot().includes('9 / 9'));
+    assert.ok(controls.capture.snapshot().includes('后台服务 #8'),'scrolled compact window must show the latest two tasks');
+    for(let i=0;i<4;i++)await controls.send('k');
+    await waitFor(()=>controls.capture.snapshot().includes('后台服务 #4'),'compact task window scrolls back to a nonzero offset');
   }finally{await controls.close();}
   console.log('PASS detail scrolling, Tab focus, local stdout/stderr, stop cancellation and 9-task navigation');
+
+  const tallTasks=await mountDemo('busy',100,32);
+  try{
+    await tallTasks.send('7');
+    await waitFor(()=>tallTasks.capture.snapshot().includes('BACKGROUND 9'),'nine tasks are visible in the footer');
+    await waitFor(()=>tallTasks.capture.snapshot().includes('…以及剩余 5 个'),'five-row layout renders four tasks and an overflow row');
+    await tallTasks.send('\t');await tallTasks.send('\t');
+    for(let i=0;i<8;i++)await tallTasks.send('j');
+    await waitFor(()=>tallTasks.capture.snapshot().includes('后台服务 #6'),'five-row footer can scroll to tasks #6–#9');
+    for(let i=0;i<4;i++)await tallTasks.send('k');
+    await waitFor(()=>tallTasks.capture.snapshot().includes('后台服务 #2'),'five-row footer scrolls to a nonzero middle window');
+  }finally{await tallTasks.close();}
+  console.log('PASS five-row overflow, responsive compact footer and sliding subscription window');
 
   const commands=await mountDemo('connected',120,32);
   try{

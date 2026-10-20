@@ -1,6 +1,7 @@
 import React, {useEffect, useMemo, useRef, useState, useSyncExternalStore} from 'react';
 import {render, Box, Text, useInput, useApp, useStdout} from 'ink';
-import {requestIpc, subscribeIpc} from './ipc.js';
+import {LiveIpcClient,type LiveEvent} from './ipc-live.js';
+import {backgroundWindow} from './background-window.js';
 import {activityPresentation, safeText, duration, elapsedText, type ActivityEntry} from './presenter.js';
 import {toolRow, type Segment, type Tone} from './tool-presentation.js';
 import {detailPresentation, wrapDetail, numberedBlock, type DetailLine} from './detail-presentation.js';
@@ -96,32 +97,12 @@ function RunningDetailHeading({entry,tool,status,width}:{entry:ActivityEntry;too
  },[]);
  return <Line text={tool+' · '+status+' · '+liveElapsed(now-entry.time)} width={width} color={stateColor.running} bold/>;
 }
-function BackgroundTable({tasks,start,slots,width,height,focus,selectedId,demo,horizontal,activityWidth}:{
- tasks:LocalTask[];start:number;slots:number;width:number;height:number;focus:boolean;selectedId:string|null;
- demo:boolean;horizontal:boolean;activityWidth:number;
+function BackgroundTable({tasks,start,slots,hidden,logs,width,height,focus,selectedId,horizontal,activityWidth}:{
+ tasks:LocalTask[];start:number;slots:number;hidden:number;logs:Record<string,string>;width:number;height:number;focus:boolean;selectedId:string|null;
+ horizontal:boolean;activityWidth:number;
 }){
  const [now,setNow]=useState(()=>Date.now());
- const [logs,setLogs]=useState<Record<string,string>>({});
- const taskIds=tasks.map(task=>task.id).join('\0');
- useEffect(()=>{
-  if(!tasks.length)return;
-  let alive=true,pending=false;
-  const poll=()=>{
-   if(demo||pending)return;
-   pending=true;
-   void requestIpc({action:'task-logs'},800).then((value:TaskLog[])=>{
-    if(!alive||!Array.isArray(value))return;
-    const next=Object.fromEntries(value.map(item=>[item.id,item.line]));
-    setLogs(previous=>{
-     const keys=Object.keys(next),oldKeys=Object.keys(previous);
-     return keys.length===oldKeys.length&&keys.every(key=>previous[key]===next[key])?previous:next;
-    });
-   }).catch(()=>{}).finally(()=>{pending=false;});
-  };
-  poll();
-  const timer=setInterval(()=>{setNow(Date.now());poll();},1000);
-  return()=>{alive=false;clearInterval(timer);};
- },[demo,taskIds]);
+ useEffect(()=>{if(!tasks.length)return;const timer=setInterval(()=>setNow(Date.now()),1000);return()=>clearInterval(timer);},[tasks.length>0]);
  const contentWidth=Math.max(1,width-2),iconWidth=Math.min(2,contentWidth);
  const visible=tasks.slice(start,start+slots);
  return <Box flexDirection="column" width={width} height={height} flexShrink={0} overflow="hidden">
@@ -147,6 +128,7 @@ function BackgroundTable({tasks,start,slots,width,height,focus,selectedId,demo,h
      <Text color={palette.muted}>{' '+fit(elapsed,elapsedWidth,false)}</Text>
     </Box>;
    }):null}
+  {hidden>0?<Box height={1} width={width} paddingX={1}><Text color={palette.muted}>{fit('…以及剩余 '+hidden+' 个 · ↑↓ / 滚轮查看',Math.max(1,width-2))}</Text></Box>:null}
  </Box>;
 }
 function useSize(){
@@ -328,6 +310,17 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
  const [demoStatus,setDemoStatus]=useState<DemoStatus|null>(()=>demoScenario?createDemoStatus(demoScenario):null);
  const {exit}=useApp(),{w,h}=useSize();
  const [liveStatus,setLiveStatus]=useState<Status|null>(null);
+ const ipcClientRef=useRef<LiveIpcClient|null>(null);
+ const [ipcSession,setIpcSession]=useState(0);
+ const [backgroundVersion,setBackgroundVersion]=useState(0);
+ const [focusedVersion,setFocusedVersion]=useState(0);
+ const [backgroundLogs,setBackgroundLogs]=useState<Record<string,string>>({});
+ const visibleBackgroundIdsRef=useRef<Set<string>>(new Set());
+ const focusedOutputIdRef=useRef<string|null>(null);
+ const requestLocal=(request:object,timeoutMs=2500):Promise<any>=>{
+  const client=ipcClientRef.current;
+  return client?client.request(request as Record<string,unknown>,timeoutMs):Promise.reject(Error('IPC_DISCONNECTED'));
+ };
  const status:Status|null=demo?demoStatus:liveStatus;
  const [loadedActivity,setLoadedActivity]=useState<ActivityEntry[]>(()=>demoStatus?.activity??[]);
  const activityDeviceRef=useRef<string|null>(null);
@@ -354,7 +347,7 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
   if(edit!=='command')return;
   if(demo){setSettings({name:status?.deviceName,url:status?.server});return;}
   let alive=true;
-  void requestIpc({action:'config-get'},2500).then(result=>{if(alive)setSettings(result);})
+  void requestLocal({action:'config-get'},2500).then(result=>{if(alive)setSettings(result);})
    .catch(error=>{if(alive)setNotice('读取配置失败：'+String(error));});
   return()=>{alive=false;};
  },[edit,demo]);
@@ -373,6 +366,8 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
  const [detailScroll,setDetailScroll]=useState(0);
  const [inspectorTab,setInspectorTab]=useState<InspectorTab>('summary');
  const [inspectorSource,setInspectorSource]=useState<FullSource|null>(null);
+ const inspectorSourceRef=useRef<FullSource|null>(null);
+ inspectorSourceRef.current=inspectorSource;
  const [inspectorError,setInspectorError]=useState('');
  const [inspectorProgress,setInspectorProgress]=useState('');
  const [liveLog,setLiveLog]=useState('');
@@ -400,29 +395,63 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
  },[]);
  useEffect(()=>{
   if(demo)return;
-  let alive=true,unsubscribe=()=>{};let retry:ReturnType<typeof setTimeout>|undefined;
-  const listen=()=>{unsubscribe=subscribeIpc(next=>{
-   if(!alive)return;
-   setLiveStatus(next as Status);
-   ipcOfflineRef.current=false;
-   setIpcOfflineSince(null);
-   setIpcDisconnectReason('');
-   setNotice(previous=>previous==='正在恢复本地连接…'?'':previous);
-  },reason=>{if(alive){
-   ipcOfflineRef.current=true;
-   setIpcOfflineSince(previous=>previous??Date.now());
-   setIpcDisconnectReason(reason??'连接已断开');
-   retry=setTimeout(listen,2000);
-  }});};
-  listen();
-  let samplePending=false;
-  const sampleTimer=setInterval(()=>{
-   if(samplePending||ipcOfflineRef.current)return;
-   samplePending=true;
-   void requestIpc({action:'status'},2000).then(next=>{if(alive)setLiveStatus(next as Status);})
-    .catch(()=>{}).finally(()=>{samplePending=false;});
-  },1000);
-  return()=>{alive=false;unsubscribe();if(retry)clearTimeout(retry);clearInterval(sampleTimer);};
+  let alive=true,client:LiveIpcClient|null=null,retry:ReturnType<typeof setTimeout>|undefined;
+  let statusPending=false,statusDirty=false;
+  const refresh=async()=>{
+   if(!alive||!client)return;
+   if(statusPending){statusDirty=true;return;}
+   statusPending=true;
+   try{
+    const next=await client.request<Status>({action:'status-lite'},3500);
+    if(alive&&ipcClientRef.current===client){
+     setLiveStatus(next);
+     setIpcOfflineSince(null);setIpcDisconnectReason('');
+     ipcOfflineRef.current=false;
+     setNotice(previous=>previous==='正在恢复本地连接…'?'':previous);
+    }
+   }catch{/* disconnection is handled by the socket */}
+   finally{
+    statusPending=false;
+    if(statusDirty){statusDirty=false;void refresh();}
+   }
+  };
+  const onEvent=(event:LiveEvent)=>{
+   if(event.topic==='runtime.changed'||event.topic==='metrics.changed'){void refresh();return;}
+   if(event.topic!=='output.changed'||!event.taskId)return;
+   if(focusedOutputIdRef.current===event.taskId)setFocusedVersion(value=>value+1);
+   if(visibleBackgroundIdsRef.current.has(event.taskId))setBackgroundVersion(value=>value+1);
+  };
+  const connect=async()=>{
+   try{
+    const opened=await LiveIpcClient.connect(onEvent,reason=>{
+     if(!alive)return;
+     if(client===opened){
+      client=null;
+      ipcClientRef.current=null;
+      ipcOfflineRef.current=true;
+      setIpcOfflineSince(previous=>previous??Date.now());
+      setIpcDisconnectReason(reason);
+      retry=setTimeout(()=>{void connect();},2000);
+     }
+    },2500);
+    if(!alive){opened.close();return;}
+    client=opened;ipcClientRef.current=opened;
+    await opened.request({action:'watch',topics:['runtime','system.metrics']},3500);
+    if(!alive||client!==opened)return;
+    setIpcSession(value=>value+1);
+    void refresh();
+   }catch(error){
+    if(!alive)return;
+    client?.close();client=null;ipcClientRef.current=null;
+    ipcOfflineRef.current=true;
+    setIpcOfflineSince(previous=>previous??Date.now());
+    setIpcDisconnectReason(String(error));
+    if(retry)clearTimeout(retry);
+    retry=setTimeout(()=>{void connect();},2000);
+   }
+  };
+  void connect();
+  return()=>{alive=false;if(retry)clearTimeout(retry);client?.close();ipcClientRef.current=null;};
  },[demo]);
  const activeQuery=edit==='search'?text:query;
  useEffect(()=>{
@@ -461,7 +490,7 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
   let alive=true,retry:ReturnType<typeof setTimeout>|undefined;
   const load=()=>{
    const watchIds=changed?[]:loadedActivityRef.current.filter(a=>a.status==='running').map(a=>a.id).slice(0,100);
-   void requestIpc({action:'activity-list',limit:ACTIVITY_PAGE_SIZE,query:activeQuery,watchIds},10000)
+   void requestLocal({action:'activity-list',limit:ACTIVITY_PAGE_SIZE,query:activeQuery,watchIds},10000)
     .then((page:ActivityPage)=>{
      if(!alive||generation!==activityLoadGenerationRef.current)return;
      const replace=changed||activityPageCountRef.current<=1;
@@ -499,7 +528,7 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
   if(demo||!pageHasMore||pageLoadingRef.current||!activityCursorRef.current)return;
   const generation=activityLoadGenerationRef.current,cursor=activityCursorRef.current;
   pageLoadingRef.current=true;setPageLoading(true);
-  void requestIpc({action:'activity-list',limit:ACTIVITY_PAGE_SIZE,query:activityQueryRef.current??'',cursor},10000)
+  void requestLocal({action:'activity-list',limit:ACTIVITY_PAGE_SIZE,query:activityQueryRef.current??'',cursor},10000)
    .then((page:ActivityPage)=>{
     if(generation!==activityLoadGenerationRef.current)return;
     setLoadedActivity(previous=>{
@@ -548,8 +577,36 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
   [entry,entry?.status==='running'?tick:0]);
  const wideFooter=w>=112;
  const footerRows=wideFooter?1:2;
- const taskSlots=Math.min(tasks.length,h>=22?3:h>=16?2:1);
- const taskHeight=1+(tasks.length?taskSlots:0);
+ const footerWindow=backgroundWindow(tasks,taskIndex,h>=22?5:h>=16?3:2);
+ const taskSlots=footerWindow.visible.length;
+ const taskHeight=1+footerWindow.rows;
+ const visibleBackgroundIds=footerWindow.visible.filter(task=>task.kind==='background').map(task=>task.id);
+ const visibleBackgroundKey=visibleBackgroundIds.join('\0');
+ visibleBackgroundIdsRef.current=new Set(visibleBackgroundIds);
+ const focusedOutputId=entry?.status==='running'&&['exec_foreground','exec_background'].includes(entry.tool)?entry.id:null;
+ focusedOutputIdRef.current=focusedOutputId;
+ const watchedOutputIds=[...new Set([...visibleBackgroundIds,...(focusedOutputId?[focusedOutputId]:[])])];
+ const watchedOutputKey=watchedOutputIds.join('\0');
+ useEffect(()=>{
+  if(demo)return;
+  const client=ipcClientRef.current;
+  if(!client)return;
+  void client.request({action:'output.watchSet',taskIds:watchedOutputIds},5000).catch(()=>{});
+ },[demo,ipcSession,watchedOutputKey]);
+ useEffect(()=>{
+  if(demo||!visibleBackgroundIds.length){setBackgroundLogs({});return;}
+  let alive=true;
+  void requestLocal({action:'task-logs',taskIds:visibleBackgroundIds},2500)
+   .then((rows:TaskLog[])=>{if(!alive)return;
+    const next=Object.fromEntries(rows.map(item=>[item.id,item.line]));
+    setBackgroundLogs(previous=>{
+     const same=Object.keys(previous).length===Object.keys(next).length&&
+      Object.keys(next).every(id=>previous[id]===next[id]);
+     return same?previous:next;
+    });
+   }).catch(()=>{});
+  return()=>{alive=false;};
+ },[demo,ipcSession,visibleBackgroundKey,backgroundVersion]);
  const visibleOptions=Math.max(1,Math.min(8,h-4-taskHeight-footerRows-8));
  const paletteCount=Math.min(visibleOptions,Math.max(1,commandOptions.length));
  const commandPanelHeight=edit==='command'?paletteCount+2:0;
@@ -632,7 +689,7 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
   }
   const action=mode==='input'?'input':mode==='result'?'result':'output';
   void readEntireLocalStream(async byteOffset=>
-    await requestIpc({action,operationId:entry.id,...(mode==='input'?{}:{stream:mode}),
+    await requestLocal({action,operationId:entry.id,...(mode==='input'?{}:{stream:mode}),
       byteOffset,maxBytes:65536}) as OutputPage & {available?:boolean},
     (loaded,total)=>{if(alive&&total>65536)setInspectorProgress('已读取 '+loaded+' / '+total+' 字节');})
    .then(source=>{if(alive){
@@ -648,34 +705,43 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
    }});
   return()=>{alive=false;};
  },[demo,entry?.id,inspectorTab,refresh]);
+ // Full I/O follows file growth using byte offsets; never reread the entire output on a timer.
  useEffect(()=>{
-  if(inspectorTab==='summary'||inspectorTab==='input'||entry?.status!=='running')return;
-  const timer=setInterval(()=>setRefresh(x=>x+1),2000);
-  return()=>clearInterval(timer);
- },[inspectorTab,entry?.status]);
- // Only local IPC is sampled at 100ms for a selected running command.
- // WebSocket/DO is never polled by the preview.
+  if(demo||!entry||entry.status!=='running'||!['stdout','stderr'].includes(inspectorTab))return;
+  const source=inspectorSourceRef.current;
+  if(!source||!source.available)return;
+  let alive=true;
+  const from=source.totalBytes,mode=inspectorTab,operationId=entry.id;
+  void (async()=>{
+   let offset=from,target:number|null=null;
+   const pieces:string[]=[];
+   for(;;){
+    const page=await requestLocal({action:'output',operationId,stream:mode,byteOffset:offset,maxBytes:65536},5000) as OutputPage;
+    if(target===null)target=page.totalBytes;
+    if(page.nextOffset<=offset){if(offset<(target??0))throw Error('LOCAL_STREAM_STALLED');break;}
+    pieces.push(page.text);offset=page.nextOffset;
+    if(offset>=target)break;
+   }
+   if(!alive||offset===from)return;
+   setInspectorSource(previous=>previous&&previous.totalBytes===from?
+    {...previous,text:previous.text+pieces.join(''),totalBytes:offset}:previous);
+  })().catch(error=>{if(alive)setInspectorError(safeText(String(error),120));});
+  return()=>{alive=false;};
+ },[demo,entry?.id,entry?.status,inspectorTab,focusedVersion,ipcSession,inspectorSource?.totalBytes]);
  useEffect(()=>{
-  if(demo||!entry||entry.status!=='running'||!['exec_foreground','exec_background'].includes(entry.tool)){
+  if(demo||inspectorTab!=='summary'||!entry||entry.status!=='running'||!['exec_foreground','exec_background'].includes(entry.tool)){
    setLiveLog('');return;
   }
-  let active=true,busy=false,totalBytes=0;
-  const currentStream=inspectorTab==='stderr'?'stderr':'stdout';
-  const poll=()=>{
-   if(busy)return;busy=true;
-   // Read the tail, not the first 8KB forever as output grows.
-   const byteOffset=Math.max(0,totalBytes-7000);
-   void requestIpc({action:'output',operationId:entry.id,stream:currentStream,byteOffset,maxBytes:8192},700)
-    .then((page:OutputPage)=>{if(active){
-      totalBytes=page.totalBytes;
-      const next=page.text?.slice(-3500)??'';
-      setLiveLog(previous=>previous===next?previous:next);
-
-    }}).catch(()=>{}).finally(()=>{busy=false;});
-  };
-  poll();const timer=setInterval(poll,100);
-  return()=>{active=false;clearInterval(timer);};
- },[demo,entry?.id,entry?.status,entry?.tool,inspectorTab]);
+  let alive=true;
+  const stream='stdout';
+  void requestLocal({action:'output-tail',operationId:entry.id,stream},2500)
+   .then((page:OutputPage)=>{
+    if(!alive)return;
+    const next=page.text?.slice(-3500)??'';
+    setLiveLog(previous=>previous===next?previous:next);
+   }).catch(()=>{});
+  return()=>{alive=false;};
+ },[demo,entry?.id,entry?.status,entry?.tool,inspectorTab,focusedVersion,ipcSession]);
  const detailNow=entry?.status==='running'?Math.floor(tick/1000):0;
  const detail=useMemo(():DetailLine[]=>{
   const fromPlain=(lines:string[])=>wrapDetail(lines.map(text=>({text})),Math.max(1,dw-2));
@@ -806,7 +872,7 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
     activity:prev.activity.map(a=>ids.includes(a.id)?{...a,status:'cancelled',finished_at:tick,duration_ms:tick-a.time}:a)}:prev);
    setNotice('DEMO · 已模拟停止 '+ids.length+' 个任务');return;
   }
-  const results=await Promise.allSettled(ids.map(taskId=>requestIpc({action:'stop',taskId})));
+  const results=await Promise.allSettled(ids.map(taskId=>requestLocal({action:'stop',taskId})));
   const stopped=results.filter(r=>r.status==='fulfilled'&&r.value?.stopped===true).length;
   setNotice('已发送停止信号 '+stopped+'/'+ids.length+(stopped<ids.length?' · 其余任务已结束或停止失败':''));
  };
@@ -855,7 +921,7 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
    const key=args[0]!;
    if(!value){
     if(demo){setNotice(key+' = '+(key==='name'?status?.deviceName:status?.server));return true;}
-    void requestIpc({action:'config-get'},3000).then(c=>{
+    void requestLocal({action:'config-get'},3000).then(c=>{
      setSettings(c);
      setNotice(key+' = '+String(c[key]??'未配置')+(key==='url'&&c.pending?' · 待重新授权后切换':''));
     }).catch(error=>setNotice('配置读取失败：'+String(error)));
@@ -866,7 +932,7 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
     setDemoStatus(prev=>prev?{...prev,...(key==='name'?{deviceName:value}:{server:value})}:prev);
     setNotice('DEMO · 已设置 '+key+' = '+value);return true;
    }
-   void requestIpc({action:'config-set',key,value},18000).then(c=>{
+   void requestLocal({action:'config-set',key,value},18000).then(c=>{
     setSettings(prev=>({...prev,...c}));
     if(key==='name')setNotice('设备名称已同步：'+c.name);
     else setNotice(c.pending?'新 URL 已暂存，当前连接不变；运行 deskbeacon setup --url '+c.url+' 重新授权后切换':
@@ -985,7 +1051,7 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
  const connection=connected?'CONNECTED':connecting?'CONNECTING':'OFFLINE';
  const headerTheme=connected?barTheme.connected:connecting?barTheme.connecting:barTheme.disconnected;
  const host=(()=>{try{return new URL(status?.server??'').host;}catch{return status?.deviceName??'local runtime';}})();
- const taskStart=Math.max(0,taskIndex-taskSlots+1);
+ const taskStart=footerWindow.start;
  const activityPane=<Box flexDirection="column" width={aw} height={layout.activityHeight} overflow="hidden">
   <Title label={'ACTIVITY '+(demo?activities.length:pageTotal)} width={aw}
    right={(pageLoading?'加载中 · ':'')+(selectedId===null?'● LIVE':selectedIndex<0?'历史快照':(selectedIndex+1)+' / '+pageTotal)}
@@ -1068,8 +1134,8 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
     <Line text={'─'.repeat(w)} width={w} color={palette.line}/>}
    {detailPane}
   </Box>
-  <BackgroundTable tasks={tasks} start={taskStart} slots={taskSlots} width={w} height={taskHeight}
-   focus={focus==='tasks'} selectedId={detailTask?task?.id??null:null} demo={demo}
+  <BackgroundTable tasks={tasks} start={taskStart} slots={taskSlots} hidden={footerWindow.hidden}
+   logs={backgroundLogs} width={w} height={taskHeight} focus={focus==='tasks'} selectedId={detailTask?task?.id??null:null}
    horizontal={horizontal} activityWidth={aw}/>
   {wideFooter?<Box height={1} width={w} flexShrink={0} backgroundColor="#2D61B7">
    <Box height={1} width={footerLeftWidth} flexShrink={0}>
