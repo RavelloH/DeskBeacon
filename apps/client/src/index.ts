@@ -11,6 +11,7 @@ import { configPath, loadConfig, saveConfig, ClientDaemon } from './daemon.js';
 import { requestIpc, startIpc } from './ipc.js';
 import {demoScenarios, type DemoScenario} from './demo.js';
 import {superviseService,supervisorRunning,requestSupervisorStop} from './service-supervisor.js';
+import {migrateCommand,migrationRequired,codeVersion} from './migration-command.js';
 
 // React's development reconciler records unbounded performance.measure entries
 // in long-lived Node TUI processes. Select production before loading Ink/React.
@@ -77,7 +78,7 @@ async function setup(base:string) {
    console.log('DeskBeacon device paired. Device ID: '+client.client_id);
  }finally{callback.close();}
 }
-const pkg={version:'0.2.0'};
+const pkg={version:codeVersion()};
 const entry=fileURLToPath(import.meta.url);
 async function promptUrl():Promise<string>{
   if(!process.stdin.isTTY)throw Error('Run deskbeacon setup --url https://your-worker.example from a terminal');
@@ -102,6 +103,7 @@ async function currentRuntime(timeout=700):Promise<any|null>{
   try{return await requestIpc({action:'status'},timeout);}catch{return null;}
 }
 async function ownerRuntime(background:boolean,title?:string):Promise<void>{
+  if(migrationRequired())throw Error('STORAGE_MIGRATION_REQUIRED: run deskbeacon migrate before Runtime startup');
   process.env.DESKBEACON_RUNTIME_MODE=background?'background':'foreground';
   const instance=new ClientDaemon(loadConfig());
   const server=startIpc(instance);
@@ -132,9 +134,16 @@ async function ownerRuntime(background:boolean,title?:string):Promise<void>{
 }
 async function serviceStart(){
   const running=await currentRuntime();
-  if(running){console.log('DeskBeacon is already running in '+(running.runtimeMode??'legacy')+' mode ('+running.deviceName+').');return;}
+  if(running){
+    console.log('DeskBeacon is already running in '+(running.runtimeMode??'legacy')+' mode ('+running.deviceName+').');
+    if(migrationRequired())console.log('Storage upgrade pending: stop this Runtime before running deskbeacon migrate or service restart.');
+    return;
+  }
+  if(supervisorRunning()&&migrationRequired())throw Error('Stop the existing service supervisor before migrating; run deskbeacon service stop.');
   if(!supervisorRunning()){
     await configured();
+    console.log('DeskBeacon：正在检查本地存储版本，完成必要的迁移后启动服务。');
+    await migrateCommand(false);
     const child=spawn(process.execPath,[entry,'__service_supervise'],{
       detached:true,stdio:'ignore',windowsHide:true,cwd:process.cwd(),env:process.env
     });
@@ -175,8 +184,10 @@ const usage=()=>{
   '                          an existing background service is running.',
   '  setup [--url URL]       Pair this device using OAuth (prompts for URL).',
   '  demo [scenario]        Offline, interactive TUI preview (for development).',
+  '                          Use demo migration to preview the upgrade screen.',
   '  --title NAME           Terminal window title (also DESKBEACON_TITLE env).',
-  '  service start           Start the Runtime in the background (no TUI).',
+  '  service start           Migrate if needed, then start the background Runtime.',
+  '  migrate                 Upgrade local storage before starting a Runtime.',
   '  service stop            Stop the running Runtime.',
   '  service restart         Restart the background service.',
   '  service logs            Print last 18 KB of background service logs.',
@@ -212,9 +223,19 @@ async function main(){
    if(!process.stdin.isTTY||!process.stdout.isTTY)
      throw Error('Demo preview requires an interactive terminal.');
    const scenario=args[0]??'connected';
+   if(scenario==='migration'){
+     const {showMigrationDemo}=await import('./migration-tui.js');
+     await showMigrationDemo();return;
+   }
    if(!demoScenarios.includes(scenario as DemoScenario))
-     throw Error('Unknown demo scenario. Options: '+demoScenarios.join(', '));
+     throw Error('Unknown demo scenario. Options: '+[...demoScenarios,'migration'].join(', '));
    await showTui(scenario as DemoScenario,title);
+   return;
+ }
+ if(action==='migrate'){
+   if(await currentRuntime(900)||supervisorRunning())throw Error('Stop the DeskBeacon service/Runtime before migrating.');
+   const result=await migrateCommand(!args.includes('--no-tui'));
+   console.log('DeskBeacon 存储版本 '+result.from+' → '+result.to+'；'+(result.changed?'迁移已完成':'已经是最新版本')+'。');
    return;
  }
  if(action==='setup'){
@@ -252,7 +273,13 @@ async function main(){
    if(!process.stdin.isTTY||!process.stdout.isTTY)
      throw Error('The DeskBeacon app requires an interactive terminal. Use deskbeacon service start for headless operation.');
    await configured();
-   if(await currentRuntime(900)){await showTui(undefined,title);return;}
+   if(await currentRuntime(900)){
+     if(migrationRequired())throw Error('Existing Runtime must be stopped before storage migration. Run deskbeacon service stop.');
+     await showTui(undefined,title);return;
+   }
+   if(supervisorRunning())throw Error('Service supervisor is starting; wait or stop the background service before migrating.');
+   if(migrationRequired())await migrateCommand(true);
+   else if(!existsSync((await import('node:path')).join((await import('./daemon.js')).dataDir,'state.sqlite')))await migrateCommand(false);
    await ownerRuntime(false,title);return;
  }
  throw Error('Unknown command '+action+'. Use deskbeacon help.');

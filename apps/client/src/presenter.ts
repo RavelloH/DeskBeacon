@@ -3,7 +3,7 @@
 export type ActivityEntry={
   id:string;grant_id:string;actor_name?:string|null;tool:string;description:string;status:string;time:number;
   cwd?:string|null;finished_at?:number|null;duration_ms?:number|null;
-  request_json?:string|null;result?:string|null;
+  request_json?:string|null;result?:string|null;record_state?:string|null;
 };
 export type ActivityDetail=Pick<ActivityEntry,'cwd'|'request_json'|'result'>;
 const verbs:Record<string,[string,string]>={

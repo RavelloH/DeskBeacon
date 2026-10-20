@@ -18,6 +18,7 @@ export function inspectorInput(entry:ActivityEntry,source:FullSource|null):Detai
  if(!raw)return [message('该操作没有可供显示的输入记录','warning')];
  const input=data(raw);
  const rows:DetailLine[]=[];
+ if(entry.record_state==='legacy_partial')rows.push(message('旧版历史存在已截断或缺失的数据，无法恢复为完整记录','warning'));
  if(!source.available){
   rows.push(message('旧版历史没有保存完整输入；下方仅显示仍可用的历史摘要。','warning'));
  }
@@ -70,6 +71,7 @@ export function inspectorResult(entry:ActivityEntry,source:FullSource|null):Deta
  const raw=source.available?source.text:(entry.result??'');
  if(!raw)return [message('此操作没有保存可读取的结果','warning')];
  const rows:DetailLine[]=[];
+ if(entry.record_state==='legacy_partial')rows.push(message('该记录由旧版本迁移，部分原始内容可能已丢失','warning'));
  if(!source.available)rows.push(message('历史完整回执已缺失；以下仅为摘要缓存，无法恢复被删减的数据。','warning'));
  const result=data(raw);
  if(result){

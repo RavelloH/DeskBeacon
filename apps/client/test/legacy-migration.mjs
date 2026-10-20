@@ -1,0 +1,53 @@
+import assert from 'node:assert/strict';
+import {DatabaseSync} from 'node:sqlite';
+import {mkdtempSync,mkdirSync,writeFileSync,rmSync,existsSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {RecordJournal} from '../dist/record-journal.js';
+import {migrateLegacyRecords} from '../dist/legacy-migration.js';
+const root=mkdtempSync(join(tmpdir(),'deskbeacon-migrate-v2-')),output=join(root,'output');
+mkdirSync(output);
+const db=new DatabaseSync(join(root,'state.sqlite'));
+try{
+ db.exec('CREATE TABLE activity(id TEXT PRIMARY KEY,tool TEXT,status TEXT,time INTEGER,request_json TEXT,result TEXT,record_path TEXT,record_state TEXT)');
+ db.exec('CREATE TABLE receipts(id TEXT PRIMARY KEY,status TEXT,created INTEGER,result TEXT)');
+ db.exec('CREATE TABLE background(id TEXT PRIMARY KEY,operation_id TEXT,stdout_path TEXT,stderr_path TEXT,exit_code INTEGER,status TEXT,record_path TEXT)');
+ const add=db.prepare('INSERT INTO activity(id,tool,status,time,request_json,result) VALUES(?,?,?,?,?,?)');
+ const rec=db.prepare('INSERT INTO receipts(id,status,created,result) VALUES(?,?,?,?)');
+ const time=Date.now()-600_000;
+ add.run('legacy-fg','exec_foreground','completed',time,JSON.stringify({command:{script:'Write-Output old'}}),JSON.stringify({exitCode:0}));
+ rec.run('legacy-fg','completed',time,JSON.stringify({exitCode:0,stdout:'legacy stdout\n',stderr:''}));
+ writeFileSync(join(output,'legacy-fg.input.json'),JSON.stringify({description:'legacy full input',command:{script:'Write-Output old'}}));
+ writeFileSync(join(output,'legacy-fg.out'),'legacy stdout\n');writeFileSync(join(output,'legacy-fg.err'),'');
+ add.run('legacy-read','fs_read','completed',time+1,JSON.stringify({path:'old.txt'}),'{}');
+ rec.run('legacy-read','completed',time+1,JSON.stringify({path:'old.txt',content:'all original file content',readBytes:25}));
+ add.run('legacy-missing','fs_stat','failed',time+2,'{"path":"missing"}','{"error":"missing"}');
+ rec.run('legacy-missing','failed',time+2,JSON.stringify({error:'missing'}));
+ add.run('legacy-batch','batch','completed',time+3,JSON.stringify({description:'legacy batch'}),'{}');
+ const batchInput={description:'legacy batch',stages:[{calls:[{id:'read',tool:'fs_read',input:{path:'x.txt'}},{id:'cmd',tool:'exec_foreground',input:{description:'old command'}}]}]};
+ const batchResult={stages:[{results:[{id:'read',tool:'fs_read',ok:true,result:{status:'completed',data:{content:'legacy child content'}}},{id:'cmd',tool:'exec_foreground',ok:true,result:{status:'completed',data:{exitCode:0}}}]}]};
+ writeFileSync(join(output,'legacy-batch.input.json'),JSON.stringify(batchInput));
+ writeFileSync(join(output,'legacy-batch_cmd.out'),'child stdout');
+ rec.run('legacy-batch','completed',time+3,JSON.stringify(batchResult));
+ const journal=new RecordJournal(join(root,'records'));
+ const report=await migrateLegacyRecords(db,journal,root);
+ assert.equal(report.errors,0);assert.equal(report.migrated+report.incomplete,4);
+ for(const id of ['legacy-fg','legacy-read','legacy-missing','legacy-batch']){
+  const row=db.prepare('SELECT record_path,request_json,result FROM activity WHERE id=?').get(id);
+  assert.ok(row.record_path,id);assert.equal(row.request_json,null);assert.equal(row.result,null);
+  assert.equal(db.prepare('SELECT result FROM receipts WHERE id=?').get(id).result,null);
+ }
+ const fg=db.prepare("SELECT record_path FROM activity WHERE id='legacy-fg'").get().record_path;
+ assert.equal(journal.getResult(fg).result.stdout,'legacy stdout\n');
+ assert.equal(journal.getInput(fg).description,'legacy full input');
+ const read=db.prepare("SELECT record_path FROM activity WHERE id='legacy-read'").get().record_path;
+ assert.equal(journal.getResult(read).result.content,'all original file content');
+ const batchPath=db.prepare("SELECT record_path FROM activity WHERE id='legacy-batch'").get().record_path;
+ const children=journal.getChildren(batchPath);
+ assert.equal(children.length,2);
+ assert.equal(journal.getResult(children.find(c=>c.id==='legacy-batch:read').path).result.content,'legacy child content');
+ assert.equal(journal.getRecordStream(children.find(c=>c.id==='legacy-batch:cmd').path,'stdout',0,65536).text,'child stdout');
+ assert.equal((await migrateLegacyRecords(db,journal,root)).migrated,0);
+ assert.ok(existsSync(join(output,'legacy-fg.out')),'old raw files preserved during migration');
+ console.log('PASS automatic legacy migration, idempotence, old file preservation and receipts');
+}finally{db.close();rmSync(root,{recursive:true,force:true});}

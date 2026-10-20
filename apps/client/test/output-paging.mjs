@@ -144,12 +144,15 @@ try{
   const originalContent=Array.from({length:480},(_,n)=>'中文行'+n+'：'+('x'.repeat(90))).join('\\n');
   const structured={data:{content:originalContent,lineOffset:310,readBytes:Buffer.byteLength(originalContent)},
    authorization:'must-not-appear',secret:'must-not-appear'};
+  const journalPath=daemon.journal.start(fullResultId,'fs_read',{path:'/tmp/large-file.txt'});
+  daemon.journal.finish(fullResultId,structured,'completed');
+  daemon.db.prepare('INSERT INTO activity(id,tool,description,status,time,record_path,record_state,outcome) VALUES(?,?,?,?,?,?,?,?)').run(fullResultId,'fs_read','read file','completed',Date.now(),journalPath,'ready','success');
   daemon.supervisor.record(fullResultId,'completed',structured);
   let resultOffset=0,resultRaw='',resultPages=0;
   for(;;){
    const part=await requestIpc({action:'result',operationId:fullResultId,
     byteOffset:resultOffset,maxBytes:37});
-   assert.ok(part.available,'structured result should be present in receipts');
+   assert.ok(part.available,'structured result should be present in the journal');
    assert.ok(part.nextOffset>resultOffset,'structured result must advance by UTF-8-safe bytes');
    resultRaw+=part.text;resultOffset=part.nextOffset;resultPages++;
    if(!part.hasMore)break;
@@ -162,7 +165,7 @@ try{
   assert.equal(completeResult.secret,'[redacted]');
   const noReceipt=await requestIpc({action:'result',operationId:'legacy-missing-receipt'});
   assert.equal(noReceipt.available,false,'missing historical result must be explicitly unavailable');
-  console.log('PASS structured local result opens all file-read content (old receipts included)');
+  console.log('PASS structured local result opens all file-read content from JSONL');
   console.log('PASS full local input IPC pagination with sensitive-field redaction and legacy fallback');
 }finally{
   await new Promise(resolve=>listener.close(resolve));
