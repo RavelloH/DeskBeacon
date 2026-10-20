@@ -289,9 +289,9 @@ export function requestIpc(request:object,timeoutMs=2500):Promise<any>{
  });
 }
 
-export function subscribeIpc(onStatus:(status:any)=>void,onDisconnect:()=>void):()=>void{
+export function subscribeIpc(onStatus:(status:any)=>void,onDisconnect:(reason?:string)=>void):()=>void{
  const socket=createConnection(ipcPath);
- let buffer='',closed=false;
+ let buffer='',closed=false,reason='IPC_SOCKET_CLOSED';
  socket.on('connect',()=>socket.write(JSON.stringify({action:'subscribe'})+'\n'));
  socket.on('data',data=>{
    buffer+=data.toString('utf8');
@@ -301,7 +301,7 @@ export function subscribeIpc(onStatus:(status:any)=>void,onDisconnect:()=>void):
      try{const obj=JSON.parse(line);if(obj.result)onStatus(obj.result);}catch{}
    }
  });
- socket.on('close',()=>{if(!closed)onDisconnect();});
- socket.on('error',()=>{socket.destroy();});
+ socket.on('close',()=>{if(!closed)onDisconnect(reason);});
+ socket.on('error',error=>{reason=(error as NodeJS.ErrnoException).code??String(error);socket.destroy();});
  return ()=>{closed=true;socket.destroy();};
 }

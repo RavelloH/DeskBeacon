@@ -29,3 +29,14 @@ try{
  assert.ok(Array.isArray(ports.connections),'net_ports must route to implemented system tool');
  console.log('PASS net_ports routes to systeminformation instead of missing network handler');
 }finally{daemon.stop();globalThis.fetch=originalFetch;}
+// WebSocket constructor and local diagnostics can throw synchronously during a
+// reconnect. It must be converted into a retryable status, not an unhandled
+// Promise rejection that silently terminates the background Runtime.
+const invalid=new ClientDaemon({...config,url:'invalid url',refreshToken:undefined});
+try{
+ await invalid.connect();
+ assert.match((await invalid.status()).state,/^error:/);
+ const error=invalid.db.prepare("SELECT kind FROM connection_events WHERE kind='connect_exception' ORDER BY id DESC LIMIT 1").get();
+ assert.equal(error?.kind,'connect_exception');
+ console.log('PASS WebSocket constructor exceptions remain retryable, no Runtime crash');
+}finally{invalid.stop();}

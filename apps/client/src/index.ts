@@ -10,6 +10,7 @@ import { existsSync } from 'node:fs';
 import { configPath, loadConfig, saveConfig, ClientDaemon } from './daemon.js';
 import { requestIpc, startIpc } from './ipc.js';
 import {demoScenarios, type DemoScenario} from './demo.js';
+import {superviseService,supervisorRunning,requestSupervisorStop} from './service-supervisor.js';
 
 // React's development reconciler records unbounded performance.measure entries
 // in long-lived Node TUI processes. Select production before loading Ink/React.
@@ -112,7 +113,7 @@ async function ownerRuntime(background:boolean,title?:string):Promise<void>{
     if(await currentRuntime(1500))return;
     throw e;
   }
-  void instance.connect();
+  void instance.connect().catch(e=>console.error('Runtime initial connection:',String(e)));
   let exiting=false;
   const shutdown=async()=>{
     if(exiting)return;
@@ -132,28 +133,37 @@ async function ownerRuntime(background:boolean,title?:string):Promise<void>{
 async function serviceStart(){
   const running=await currentRuntime();
   if(running){console.log('DeskBeacon is already running in '+(running.runtimeMode??'legacy')+' mode ('+running.deviceName+').');return;}
-  await configured();
-  const child=spawn(process.execPath,[entry,'__service_run'],{
-    detached:true,stdio:'ignore',windowsHide:true,cwd:process.cwd(),env:process.env
-  });
-  child.unref();
+  if(!supervisorRunning()){
+    await configured();
+    const child=spawn(process.execPath,[entry,'__service_supervise'],{
+      detached:true,stdio:'ignore',windowsHide:true,cwd:process.cwd(),env:process.env
+    });
+    child.unref();
+  }
   for(let i=0;i<40;i++){
     await sleep(200);
     const running=await currentRuntime(600);
     if(running){console.log('DeskBeacon background service started.');return;}
   }
-  throw Error('Service did not start. Run deskbeacon doctor for diagnostics.');
+  throw Error('Service did not start. See deskbeacon service logs and run deskbeacon doctor.');
 }
 async function serviceStop(){
   const active=await currentRuntime();
-  if(!active){console.log('DeskBeacon is not running.');return;}
-  if(active.runtimeMode==='foreground'){console.log('The app owns this Runtime. Close its terminal or press q instead.');return;}
-  await requestIpc({action:'exit'});
-  for(let i=0;i<40;i++){
-    if(!(await currentRuntime(400))){console.log('DeskBeacon service stopped.');return;}
+  if(active?.runtimeMode==='foreground'){
+    console.log('The app owns this Runtime. Close its terminal or press q instead.');return;
+  }
+  const supervised=supervisorRunning();
+  if(supervised)requestSupervisorStop(!active);
+  if(active)await requestIpc({action:'exit'});
+  else if(!supervised){console.log('DeskBeacon is not running.');return;}
+  for(let i=0;i<50;i++){
+    const running=await currentRuntime(400);
+    if(!running&&!supervisorRunning()){
+      console.log('DeskBeacon service stopped.');return;
+    }
     await sleep(200);
   }
-  throw Error('Service did not stop within the timeout.');
+  throw Error('Service did not stop within the timeout. Check the service log.');
 }
 const usage=()=>{
  console.log([
@@ -169,6 +179,7 @@ const usage=()=>{
   '  service start           Start the Runtime in the background (no TUI).',
   '  service stop            Stop the running Runtime.',
   '  service restart         Restart the background service.',
+  '  service logs            Print last 18 KB of background service logs.',
   '  service status          Show background Runtime status.',
   '  status                  Print connected device/Runtime status.',
   '  doctor                  Check configuration and Runtime.',
@@ -213,7 +224,7 @@ async function main(){
  }
  if(action==='status'||(action==='service'&&args[0]==='status')){
    const status=await currentRuntime(1500);
-   if(!status){console.log('DeskBeacon Runtime is not running.');return;}
+   if(!status){console.log(supervisorRunning()?'DeskBeacon Runtime is restarting under its supervisor.':'DeskBeacon Runtime is not running.');return;}
    console.log(JSON.stringify(status,null,2));return;
  }
  if(action==='doctor'){
@@ -223,12 +234,19 @@ async function main(){
    const status=await currentRuntime();console.log('Runtime',status?.state??'stopped');
    return;
  }
+ if(action==='service'&&args[0]==='logs'){
+   const {readFileSync}=await import('node:fs');
+   const {dataDir}=await import('./daemon.js');
+   const logPath=(await import('node:path')).join(dataDir,'service.log');
+   console.log(existsSync(logPath)?readFileSync(logPath,'utf8').slice(-18000):'No service diagnostics recorded yet.');return;
+ }
  if(action==='service'){
    if(args[0]==='start'){await serviceStart();return;}
    if(args[0]==='stop'){await serviceStop();return;}
    if(args[0]==='restart'){await serviceStop();await serviceStart();return;}
    throw Error('Usage: deskbeacon service <start|stop|restart|status>');
  }
+ if(action==='__service_supervise'){await superviseService({workerEntry:entry});return;}
  if(action==='__service_run'){await ownerRuntime(true);return;}
  if(!action){
    if(!process.stdin.isTTY||!process.stdout.isTTY)

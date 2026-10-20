@@ -148,8 +148,14 @@ export class ClientDaemon extends EventEmitter {
   }
   private recordConnection(kind:string,detail=''){
     if(this.stopped)return;
-    this.db.prepare('INSERT INTO connection_events(time,kind,detail) VALUES(?,?,?)').run(Date.now(),kind,detail.slice(0,160));
-    this.db.exec('DELETE FROM connection_events WHERE id NOT IN (SELECT id FROM connection_events ORDER BY id DESC LIMIT 250)');
+    try{
+      this.db.prepare('INSERT INTO connection_events(time,kind,detail) VALUES(?,?,?)').run(Date.now(),kind,detail.slice(0,160));
+      this.db.exec('DELETE FROM connection_events WHERE id NOT IN (SELECT id FROM connection_events ORDER BY id DESC LIMIT 250)');
+    }catch(error){
+      // Transient SQLite contention must never kill the entire Runtime from a
+      // WebSocket callback or leave it unable to reconnect.
+      console.error('Connection event diagnostic failed:',err(error));
+    }
   }
   private persistDeviceName(name:string){
     if(this.config.deviceName===name)return;
@@ -188,6 +194,22 @@ export class ClientDaemon extends EventEmitter {
     this.reconnectTimer.unref();
   }
   async connect(){
+    try{await this.connectOnce();}
+    catch(error){
+      this.connecting=false;
+      if(this.stopped)return;
+      this.recordConnection('connect_exception',err(error));
+      this.state='error: '+err(error);
+      console.error('DeskBeacon connect recovered from:',err(error));
+      // A failed WebSocket constructor or local OS error is retryable, not a
+      // fatal unhandled Promise rejection that kills the unattended service.
+      const previous=this.ws;this.ws=null;
+      if(previous){previous.on('error',()=>{});try{previous.terminate();}catch{}}
+      this.emit('change');
+      this.scheduleReconnect();
+    }
+  }
+  private async connectOnce(){
     if(this.stopped||this.connecting||this.ws?.readyState===WebSocket.OPEN||this.ws?.readyState===WebSocket.CONNECTING)return;
     this.connecting=true;
     this.recordConnection('connecting');

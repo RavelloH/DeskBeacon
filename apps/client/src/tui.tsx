@@ -329,9 +329,6 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
  const {exit}=useApp(),{w,h}=useSize();
  const [liveStatus,setLiveStatus]=useState<Status|null>(null);
  const status:Status|null=demo?demoStatus:liveStatus;
- useEffect(()=>{
-  writeTerminalTitle(terminalWindowTitle(terminalTitle,status?.state??'connecting',status?.active?.length??0));
- },[terminalTitle,status?.state,status?.active?.length]);
  const [loadedActivity,setLoadedActivity]=useState<ActivityEntry[]>(()=>demoStatus?.activity??[]);
  const activityDeviceRef=useRef<string|null>(null);
  const activityVersionRef=useRef<number|null>(null);
@@ -362,6 +359,12 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
   return()=>{alive=false;};
  },[edit,demo]);
  const [notice,setNotice]=useState('');
+ const [ipcOfflineSince,setIpcOfflineSince]=useState<number|null>(null);
+ const ipcOfflineRef=useRef(false);
+ const [ipcDisconnectReason,setIpcDisconnectReason]=useState('');
+ useEffect(()=>{
+  writeTerminalTitle(terminalWindowTitle(terminalTitle,ipcOfflineSince!==null?'disconnected':status?.state??'connecting',status?.active?.length??0));
+ },[terminalTitle,status?.state,status?.active?.length,ipcOfflineSince]);
  const [hoverLinkId,setHoverLinkId]=useState<string|null>(null);
  const [exitArmedAt,setExitArmedAt]=useState(0);
  const uptimeAnchorRef=useRef<{device:string;uptime:number;at:number}|null>(null);
@@ -399,12 +402,22 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
   if(demo)return;
   let alive=true,unsubscribe=()=>{};let retry:ReturnType<typeof setTimeout>|undefined;
   const listen=()=>{unsubscribe=subscribeIpc(next=>{
-   if(alive)setLiveStatus(next as Status);
-  },()=>{if(alive){setNotice('正在恢复本地连接…');retry=setTimeout(listen,2000);}});};
+   if(!alive)return;
+   setLiveStatus(next as Status);
+   ipcOfflineRef.current=false;
+   setIpcOfflineSince(null);
+   setIpcDisconnectReason('');
+   setNotice(previous=>previous==='正在恢复本地连接…'?'':previous);
+  },reason=>{if(alive){
+   ipcOfflineRef.current=true;
+   setIpcOfflineSince(previous=>previous??Date.now());
+   setIpcDisconnectReason(reason??'连接已断开');
+   retry=setTimeout(listen,2000);
+  }});};
   listen();
   let samplePending=false;
   const sampleTimer=setInterval(()=>{
-   if(samplePending)return;
+   if(samplePending||ipcOfflineRef.current)return;
    samplePending=true;
    void requestIpc({action:'status'},2000).then(next=>{if(alive)setLiveStatus(next as Status);})
     .catch(()=>{}).finally(()=>{samplePending=false;});
@@ -967,7 +980,8 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
   }
   if(input==='r'&&inspectorTab!=='summary'){setRefresh(x=>x+1);return;}
  });
- const connected=status?.state==='connected',connecting=!status||status.state==='connecting';
+ const connected=ipcOfflineSince===null&&status?.state==='connected';
+ const connecting=ipcOfflineSince===null&&(!status||status.state==='connecting');
  const connection=connected?'CONNECTED':connecting?'CONNECTING':'OFFLINE';
  const headerTheme=connected?barTheme.connected:connecting?barTheme.connecting:barTheme.disconnected;
  const host=(()=>{try{return new URL(status?.server??'').host;}catch{return status?.deviceName??'local runtime';}})();
@@ -1017,7 +1031,9 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
  const headerRightWidth=Math.max(0,w-headerLeftWidth);
  const footerPrompt=confirm?
   '停止 '+confirm.length+' 个进程及其子进程？ y / Enter 确认 · n / Esc 返回':
-  notice||(pageError?'活动读取失败 · '+pageError:globalShortcuts(w));
+  notice||(ipcOfflineSince!==null?
+   '本地 IPC 断开 · '+(ipcDisconnectReason||'连接已关闭')+' · '+duration(tick-ipcOfflineSince)+' · 正在重试；service status / logs':
+   pageError?'活动读取失败 · '+pageError:globalShortcuts(w));
  const compactMetrics=w<40?'CPU '+(status?.cpuPercent??0).toFixed(1)+'% · RAM '+ramText:
   w<72?'CPU '+(status?.cpuPercent??0).toFixed(1)+'% · RAM '+ramText+' · '+(status?.operationsTotal??0)+' OPS':metrics;
  const footerRightWidth=wideFooter?Math.min(64,Math.max(48,Math.floor(w*.48))):0;
