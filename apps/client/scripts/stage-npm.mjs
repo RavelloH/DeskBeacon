@@ -29,13 +29,15 @@ const release=await build({
  plugins:[{
    name:'omit-demo-from-release',
    setup(builder){
-     builder.onResolve({filter:/^\.\/(?:demo|migration-demo|migration-demo-ui|setup-demo-ui)\.js$/},
+     builder.onResolve({filter:/^\.\/(?:demo|migration-demo|migration-demo-ui|setup-demo-ui|update-demo-ui)\.js$/},
        args=>({path:args.path,namespace:'release-no-demo'}));
      builder.onLoad({filter:/.*/,namespace:'release-no-demo'},args=>({
        contents:args.path==='./demo.js'?
         'export const demoScenarios=[]; export const demoHelp=[]; export const createDemoStatus=()=>null; export const advanceDemo=x=>x;':
         args.path==='./setup-demo-ui.js'?
          'export const showSetupDemo=()=>{throw Error("Unavailable in release")};':
+        args.path==='./update-demo-ui.js'?
+         'export const showUpdateDemo=()=>{throw Error("Unavailable in release")};':
          'export const MIGRATION_DEMO_DURATION_MS=0;export const MIGRATION_DEMO_STEPS=[];export const migrationDemoFinished=()=>true;export const migrationDemoProgress=()=>null;export const showMigrationDemo=()=>{throw Error("Unavailable in release")};',
        loader:'js'
      }));
@@ -45,11 +47,11 @@ const release=await build({
 });
 // Fails the release if demo modules are still reachable by the bundled entrypoint.
 const demoInputPaths=Object.keys(release.metafile.inputs).filter(path=>
- /(?:^|[\\/])(?:demo|migration-demo|migration-demo-ui|setup-demo-ui)\.(?:ts|tsx)$/.test(path));
+ /(?:^|[\\/])(?:demo|migration-demo|migration-demo-ui|setup-demo-ui|update-demo-ui)\.(?:ts|tsx)$/.test(path));
 if(demoInputPaths.length)throw Error('Demo source was bundled: '+demoInputPaths.join(', '));
 const demoBytes=Object.values(release.metafile.outputs).flatMap(output=>
  Object.entries(output.inputs??{}).filter(([path])=>
- /(?:^|[\\/])(?:demo|migration-demo|migration-demo-ui|setup-demo-ui)\.(?:ts|tsx)$/.test(path))
+ /(?:^|[\\/])(?:demo|migration-demo|migration-demo-ui|setup-demo-ui|update-demo-ui)\.(?:ts|tsx)$/.test(path))
   .map(([path,info])=>({path,bytes:info.bytesInOutput})));
 if(demoBytes.some(item=>item.bytes>0))throw Error('Release includes Demo bytes: '+JSON.stringify(demoBytes));
 const optionalDependencies=Object.fromEntries(

@@ -17,12 +17,12 @@ assert.match(help.stdout,/参数记法：<参数> 必填 · \[参数\] 可选 ·
 const domains=['service','runtime','connection','execution','migration','security','tui'];
 const {demoScenarios}=await import('../dist/demo.js');
 for(const domain of domains)assert.ok(help.stdout.includes(domain),'Missing log domain: '+domain);
-for(const scenario of [...demoScenarios,'migration','setup'])assert.ok(help.stdout.includes(scenario),'Missing Demo scenario: '+scenario);
+for(const scenario of [...demoScenarios,'migration','setup','update'])assert.ok(help.stdout.includes(scenario),'Missing Demo scenario: '+scenario);
 const helpLines=help.stdout.split(/\r?\n/);
 assert.doesNotMatch(help.stdout,/start 会在确实需要升级时先迁移本地存储/);
 for(const [command,label,expected] of [
  ['service logs [领域]','领域',domains],
- ['demo [场景]','场景',[...demoScenarios,'migration','setup']]
+ ['demo [场景]','场景',[...demoScenarios,'migration','setup','update']]
 ]){
  const rowIndex=helpLines.findIndex(line=>line.includes(command));
  assert.ok(rowIndex>=0,'Missing parent command '+command);

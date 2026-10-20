@@ -194,14 +194,14 @@ const usage=()=>{
   '维护工具',
   row('migrate [--no-tui]','迁移本地存储；--no-tui 使用非交互式进度'),
   row('doctor','检查本地配置和运行状态'),
-  row('update','检查 npm 最新版本并显示更新方式'),
+  row('update','检查 npm 最新版本；交互终端显示流程树和更新建议'),
   row('version, -v, --version','查看版本号'),
   row('help, -h, --help','显示此帮助'),
   ...(DEMO_ENABLED?[
    '',
    '开发调试（仅开发构建）',
    row('demo [场景]','启动离线 TUI 演示（默认 connected）'),
-   detail('场景',['connected','connecting','offline','busy','failed','transfers','crowded','migration','setup']),
+   detail('场景',['connected','connecting','offline','busy','failed','transfers','crowded','migration','setup','update']),
   ]:[]),
   '',
   '全局选项',
@@ -212,12 +212,17 @@ const usage=()=>{
  ].join('\n'));
 };
 async function updateCli(){
-  const remote=await fetch('https://registry.npmjs.org/deskbeacon/latest',{signal:AbortSignal.timeout(8000)});
-  if(!remote.ok){console.log('No published npm release available (HTTP '+remote.status+').');return;}
-  const data=await remote.json() as {version?:string};
-  console.log('Installed '+pkg.version+' · Latest '+(data.version??'unknown'));
-  if(data.version!==pkg.version)console.log('Use npx deskbeacon@latest or npm install -g deskbeacon@latest.');
-  else console.log('You are up to date.');
+ if(process.stdin.isTTY&&process.stdout.isTTY){
+  const {updateTui}=await import('./update-tui.js');
+  await updateTui(pkg.version);return;
+ }
+ const {checkForUpdates,updateSummary}=await import('./update-flow.js');
+ const result=await checkForUpdates(pkg.version);
+ console.log(updateSummary(result));
+ if(result.kind==='available'){
+  console.log('如需更新（不会自动安装）：');
+  for(const cmd of result.commands)console.log('  '+cmd);
+ }
 }
 async function main(){
  const argv=process.argv.slice(2);
@@ -242,8 +247,12 @@ async function main(){
      const {showSetupDemo}=await import('./setup-demo-ui.js');
      await showSetupDemo();return;
    }
+   if(scenario==='update'){
+     const {showUpdateDemo}=await import('./update-demo-ui.js');
+     await showUpdateDemo();return;
+   }
    if(!demoScenarios.includes(scenario as DemoScenario))
-     throw Error('Unknown demo scenario. Options: '+[...demoScenarios,'migration','setup'].join(', '));
+     throw Error('Unknown demo scenario. Options: '+[...demoScenarios,'migration','setup','update'].join(', '));
    await showTui(scenario as DemoScenario,title);
    return;
  }
@@ -316,6 +325,6 @@ async function main(){
  throw Error('Unknown command '+action+'. Use deskbeacon help.');
 }
 void main().catch(async e=>{logEvent('runtime','cli.command_failed','error',{error:e});
-  if(!(e as Error&{migrationScreenReported?:boolean;setupScreenReported?:boolean})?.migrationScreenReported&&!((e as Error&{setupScreenReported?:boolean})?.setupScreenReported))
+  if(!(e as Error&{migrationScreenReported?:boolean;setupScreenReported?:boolean;updateScreenReported?:boolean})?.migrationScreenReported&&!((e as Error&{setupScreenReported?:boolean})?.setupScreenReported)&&!((e as Error&{updateScreenReported?:boolean})?.updateScreenReported))
    console.error('DeskBeacon:',e instanceof Error?e.message:String(e));
   await flushLogs();process.exitCode=1;});

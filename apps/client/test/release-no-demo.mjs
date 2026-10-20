@@ -7,7 +7,7 @@ const client=fileURLToPath(new URL('../',import.meta.url));
 const staged=join(client,'dist','npm');
 assert.ok(existsSync(join(staged,'cli.js')),'Run stage-npm.mjs before verifying the published bundle');
 const contents=readFileSync(join(staged,'cli.js'),'utf8');
-for(const content of ['demo-offline-device','DEMO · 场景','模拟迁移已完成，真实数据未改变','模拟设备授权已完成，真实配置未改变'])
+for(const content of ['demo-offline-device','DEMO · 场景','模拟迁移已完成，真实数据未改变','模拟设备授权已完成，真实配置未改变','模拟查询 npm 发布信息，不会访问网络或安装软件'])
  assert.equal(contents.includes(content),false,'Demo data still exists in published package: '+content);
 const cli=join(staged,'launcher.js');
 const call=(...args)=>spawnSync(process.execPath,[cli,...args],{encoding:'utf8',timeout:20000,windowsHide:true});
@@ -23,4 +23,5 @@ assert.doesNotMatch(help.stderr,/SQLite is an experimental feature/);
 const demo=call('demo','migration');assert.equal(demo.status,1);assert.match(demo.stderr,/Unknown command demo/);
 const demo2=call('demo','connected');assert.equal(demo2.status,1);assert.match(demo2.stderr,/Unknown command demo/);
 const demoSetup=call('demo','setup');assert.equal(demoSetup.status,1);assert.match(demoSetup.stderr,/Unknown command demo/);
+const demoUpdate=call('demo','update');assert.equal(demoUpdate.status,1);assert.match(demoUpdate.stderr,/Unknown command demo/);
 console.log('PASS release bundle excludes actual Demo data, no demo help, demo commands unavailable, CLI version stable');

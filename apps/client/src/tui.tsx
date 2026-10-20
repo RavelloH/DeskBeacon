@@ -7,6 +7,7 @@ import {toolRow, type Segment, type Tone} from './tool-presentation.js';
 import {detailPresentation, wrapDetail, numberedBlock, type DetailLine} from './detail-presentation.js';
 import {inspectorInput,inspectorResult,inspectorOutput,inspectorCopyText,storedOutputLimited,type InspectorTab,type FullSource} from './detail-inspector.js';
 import {readEntireLocalStream} from './local-stream.js';
+import {loadSelectedFilePreview,missingSelectedFileSource,withSelectedFilePreview,type SelectedFilePreview} from './selected-file-preview.js';
 import {terminalWindowTitle,writeTerminalTitle} from './terminal-title.js';
 import {activityFileLink,openActivityFile,decodeSgrMouse} from './action-link.js';
 import {logEvent,flushLogs} from './diagnostics.js';
@@ -373,6 +374,7 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
  inspectorSourceRef.current=inspectorSource;
  const [inspectorError,setInspectorError]=useState('');
  const [inspectorProgress,setInspectorProgress]=useState('');
+ const [selectedFilePreview,setSelectedFilePreview]=useState<SelectedFilePreview|null>(null);
  const [liveLog,setLiveLog]=useState('');
  const [refresh,setRefresh]=useState(0);
  const [pageHasMore,setPageHasMore]=useState(false);
@@ -574,7 +576,20 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
  const taskEntry=task?{...(task.entry??{id:task.id,grant_id:'',tool:task.kind==='transfer'?'transfer_upload':'exec_background',description:task.title}),
   status:'running',time:task.start,finished_at:null,duration_ms:null}:undefined;
  const baseEntry=detailTask?taskEntry:selected;
- const entry=baseEntry;
+ // Fetch full saved I/O for the selected file operation only, never the full list.
+ useEffect(()=>{
+  setSelectedFilePreview(null);
+  if(demo||!baseEntry||view!=='main'||!missingSelectedFileSource(baseEntry))return;
+  let alive=true;
+  const timer=setTimeout(()=>{
+   void loadSelectedFilePreview(baseEntry,request=>requestLocal(request,8000))
+    .then(preview=>{if(alive)setSelectedFilePreview(preview);})
+    .catch(()=>{if(alive)setSelectedFilePreview(null);});
+  },130);
+  return()=>{alive=false;clearTimeout(timer);};
+ },[demo,baseEntry?.id,baseEntry?.tool,baseEntry?.request_json,baseEntry?.result,detailTask,view,ipcSession]);
+ const entry=useMemo(()=>baseEntry?withSelectedFilePreview(baseEntry,selectedFilePreview):undefined,
+  [baseEntry,selectedFilePreview]);
  // Completed entries are immutable between activity revisions; do not parse their JSON on each clock tick.
  const model=useMemo(()=>entry?activityPresentation(entry,entry.status==='running'?tick:0):null,
   [entry,entry?.status==='running'?tick:0]);

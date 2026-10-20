@@ -151,7 +151,7 @@ function contentFor(a:ActivityEntry,i:Fields,r:Fields):DetailLine[]{
    // cannot be treated as source code.
    if(typeof i.content==='string'&&i.content!=='[redacted]'&&i.encoding!=='base64')
     content(heading,i.content,languageForPath(i.path),i.mode==='append'?null:1,'i');
-   else out.push(section(heading),line('历史记录未保存可预览的写入文本','muted',false,true));
+   else out.push(section(heading),line(i.previewLimited?'列表预览省略正文；按 i 可查看完整输入':'历史记录未保存可预览的写入文本','muted',false,true));
    break;
   }
   case 'fs_read':
@@ -165,7 +165,7 @@ function contentFor(a:ActivityEntry,i:Fields,r:Fields):DetailLine[]{
       Number(i.byteOffset??0)>0?null:1;
     content('FILE CONTENT',r.content,languageForPath(i.path),start);
    }
-   else out.push(section('FILE CONTENT'),line('历史记录未保存此次读取的正文','muted',false,true));
+   else out.push(section('FILE CONTENT'),line(r.previewLimited?'列表预览省略正文；按 o 可查看完整结果':'历史记录未保存此次读取的正文','muted',false,true));
    break;
   case 'fs_read_many':
    meta([['SUCCESS',r.successCount],['FAILED',r.failureCount],['BYTES',r.bytesUsed]]);
@@ -176,7 +176,7 @@ function contentFor(a:ActivityEntry,i:Fields,r:Fields):DetailLine[]{
       languageForPath(loc(file)),Number.isSafeInteger(file.lineOffset)?file.lineOffset+1:
       Number(i.files?.find((f:Fields)=>f.path===file.path)?.byteOffset??0)>0?null:
       (Number(i.files?.find((f:Fields)=>f.path===file.path)?.lineOffset??0)+1),45,4000):
-     [line('历史记录未保存此次读取的正文','muted',false,true)]));
+     [line(r.previewLimited?'列表预览省略正文；按 o 可查看完整结果':'历史记录未保存此次读取的正文','muted',false,true)]));
    }break;
   case 'fs_grep':
    meta([['PATTERN',i.pattern],['PATH',i.path],['MATCHES',r.totalMatches??r.matches?.length],['MORE',r.truncated]]);

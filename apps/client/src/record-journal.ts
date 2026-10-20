@@ -136,18 +136,42 @@ export class RecordJournal{
   }finally{closeSync(fd);}
  }
  getPreview(relative:string):{input:string;result:string}{
-  let input:unknown=null,result:unknown=null,tail='';
+  let input:unknown=null,result:unknown=null,tail='',tool='';
   for(const e of this.events(relative)){
-   if(e.type==='start')input=e.input;
+   if(e.type==='start'){input=e.input;tool=String(e.tool??'');}
    else if(e.type==='result')result=e.data;
    else if(e.type==='stream'&&e.stream==='stdout'){
     const part=e.encoding==='base64'?new TextDecoder('utf-8').decode(Buffer.from(String(e.data??''),'base64')):String(e.text??'');
     tail=(tail+part).slice(-384);
    }
   }
-  const preview=(value:unknown,limit:number)=>{const raw=JSON.stringify(value??{});return raw.length<=limit?raw:JSON.stringify({summary:'预览过长，请查看完整日志',previewLimited:true});};
+  const preview=(value:unknown,limit:number,kind:'input'|'result')=>{
+   const raw=JSON.stringify(value??{});
+   if(raw.length<=limit)return raw;
+   // Preserve compact file metadata when a JSONL preview exceeds the list limit.
+   // Full file content is still available through the on-demand IPC inspector.
+   const object=value&&typeof value==='object'&&!Array.isArray(value)?value as Record<string,unknown>:{};
+   if(tool==='fs_write'&&kind==='input'){
+    const {path,mode,encoding,overwrite,workspaceId}=object;
+    return JSON.stringify({path,mode,encoding,overwrite,workspaceId,previewLimited:true});
+   }
+   if(tool==='fs_read'&&kind==='result'){
+    const {path,encoding,readBytes,totalBytes,linesRead,lineOffset,truncated}=object;
+    return JSON.stringify({path,encoding,readBytes,totalBytes,linesRead,lineOffset,truncated,previewLimited:true});
+   }
+   if(tool==='fs_read_many'&&kind==='result'){
+    const {successCount,failureCount,bytesUsed,truncated}=object;
+    const files=Array.isArray(object.files)?object.files.slice(0,20).map(value=>{
+     if(!value||typeof value!=='object')return{};
+     const {path,readBytes,lineOffset,error}=value as Record<string,unknown>;
+     return {path,readBytes,lineOffset,error};
+    }):[];
+    return JSON.stringify({successCount,failureCount,bytesUsed,truncated,files,previewLimited:true});
+   }
+   return JSON.stringify({summary:'预览过长，请查看完整日志',previewLimited:true});
+  };
   if(result&&typeof result==='object'&&tail)(result as Record<string,unknown>).outputPreview=tail.trim();
-  return{input:preview(input,6000),result:preview(result,6000)};
+  return{input:preview(input,6000,'input'),result:preview(result,6000,'result')};
  }
 
  getInput(relative:string):unknown|null{
