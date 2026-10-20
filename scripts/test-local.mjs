@@ -2,7 +2,9 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 const root=dirname(dirname(fileURLToPath(import.meta.url)));
-const env={...process.env,DESKBEACON_DATA_DIR:join(root,'.test-data'),
+// Test cases simulate an interactive TTY with Ink; CI flags disable Ink rendering.
+// Clear these flags only for isolated test child processes, never production.
+const env={...process.env,CI:undefined,GITHUB_ACTIONS:undefined,DESKBEACON_DATA_DIR:join(root,'.test-data'),
   DESKBEACON_IPC_PATH:process.platform==='win32'
     ? '\\\\.\\pipe\\deskbeacon-ci-'+process.pid
     : join(root,'.test-data','ipc-test.sock')};
