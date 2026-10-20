@@ -4,14 +4,19 @@ import { mkdirSync, existsSync, readFileSync, writeFileSync, chmodSync, promises
 import { join, resolve, dirname } from 'node:path';
 import { hostname, homedir, platform, arch, totalmem, freemem, cpus } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
+import { spawnSync,spawn } from 'node:child_process';
+import { relative,sep } from 'node:path';
+import {rgPath} from '@vscode/ripgrep';
 import { WebSocket } from 'ws';
 import si from 'systeminformation';
-import { PROTOCOL_VERSION, LIMITS, ProtocolMessageSchema, type ProtocolMessage } from '@deskbeacon/protocol';
+import { PROTOCOL_VERSION, LIMITS, ProtocolMessageSchema, toolInputSchemas, executeToolBatch, type ProtocolMessage, type BatchInput } from '@deskbeacon/protocol';
+import { RecordJournal } from './record-journal.js';
 import { TaskSupervisor } from './process.js';
+import { batchActivityInput, batchActivityResult } from './batch-activity.js';
 import { fileTool } from './filesystem.js';
 import { systemTool, networkTool } from './system.js';
 import {activityPage, type ActivityPageOptions} from './activity-query.js';
+import {logEvent} from './diagnostics.js';
 
 
 
@@ -42,6 +47,7 @@ export class ClientDaemon extends EventEmitter {
   private renamePending=new Map<string,{resolve:(name:string)=>void;reject:(error:Error)=>void;timer:ReturnType<typeof setTimeout>}>();
   readonly db:DatabaseSync;
   readonly supervisor:TaskSupervisor;
+  readonly journal:RecordJournal;
   private workspaces=new Map<string,{cwd:string;version:number;shellProfile:string}>();
   private stopped=false;
   private forceRefresh=false;
@@ -105,24 +111,56 @@ export class ClientDaemon extends EventEmitter {
     mkdirSync(dataDir,{recursive:true});
     this.db=new DatabaseSync(join(dataDir,'state.sqlite'));
     this.db.exec('PRAGMA journal_mode=WAL');
-    this.db.exec('CREATE TABLE IF NOT EXISTS connection_events (id INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL, kind TEXT NOT NULL, detail TEXT NOT NULL)');
+    // Connection diagnostics now live in logs/connection.jsonl, never SQLite.
+    this.db.exec('DROP TABLE IF EXISTS connection_events');
     this.db.exec('CREATE TABLE IF NOT EXISTS activity (id TEXT PRIMARY KEY, grant_id TEXT, tool TEXT, description TEXT, status TEXT, time INTEGER, result TEXT)');
     for(const column of ['request_json TEXT','finished_at INTEGER','duration_ms INTEGER','cwd TEXT','actor_name TEXT']){
       try{this.db.exec('ALTER TABLE activity ADD COLUMN '+column);}catch{}
     }
+    for(const column of ['record_path TEXT','record_state TEXT','outcome TEXT','exit_code INTEGER','error_code TEXT','record_bytes INTEGER'])try{this.db.exec('ALTER TABLE activity ADD COLUMN '+column);}catch{}
     this.db.exec('CREATE INDEX IF NOT EXISTS activity_time_id_desc ON activity(time DESC,id DESC)');
     this.db.exec("CREATE INDEX IF NOT EXISTS activity_running_time_id_desc ON activity ((CASE WHEN status='running' THEN 1 ELSE 0 END) DESC,time DESC,id DESC)");
     // This Runtime owns its process tree. A prior Runtime's unfinished activity cannot still be running here.
     // Mark it interrupted (unknown result), not failed or successfully completed.
-    this.db.prepare("UPDATE activity SET status='interrupted' WHERE status IN ('running','accepted','started')").run();
+    this.db.prepare("UPDATE activity SET status='interrupted' WHERE status IN ('queued','running','accepted','started')").run();
     this.activityRevision=(this.db.prepare('SELECT COUNT(*) AS total FROM activity').get() as {total:number}).total;
     this.db.exec('CREATE TABLE IF NOT EXISTS workspaces(id TEXT PRIMARY KEY, grant_id TEXT, cwd TEXT, shell TEXT, version INTEGER)');
     this.db.exec('CREATE TABLE IF NOT EXISTS unacked_results (operation_id TEXT PRIMARY KEY, tool TEXT NOT NULL, created INTEGER NOT NULL)');
     try{this.db.exec('ALTER TABLE unacked_results ADD COLUMN device_id TEXT');}catch{}
     this.db.prepare('DELETE FROM unacked_results WHERE device_id IS NULL OR device_id<>?').run(config.deviceId);
-    this.supervisor=new TaskSupervisor(this.db,join(dataDir,'output'),()=>this.emit('change'));
+    this.journal=new RecordJournal(join(dataDir,'records'),(id,stream,size)=>this.emit('journal-output',{taskId:id,stream,size}));
+    this.supervisor=new TaskSupervisor(this.db,join(dataDir,'output'),()=>this.emit('change'),this.journal);
+    this.reconcileJournalReceipts();
   }
-  async status(){
+  /** Repair the crash window after JSONL fsync but before the SQLite receipt/ACK transaction. */
+  private reconcileJournalReceipts():void{
+    const rows=this.db.prepare("SELECT a.id,a.tool,a.record_path FROM activity a LEFT JOIN receipts r ON r.id=a.id "+
+      "WHERE a.record_path IS NOT NULL AND (a.status IN ('interrupted','queued','running','accepted','started') OR r.status='accepted')")
+      .all() as {id:string;tool:string;record_path:string}[];
+    for(const row of rows){
+      try{
+        const journal=this.journal.getResult(row.record_path);
+        if(!journal||!['completed','failed'].includes(journal.status))continue;
+        const result=journal.result;
+        const failure=journal.status==='failed'||Number(result?.exitCode??0)!==0||
+          Boolean(result?.error||result?.spawnError||result?.timedOut||result?.isError)||
+          Number(result?.failed??result?.failureCount??0)>0;
+        this.db.exec('BEGIN IMMEDIATE');
+        try{
+          this.db.prepare('UPDATE activity SET status=?,outcome=?,exit_code=? WHERE id=?')
+            .run(journal.status,failure?'failed':'success',Number.isSafeInteger(result?.exitCode)?result.exitCode:null,row.id);
+          this.db.prepare('INSERT INTO receipts(id,status,created,result) VALUES(?,?,?,NULL) ON CONFLICT(id) DO UPDATE SET status=excluded.status,result=NULL')
+            .run(row.id,journal.status,Date.now());
+          if(journal.status==='completed')
+            this.db.prepare('INSERT OR IGNORE INTO unacked_results(operation_id,tool,created,device_id) VALUES(?,?,?,?)')
+              .run(row.id,row.tool,Date.now(),this.config.deviceId);
+          this.db.exec('COMMIT');
+        }catch(e){this.db.exec('ROLLBACK');throw e;}
+      }catch(e){logEvent('execution','receipt.reconciliation_failed','error',{operationId:row.id,error:e});}
+    }
+  }
+
+  async status(includeBackground=true){
     const systemMemory=this.refreshSystemMemory();
     const current=process.cpuUsage(),clock=process.hrtime.bigint();
     const elapsedUs=Number(clock-this.cpuSampleAt)/1000;
@@ -140,22 +178,67 @@ export class ClientDaemon extends EventEmitter {
         const row=this.db.prepare('SELECT actor_name,grant_id,request_json,cwd FROM activity WHERE id=?').get(task.id) as
           {actor_name:string|null;grant_id:string;request_json:string|null;cwd:string|null}|undefined;
         return {...task,...(row?{actorName:row.actor_name,grantId:row.grant_id,requestJson:row.request_json,cwd:row.cwd}:{})};
-      }),background:this.supervisor.list(),
+      }),...(includeBackground?{background:this.supervisor.list()}:{}),
       transfers:[...this.transfers].map(([id,t])=>({id,...t}))};
   }
   activityList(options:ActivityPageOptions={}){
-    return activityPage(this.db,options);
+    const page=activityPage(this.db,options);
+    // UI hydration is demand-driven: no journal reads when a service has no TUI.
+    for(const row of [...page.rows,...page.updates])if(typeof row.record_path==='string'&&row.record_path){
+      try{
+        const preview=this.journal.getPreview(row.record_path);
+        if(row.tool==='batch'){
+          const input=this.journal.getInput(row.record_path) as Record<string,any>|null;
+          const output=this.journal.getResult(row.record_path)?.result as Record<string,any>|undefined;
+          const fullInput=JSON.stringify(input??{}),fullOutput=JSON.stringify(output??{});
+          row.request_json=batchActivityInput(input??{},fullInput);
+          row.result=batchActivityResult(output??{},fullOutput);
+        }else{
+          row.request_json=preview.input;
+          row.result=preview.result;
+        }
+      }catch{row.request_json=null;row.result=null;}
+    }
+    return page;
+  }
+  /** Slow full-text search is opt-in and runs in its own bounded process.
+   * No background index, no service-wide text cache, no periodic filesystem scans. */
+  async activitySearch(options:ActivityPageOptions={},signal?:AbortSignal){
+    const query=(options.query??'').trim();
+    if(!query||!existsSync(join(dataDir,'records')))return this.activityList(options);
+    const root=join(dataDir,'records');
+    const paths=await new Promise<string[]>(resolve=>{
+      let child:ReturnType<typeof spawn>;
+      try{child=spawn(rgPath,['--files-with-matches','--fixed-strings','--ignore-case','--hidden',
+        '--no-messages','--glob','*.jsonl','--',query,root],{windowsHide:true,stdio:['ignore','pipe','ignore']});}
+      catch{return resolve([]);}
+      let output='',bytes=0,done=false;
+      const timer=setTimeout(()=>child.kill(),8000);timer.unref();
+      const cancel=()=>child.kill();signal?.addEventListener('abort',cancel,{once:true});
+      child.stdout?.on('data',(buf:Buffer)=>{
+        bytes+=buf.byteLength;
+        if(bytes>2*1024*1024){child.kill();return;}
+        output+=buf.toString('utf8');
+      });
+      const finish=()=>{if(done)return;done=true;clearTimeout(timer);signal?.removeEventListener('abort',cancel);
+        resolve(output.split(/\r?\n/).filter(Boolean).slice(0,1000));};
+      child.once('error',finish);child.once('close',finish);
+    });
+    const pathSet=new Set(paths.map(path=>relative(root,path).split(sep).join('/')).filter(p=>!p.startsWith('..')));
+    const searchIds:string[]=[];
+    for(const path of pathSet){
+      const row=this.db.prepare('SELECT id FROM activity WHERE record_path=?').get(path) as {id:string}|undefined;
+      if(row)searchIds.push(row.id);
+    }
+    return this.activityList({...options,searchIds});
   }
   private recordConnection(kind:string,detail=''){
     if(this.stopped)return;
-    try{
-      this.db.prepare('INSERT INTO connection_events(time,kind,detail) VALUES(?,?,?)').run(Date.now(),kind,detail.slice(0,160));
-      this.db.exec('DELETE FROM connection_events WHERE id NOT IN (SELECT id FROM connection_events ORDER BY id DESC LIMIT 250)');
-    }catch(error){
-      // Transient SQLite contention must never kill the entire Runtime from a
-      // WebSocket callback or leave it unable to reconnect.
-      console.error('Connection event diagnostic failed:',err(error));
-    }
+    const level=/error|exception|failed/.test(kind)?'error':
+      /timeout|closed|reconnect_scheduled|ack_deferred|disconnect/.test(kind)?'warn':'info';
+    logEvent('connection',kind,level,{detail,epoch:this.epoch,ready:this.ready,state:this.state,
+      awaitingPong:this.heartbeatAwaiting,heartbeatMisses:this.heartbeatMisses,
+      latencyMs:this.latencyMs,connectedForMs:this.socketOpenedAt?Date.now()-this.socketOpenedAt:null});
   }
   private persistDeviceName(name:string){
     if(this.config.deviceName===name)return;
@@ -200,7 +283,7 @@ export class ClientDaemon extends EventEmitter {
       if(this.stopped)return;
       this.recordConnection('connect_exception',err(error));
       this.state='error: '+err(error);
-      console.error('DeskBeacon connect recovered from:',err(error));
+      logEvent('connection','connect.retryable_exception','error',{error});
       // A failed WebSocket constructor or local OS error is retryable, not a
       // fatal unhandled Promise rejection that kills the unattended service.
       const previous=this.ws;this.ws=null;
@@ -218,7 +301,7 @@ export class ClientDaemon extends EventEmitter {
       this.connecting=false;
       this.state='error: '+err(e);this.emit('change');
       this.recordConnection('token_refresh_failed',err(e));
-      console.error('DeskBeacon token refresh:',err(e));
+      logEvent('security','oauth.refresh_failed','error',{error:e});
       this.scheduleReconnect();
       return;
     }
@@ -263,7 +346,7 @@ export class ClientDaemon extends EventEmitter {
       this.keepaliveTimer=setInterval(heartbeat,10_000);
       this.keepaliveTimer.unref();
     });
-    socket.on('message',raw=>{void this.message(raw.toString()).catch(e=>{console.error('Remote message:',err(e));});});
+    socket.on('message',raw=>{void this.message(raw.toString()).catch(e=>{logEvent('connection','message.handler_failed','error',{error:e});});});
     socket.on('close',(code,reason)=>{
       if(this.ws!==socket)return;
       if(this.handshakeTimer){clearTimeout(this.handshakeTimer);this.handshakeTimer=undefined;}
@@ -271,7 +354,7 @@ export class ClientDaemon extends EventEmitter {
       const age=Date.now()-this.socketOpenedAt;
       const pongAge=this.lastHeartbeatAt===null?'never':String(Date.now()-this.lastHeartbeatAt)+'ms';
       this.recordConnection('websocket_closed','code='+code+' age='+age+'ms pongAge='+pongAge+' awaiting='+this.heartbeatAwaiting+' misses='+this.heartbeatMisses+' reason='+reason.toString());
-      console.error('DeskBeacon WebSocket closed:',code,reason.toString());this.ready=false;this.state='disconnected';
+      this.ready=false;this.state='disconnected';
       this.cancelRenames('DEVICE_DISCONNECTED');
       this.heartbeatAwaiting=false;this.latencyMs=null;this.emit('change');
       // shutdown() closes the socket asynchronously; never create a new 60s timer afterward.
@@ -281,7 +364,7 @@ export class ClientDaemon extends EventEmitter {
         if(this.ready||this.stopped)return;
         this.recordConnection('disconnect_grace_expired','foreground cancellation');
         for(const task of this.supervisor.active().filter(x=>x.kind==='foreground')){
-          void this.supervisor.stop(task.id).catch(e=>console.error('Disconnected foreground stop:',err(e)));
+          void this.supervisor.stop(task.id).catch(e=>logEvent('execution','foreground.stop_failed','error',{operationId:task.id,error:e}));
         }
       },LIMITS.shortDisconnectGraceMs);
       this.scheduleReconnect();
@@ -289,7 +372,7 @@ export class ClientDaemon extends EventEmitter {
     socket.on('unexpected-response',(_req,response)=>{if(response.statusCode===401)this.forceRefresh=true;});
     socket.on('error',e=>{
       this.recordConnection('websocket_error',err(e));
-      this.state='error: '+err(e);console.error('DeskBeacon WebSocket:',err(e));
+      this.state='error: '+err(e);
     });
   }
   stop(){
@@ -300,7 +383,7 @@ export class ClientDaemon extends EventEmitter {
     if(this.keepaliveTimer)clearInterval(this.keepaliveTimer);
     if(this.handshakeTimer)clearTimeout(this.handshakeTimer);
     if(this.reconnectTimer)clearTimeout(this.reconnectTimer);
-    this.ws?.close();this.db.close();
+    this.ws?.close();this.journal.closeAll();this.db.close();
   }
   async shutdown(){
     if(this.stopped)return;
@@ -310,7 +393,9 @@ export class ClientDaemon extends EventEmitter {
     if(this.keepaliveTimer)clearInterval(this.keepaliveTimer);
     if(this.handshakeTimer)clearTimeout(this.handshakeTimer);
     if(this.reconnectTimer)clearTimeout(this.reconnectTimer);
-    this.ws?.close();
+    // Shutdown does not require a WebSocket close handshake. terminate() releases
+    // the transport immediately rather than waiting up to 30 seconds.
+    this.ws?.terminate();
     const ids=new Set(this.supervisor.active().map(task=>task.id.split(':')[0]!));
     await Promise.allSettled([...ids].map(id=>this.supervisor.stop(id)));
     const deadline=Date.now()+7500;
@@ -318,7 +403,7 @@ export class ClientDaemon extends EventEmitter {
       await new Promise(resolve=>setTimeout(resolve,75));
     }
     // Background close listeners must finish SQLite updates before DB shutdown.
-    this.db.close();
+    this.journal.closeAll();this.db.close();
   }
   private send(value:Record<string,unknown>):string{
     if(this.ws?.readyState!==WebSocket.OPEN)throw Error('DEVICE_DISCONNECTED');
@@ -331,6 +416,12 @@ export class ClientDaemon extends EventEmitter {
     while(this.ws?.readyState===WebSocket.OPEN&&this.ws.bufferedAmount>512*1024)await new Promise(r=>setTimeout(r,20));
     return this.send(value);
   }
+  private restoredResult(id:string,receipt?:{status:string;result:string|null}):any|null{
+    if(receipt?.result){try{return JSON.parse(receipt.result);}catch{}}
+    const row=this.db.prepare('SELECT record_path FROM activity WHERE id=?').get(id) as {record_path:string|null}|undefined;
+    if(!row?.record_path)return null;
+    try{return this.journal.getResult(row.record_path)?.result??null;}catch{return null;}
+  }
   private async replayPending(){
     if(this.replayInProgress||!this.ready)return;
     this.replayInProgress=true;
@@ -340,9 +431,11 @@ export class ClientDaemon extends EventEmitter {
       for(const item of items){
         if(!this.ready)break;
         const receipt=this.supervisor.hasReceipt(item.operation_id);
-        if(receipt?.status!=='completed'||!receipt.result)continue;
-        try{await this.final(item.operation_id,item.tool,JSON.parse(receipt.result));}
-        catch(e){console.error('Result replay suspended:',err(e));break;}
+        if(receipt?.status!=='completed')continue;
+        const result=this.restoredResult(item.operation_id,receipt);
+        if(result===null)continue;
+        try{await this.final(item.operation_id,item.tool,result);}
+        catch(e){logEvent('execution','result.replay_suspended','error',{error:e});break;}
       }
     }finally{this.replayInProgress=false;}
   }
@@ -415,89 +508,67 @@ export class ClientDaemon extends EventEmitter {
     }
     const prev=this.supervisor.hasReceipt(opId);
     if(prev){
-      if(prev.status==='completed'&&prev.result)await this.final(opId,tool,JSON.parse(prev.result));
+      if(prev.status==='completed'){
+        const replay=this.restoredResult(opId,prev);
+        if(replay!==null)await this.final(opId,tool,replay);
+        else this.send({type:'operation.failed',operationId:opId,payload:{code:'OPERATION_UNKNOWN',message:'Completed result is unavailable locally',retryable:false}});
+      }
       else if(prev.status==='accepted'&&this.operationInFlight.has(opId)){
-        // A DO delivery retry is a receipt request, not a second execution.
+        // A reconnect may observe a locally queued (not yet started) command.
         this.send({type:'operation.accepted',operationId:opId,payload:{acceptedAt:now()}});
-        this.send({type:'operation.started',operationId:opId,payload:{startedAt:now()}});
+        const row=this.db.prepare('SELECT status FROM activity WHERE id=?').get(opId) as {status:string}|undefined;
+        if(row?.status==='running')this.send({type:'operation.started',operationId:opId,payload:{startedAt:now()}});
       }else this.send({type:'operation.failed',operationId:opId,payload:{code:'OPERATION_UNKNOWN',message:'A previous execution is no longer live; check its result before retrying',retryable:false}});
       return;
     }
+    let journalPath:string;
+    try{journalPath=this.journal.start(opId,tool,input,{isBackground:tool==='exec_background'});}
+    catch(e){this.send({type:'operation.failed',operationId:opId,payload:{code:'LOCAL_STORAGE_ERROR',message:'Unable to persist operation journal',retryable:false}});return;}
     this.supervisor.record(opId,'accepted',{});
     this.operationInFlight.add(opId);
     const description=String(input.description??tool);
-    const privateKey=/token|secret|password|cookie|authorization|api[_-]?key|private[_-]?key/i;
-    const redact=(key:string,value:any)=>{
-      if(key==='content'&&tool==='fs_write'&&typeof value==='string')return value.length>8000?
-        value.slice(0,8000)+' ...剩余 '+(value.length-8000)+' 字符':value;
-      if(['content','dataBase64','env'].includes(key)||privateKey.test(key))return '[redacted]';
-      if(typeof value==='string'&&value.length>4000)return value.slice(0,4000)+' ...剩余 '+(value.length-4000)+' 字符';
-      if(Array.isArray(value)&&value.length>80)return [...value.slice(0,80),'...剩余 '+(value.length-80)+' 行'];
-      return value;
-    };
-    const safeInput=JSON.parse(JSON.stringify(input,redact));
-    // Keep complete locally displayable inputs outside the bounded activity index.
-    // Do not persist authentication fields, environment maps or binary data.
-    try{
-      const locallySafe=JSON.stringify(input,(key,value)=>{
-        if(['dataBase64','env'].includes(key)||privateKey.test(key))return '[redacted]';
-        return value;
-      });
-      const outputDir=join(dataDir,'output');
-      mkdirSync(outputDir,{recursive:true,mode:0o700});
-      const safeId=opId.replace(/[^a-zA-Z0-9_.-]/g,'_');
-      writeFileSync(join(outputDir,safeId+'.input.json'),locallySafe,{mode:0o600});
-    }catch(error){console.error('Could not retain local operation input:',err(error));}
+    // Input is retained once by RecordJournal; SQLite stores only metadata.
     const started=Date.now();
     const fileAction=['fs_read','fs_write','fs_edit'].includes(tool);
     const pathHint=input.path??input.sourcePath??input.targetPath;
     const cwd=String(input.command?.cwd??input.cwd??
       (fileAction&&typeof pathHint==='string'?dirname(pathHint):pathHint)??process.cwd());
-    const requestPreview=JSON.stringify(safeInput);
-    this.db.prepare('INSERT OR REPLACE INTO activity(id,grant_id,actor_name,tool,description,status,time,cwd,request_json) VALUES(?,?,?,?,?,?,?,?,?)')
-      .run(opId,m.grantId,actorName,tool,description,'running',started,cwd,
-        requestPreview.length>(tool==='fs_write'?12000:6000)?JSON.stringify({summary:'参数过大，详情已省略，...剩余 '+requestPreview.length+' 字符'}):requestPreview);
+    this.db.prepare('INSERT OR REPLACE INTO activity(id,grant_id,actor_name,tool,description,status,time,cwd,request_json,record_path,record_state,outcome) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)')
+      .run(opId,m.grantId,actorName,tool,description,tool==='exec_foreground'?'queued':'running',started,cwd,null,journalPath,'ready','running');
     this.activityRevision++;
     this.emit('change');
     // Acceptance is already persisted locally. A disconnect during the ACK
     // must not silently prevent an otherwise valid, once-only execution.
     try{this.send({type:'operation.accepted',operationId:opId,payload:{acceptedAt:now()}});}
     catch{this.recordConnection('operation_ack_deferred','accepted '+opId);}
-    try{this.send({type:'operation.started',operationId:opId,payload:{startedAt:now()}});}
-    catch{this.recordConnection('operation_ack_deferred','started '+opId);}
+    if(tool!=='exec_foreground'){
+      try{this.send({type:'operation.started',operationId:opId,payload:{startedAt:now()}});}
+      catch{this.recordConnection('operation_ack_deferred','started '+opId);}
+    }
     try{
       const result=await this.execute(tool,input,opId,m.grantId);
+      this.journal.finish(opId,result,'completed',{background:tool==='exec_background'});
       this.supervisor.record(opId,'completed',result);
-      const safeResult=JSON.stringify(result,(key,value)=>{
-        // File reads belong to this local user's history: retain a bounded
-        // preview, not a blanket '[redacted]' placeholder.
-        if(key==='content'&&(tool==='fs_read'||tool==='fs_read_many')&&typeof value==='string')
-          return value.length>10000?value.slice(0,10000)+' ...剩余 '+(value.length-10000)+' 字符':value;
-        if(['content','dataBase64','env'].includes(key)||privateKey.test(key))return '[redacted]';
-        if(typeof value==='string'&&value.length>3000)return value.slice(0,3000)+' ...剩余 '+(value.length-3000)+' 字符';
-        if(Array.isArray(value)&&value.length>40)return [...value.slice(0,40),'...剩余 '+(value.length-40)+' 行'];
-        return value;
-      });
-      const resultPreview=safeResult.length>(tool==='fs_read'||tool==='fs_read_many'?20000:6000)
-        ?JSON.stringify({summary:'结果过大，...剩余 '+safeResult.length+' 字符，请查看本地日志'}):safeResult;
-      this.db.prepare('UPDATE activity SET status=?,result=?,finished_at=?,duration_ms=? WHERE id=?')
-        .run('completed',resultPreview,Date.now(),Date.now()-started,opId);
+      const failure=result&&typeof result==='object'&&(Number(result.exitCode??0)!==0||result.isError===true||Boolean(result.error||result.spawnError||result.timedOut)||Number(result.failureCount??result.failed??0)>0);
+      this.db.prepare('UPDATE activity SET status=?,result=NULL,finished_at=?,duration_ms=?,outcome=?,exit_code=?,error_code=? WHERE id=?')
+        .run('completed',Date.now(),Date.now()-started,failure?'failed':'success',Number.isSafeInteger(result?.exitCode)?result.exitCode:null,typeof result?.code==='string'?result.code:null,opId);
       this.activityRevision++;
       this.emit('change');
       this.db.prepare('INSERT OR IGNORE INTO unacked_results(operation_id,tool,created,device_id) VALUES(?,?,?,?)').run(opId,tool,Date.now(),this.config.deviceId);
       try{await this.final(opId,tool,result);}
-      catch(e){console.error('Completed operation result awaiting retry:',err(e));}
+      catch(e){logEvent('execution','result.awaiting_retry','warn',{operationId:opId,error:e});}
     }catch(e){
       const message=err(e);
+      try{this.journal.finish(opId,{error:message},'failed');}catch{}
       this.supervisor.record(opId,'failed',{error:message});
-      this.db.prepare('UPDATE activity SET status=?,result=?,finished_at=?,duration_ms=? WHERE id=?')
-        .run('failed',JSON.stringify({error:message}).slice(0,32000),Date.now(),Date.now()-started,opId);
+      this.db.prepare('UPDATE activity SET status=?,result=NULL,finished_at=?,duration_ms=?,outcome=?,error_code=? WHERE id=?')
+        .run('failed',Date.now(),Date.now()-started,'failed',message.split(':')[0]?.slice(0,64)??null,opId);
       this.activityRevision++;
       this.emit('change');
       if(this.ws?.readyState===WebSocket.OPEN){
         this.send({type:'operation.failed',operationId:opId,payload:{code:message.split(':')[0]?.slice(0,64)||'INTERNAL',message:message.slice(0,2000),retryable:false}});
       }
-    }finally{this.operationInFlight.delete(opId);}
+    }finally{this.operationInFlight.delete(opId);this.supervisor.clearCancelled(opId);}
   }
   private async final(id:string,tool:string,result:any){
     if(tool==='exec_foreground'){
@@ -526,6 +597,39 @@ export class ClientDaemon extends EventEmitter {
     }
   }
   private async execute(tool:string,input:Record<string,any>,operationId:string,grantId:string):Promise<any>{
+    if(tool==='batch'){
+      const batch=input as BatchInput;
+      this.supervisor.trackBatch(operationId,true);
+      try{
+        return await executeToolBatch(batch,async(name,subInput,callId)=>{
+          const parsed=toolInputSchemas[name].safeParse(subInput);
+          if(!parsed.success)return {isError:true,code:'INVALID_INPUT',message:parsed.error.message.slice(0,1500)};
+          if(name==='operation_get'||name==='operation_output')
+            return {isError:true,code:'UNSUPPORTED_TOOL',message:'Use DO history tools outside a device-local batch'};
+          // A sub-operation has a stable local identity, but no separate DO operation.
+          const localId=operationId+':'+callId;
+          const childRef=this.journal.start(localId,name,parsed.data,{parentOperationId:operationId,isBackground:name==='exec_background'});
+          this.journal.linkChild(operationId,localId,childRef,name);
+          let result:any;
+          try{
+            result=await this.execute(name,parsed.data as Record<string,any>,localId,grantId);
+            this.journal.finish(localId,result,'completed',{background:name==='exec_background'});
+          }catch(error){
+            try{this.journal.finish(localId,{error:err(error)},'failed');}catch{}
+            throw error;
+          }
+          if(name==='exec_foreground'){
+            const {stdout,stderr,...metadata}=result;
+            const budget=Math.min(batch.maxResultBytes,8192);
+            const out=String(stdout??''),err=String(stderr??'');
+            const preview=Math.max(128,Math.floor((budget-1024)/2));
+            return {status:'completed',data:{...metadata,stdout:out.slice(0,preview),stderr:err.slice(0,preview),
+              stdoutTruncated:out.length>preview,stderrTruncated:err.length>preview}};
+          }
+          return {status:'completed',data:result};
+        },()=>this.supervisor.isCancelled(operationId));
+      }finally{this.supervisor.trackBatch(operationId,false);}
+    }
     if(tool==='device_info')return{deviceId:this.config.deviceId,name:this.config.deviceName,platform:platform(),
       architecture:arch(),hostname:hostname(),cpuCount:cpus().length,freeMemoryBytes:freemem(),
       totalMemoryBytes:totalmem(),defaultCwd:process.cwd(),nodeVersion:process.version,
@@ -561,7 +665,13 @@ export class ClientDaemon extends EventEmitter {
     if(tool.startsWith('fs_'))return fileTool(tool,input,workspace);
     if(tool==='exec_foreground'){
       const command={...input.command,cwd:input.command.cwd??workspace??process.cwd(),shellProfile:input.command.shellProfile??profile};
-      return await this.supervisor.foreground(operationId,input.description,command,input.timeoutMs);
+      return await this.supervisor.foreground(operationId,input.description,command,input.timeoutMs,
+        operationId.includes(':')?undefined:()=>{
+          this.db.prepare("UPDATE activity SET status='running' WHERE id=?").run(operationId);
+          this.activityRevision++;this.emit('change');
+          try{this.send({type:'operation.started',operationId,payload:{startedAt:now()}});}
+          catch{this.recordConnection('operation_ack_deferred','started '+operationId);}
+        });
     }
     if(tool==='exec_background'){
       const cmd={...input.command,cwd:input.command.cwd??workspace??process.cwd(),shellProfile:input.command.shellProfile??profile};

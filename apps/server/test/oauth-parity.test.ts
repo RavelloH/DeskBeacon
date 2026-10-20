@@ -25,6 +25,11 @@ describe('upstream cf-browser-mcp OAuth contract', () => {
     expect(environment).not.toMatch(/OWNER_LOGIN|OWNER_PASSWORD_HASH|OWNER_SESSION_SECRET|OWNER_PASSWORD/);
     expect(entry).not.toMatch(/\/login|\/consent/);
   });
+  it('allows HTTPS OAuth form redirects while retaining server-side 302', () => {
+    expect(auth).toContain("form-action 'self' https:");
+    expect(auth).toContain('status: 302');
+    expect(auth).not.toContain('allowedFormOrigin');
+  });
   it('uses upstream OAuth endpoint paths for both worker and device client', () => {
     expect(entry).toContain('"/authorize"');
     expect(entry).toContain('authorizationServer.fetch(request, env, ctx)');

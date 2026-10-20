@@ -67,6 +67,66 @@ function records(items:unknown,mapper:(v:Fields,n:number)=>string):DetailLine[]{
 const loc=(x:Fields)=>x.path??x.name??x.sourcePath??x.filename??'';
 const cmd=(x:Fields)=>{const c=x.command;if(!c||typeof c!=='object')return '';return c.mode==='shell'?String(c.script??''):[c.program,...(Array.isArray(c.args)?c.args:[])].join(' ');};
 
+function batchLines(input:Fields,result:Fields,running:boolean):DetailLine[]{
+ const lines:DetailLine[]=[];
+ const requests=Array.isArray(input.stages)?input.stages:[];
+ const responses=Array.isArray(result.stages)?result.stages:[];
+ if(!requests.length&&!responses.length){
+  lines.push(line('历史摘要未包含子操作；按 i 查看完整输入，按 o 查看完整结果。','warning'));
+  return lines;
+ }
+ const count=Math.max(requests.length,responses.length);
+ for(let stageIndex=0;stageIndex<count;stageIndex++){
+  const stage=requests[stageIndex]??{},response=responses[stageIndex]??{};
+  const calls=Array.isArray(stage.calls)?stage.calls:[];
+  const results=Array.isArray(response.results)?response.results:[];
+  const items=calls.length?calls:results;
+  const parallel=stage.parallel??response.parallel;
+  lines.push(section('STAGE '+(stageIndex+1)+' · '+(parallel?'并行':'串行')+' · '+items.length+' 项'));
+  for(const [index,call] of items.entries()){
+   const received=results.find((item:Fields)=>item.id!==undefined&&item.id===call.id)??results[index];
+   const params=call.input??{},tool=String(call.tool??received?.tool??'unknown');
+   const data=received?.result?.data&&typeof received.result.data==='object'
+    ?received.result.data:received?.result??{};
+   const error=received?.error??{};
+   const state=received===undefined?(running?'等待执行':result.stoppedEarly?'已跳过':'未记录结果'):
+    received.ok===false?'失败':'成功';
+   const tone:Tone=received?.ok===false?'danger':received?.ok===true?'success':'muted';
+   lines.push(line((index+1)+'. '+clean(tool,60)+' · '+clean(call.id??received?.id??'',90)+'  '+state,tone,true));
+   if(params.description)lines.push(label('INTENT',params.description));
+   if(params.command){
+    const command=cmd(params);
+    lines.push(label('COMMAND',clean(command,600)));
+    if(params.command.cwd)lines.push(label('CWD',params.command.cwd));
+   }
+   const target=params.path??params.sourcePath??params.targetPath??params.url??params.archivePath??
+    (Array.isArray(params.paths)?params.paths.join(', '):undefined);
+   if(target)lines.push(label('TARGET',clean(String(target),400)));
+   const operation=[params.action,params.mode,params.method,params.pattern].filter(Boolean).join(' · ');
+   if(operation)lines.push(label('OPTIONS',clean(operation,240)));
+   if(received){
+    const fields=[
+     data.exitCode!==undefined?'退出码 '+data.exitCode:'',
+     data.status??'',
+     data.readBytes!==undefined?'读取 '+data.readBytes+' B':'',
+     data.writtenBytes!==undefined?'写入 '+data.writtenBytes+' B':'',
+     data.timedOut?'超时':'',data.cancelled?'已取消':'',
+     received.truncated?'返回内容已截断':'',
+     Number.isFinite(received.durationMs)?received.durationMs+' ms':''
+    ].filter(Boolean).join(' · ');
+    if(fields)lines.push(label('RESULT',fields));
+    if(error.code||error.message)lines.push(label('ERROR',clean([error.code,error.message].filter(Boolean).join(' · '),700),'danger'));
+    if(data.errorSummary)lines.push(label('ERROR',clean(data.errorSummary,380),'danger'));
+    for(const [name,value] of [['STDOUT',data.stdout??data.outputPreview],['STDERR',data.stderr]] as const)
+     if(typeof value==='string'&&value.length)
+      lines.push(label(name,clean(value.replace(/\s+/g,' '),480),name==='STDERR'?'warning':'muted'));
+    if(data.stdoutTruncated||data.stderrTruncated)lines.push(line('本条输出已截断，按 o 查看 Batch 完整结果。','warning'));
+   }
+  }
+ }
+ return lines;
+}
+
 function contentFor(a:ActivityEntry,i:Fields,r:Fields):DetailLine[]{
  const out:DetailLine[]=[];
  const meta=(fields:[string,unknown][])=>out.push(...fields.filter(([,v])=>v!==undefined&&v!==null&&v!=='').map(([k,v])=>label(k,v)));
@@ -139,8 +199,8 @@ function contentFor(a:ActivityEntry,i:Fields,r:Fields):DetailLine[]{
    if(r.stderr)content('STDERR',normalizeProcessStderr(r.stderr));break;
   case 'batch':
    meta([['STAGES',i.stages?.length],['DONE',r.completed],['FAILED',r.failed],['SKIPPED',r.skipped]]);
-   for(const [index,stage] of (Array.isArray(r.stages)?r.stages:[]).slice(0,20).entries())
-    list('STAGE '+(index+1),stage.results,(x,n)=>(n+1)+'. '+(x.id??x.tool??'')+'  '+(x.ok?'OK':'FAILED'));
+   out.push(...batchLines(i,r,a.status==='running'||a.status==='queued'));
+   if(i.previewLimited||r.previewLimited)out.push(line('以上为本地有界摘要；按 i / o 查看完整输入和结果。','muted'));
    break;
   case 'http_request':
    meta([['METHOD',i.method],['URL',i.url],['HTTP',r.status??r.statusCode],['BYTES',r.bytes??r.readBytes]]);

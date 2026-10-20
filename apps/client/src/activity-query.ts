@@ -2,10 +2,10 @@ import type {DatabaseSync} from 'node:sqlite';
 
 /** Page complete rows, so the list and detail pane share one consistent record. */
 export const ACTIVITY_PAGE_SIZE=50;
-const columns='id,grant_id,actor_name,tool,description,status,time,finished_at,duration_ms,cwd,request_json,result';
+const baseColumns=['id','grant_id','actor_name','tool','description','status','time','finished_at','duration_ms','cwd','record_path','record_state','outcome','exit_code','error_code','request_json','result'];
 const rank="CASE WHEN status='running' THEN 1 ELSE 0 END";
 export type ActivityCursor={running:0|1;time:number;id:string};
-export type ActivityPageOptions={cursor?:string;query?:string;limit?:number;watchIds?:string[]};
+export type ActivityPageOptions={cursor?:string;query?:string;limit?:number;watchIds?:string[];searchIds?:string[]};
 export type ActivityDayStats={date:string;total:number;success:number;failed:number;interrupted:number;running:number};
 export type ActivityPage={rows:Record<string,any>[];nextCursor:string|null;hasMore:boolean;total:number;updates:Record<string,any>[];days:ActivityDayStats[]};
 /** Older running services do not return days; new TUI must remain usable until restart. */
@@ -25,12 +25,14 @@ function decode(value:string):ActivityCursor{
   return data;
  }catch{throw Error('INVALID_ACTIVITY_CURSOR');}
 }
-function searchClause(query:string){
+function searchClause(query:string,searchIds:string[]=[]){
  const term=query.trim().toLowerCase();
  if(!term)return {where:'',args:[] as string[]};
- const fields=['tool','description','actor_name','grant_id','cwd','request_json','result','status'];
- return {where:'('+fields.map(field=>"instr(lower(coalesce("+field+",'')), ?) > 0").join(' OR ')+')',
-  args:fields.map(()=>term)};
+ const fields=['tool','description','actor_name','grant_id','cwd','status','request_json','result'];
+ const ids=searchIds.slice(0,1000);
+ return {where:'('+fields.map(field=>"instr(lower(coalesce("+field+",'')), ?) > 0").join(' OR ')+
+   (ids.length?' OR id IN ('+ids.map(()=>'?').join(',')+')':'')+')',
+  args:[...fields.map(()=>term),...ids]};
 }
 export function sortActivityRows<T extends {id:string;status:string;time:number}>(rows:T[]):T[]{
  return [...rows].sort((a,b)=>Number(b.status==='running')-Number(a.status==='running')||b.time-a.time||b.id.localeCompare(a.id));
@@ -39,7 +41,9 @@ export function activityPage(db:DatabaseSync,opts:ActivityPageOptions={}):Activi
  const limit=Number.isInteger(opts.limit)?Math.max(1,Math.min(100,opts.limit!)):ACTIVITY_PAGE_SIZE;
  if(opts.cursor && (typeof opts.cursor!=='string'||opts.cursor.length>1024))throw Error('INVALID_ACTIVITY_CURSOR');
  if(opts.query!==undefined && (typeof opts.query!=='string'||opts.query.length>256))throw Error('INVALID_ACTIVITY_QUERY');
- const search=searchClause(opts.query??''),clauses:string[]=[],args:(string|number)[]=[];
+ const available=new Set((db.prepare('PRAGMA table_info(activity)').all() as {name:string}[]).map(v=>v.name));
+ const columns=baseColumns.map(name=>available.has(name)?name:'NULL AS '+name).join(',');
+ const search=searchClause(opts.query??'',opts.searchIds??[]),clauses:string[]=[],args:(string|number)[]=[];
  if(search.where){clauses.push(search.where);args.push(...search.args);}
  if(opts.cursor){
   const cursor=decode(opts.cursor);
@@ -57,6 +61,7 @@ export function activityPage(db:DatabaseSync,opts:ActivityPageOptions={}):Activi
  // A completed command may still have a nonzero exit code or structured error.
  // Mirror the presentation's failure semantics, rather than counting only status='failed'.
  const classified=`CASE
+  ${available.has('outcome')?"WHEN outcome IN ('success','failed','running','interrupted') THEN outcome":''}
   WHEN status='failed' THEN 'failed'
   WHEN status IN ('interrupted','cancelled','stopped') THEN 'interrupted'
   WHEN status IN ('running','accepted','started') THEN 'running'

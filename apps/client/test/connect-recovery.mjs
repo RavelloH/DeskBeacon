@@ -1,5 +1,12 @@
 import assert from 'node:assert/strict';
-import { ClientDaemon } from '../dist/daemon.js';
+import {mkdtempSync,readFileSync,rmSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+const testDir=mkdtempSync(join(tmpdir(),'deskbeacon-connect-recovery-'));
+process.env.DESKBEACON_DATA_DIR=testDir;
+const {ClientDaemon}=await import('../dist/daemon.js');
+const {flushLogs,closeLogs}=await import('../dist/diagnostics.js');
+const events=async()=>{await flushLogs();return readFileSync(join(testDir,'logs','connection.jsonl'),'utf8').split(/\r?\n/).filter(Boolean).map(JSON.parse);};
 
 const config={
  url:'https://unreachable.invalid',deviceId:'deskbeacon-client-retry-test',
@@ -17,11 +24,11 @@ try{
  const deadline=Date.now()+3600;
  while(attempts<3&&Date.now()<deadline)await new Promise(r=>setTimeout(r,80));
  assert.ok(attempts>=3,'failed OAuth refresh should retry at a fixed one-second interval');
- const first=daemon.db.prepare("SELECT detail FROM connection_events WHERE kind='reconnect_scheduled' ORDER BY id DESC LIMIT 3").all();
- assert.ok(first.every(v=>v.detail==='delayMs=1000'),'all disconnected retries use one second');
+ const first=(await events()).filter(v=>v.event?.type==='reconnect_scheduled').slice(-3);
+ assert.ok(first.length>0&&first.every(v=>v.event.data.detail==='delayMs=1000'),'all disconnected retries use one second');
  clearTimeout(daemon.reconnectTimer);daemon.reconnectTimer=undefined;
  daemon.scheduleReconnect();
- assert.equal(daemon.db.prepare("SELECT detail FROM connection_events WHERE kind='reconnect_scheduled' ORDER BY id DESC LIMIT 1").get().detail,'delayMs=1000');
+ assert.equal((await events()).filter(v=>v.event?.type==='reconnect_scheduled').at(-1)?.event.data.detail,'delayMs=1000');
  console.log('PASS fixed fast reconnect, no backoff and no duplicate reconnect timers');
  assert.match((await daemon.status()).state,/^error:/);
  console.log('PASS client automatically retries failed OAuth refresh after temporary disconnection');
@@ -36,7 +43,9 @@ const invalid=new ClientDaemon({...config,url:'invalid url',refreshToken:undefin
 try{
  await invalid.connect();
  assert.match((await invalid.status()).state,/^error:/);
- const error=invalid.db.prepare("SELECT kind FROM connection_events WHERE kind='connect_exception' ORDER BY id DESC LIMIT 1").get();
- assert.equal(error?.kind,'connect_exception');
+ const error=(await events()).filter(v=>v.event?.type==='connect_exception').at(-1);
+ assert.equal(error?.event.type,'connect_exception');
  console.log('PASS WebSocket constructor exceptions remain retryable, no Runtime crash');
 }finally{invalid.stop();}
+
+await closeLogs();rmSync(testDir,{recursive:true,force:true});

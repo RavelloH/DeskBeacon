@@ -9,6 +9,10 @@ import { createRequire } from 'node:module';
 import { platform, tmpdir } from 'node:os';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { DatabaseSync } from 'node:sqlite';
+import type {RecordJournal} from './record-journal.js';
+import {logEvent} from './diagnostics.js';
+import { ForegroundPool } from './foreground-pool.js';
+import { LIMITS } from '@deskbeacon/protocol';
 
 export type Input = Record<string,any>;
 type Running = { proc: ChildProcessWithoutNullStreams; id:string; description:string; since:number; out:string; err:string; jobManaged:boolean };
@@ -66,39 +70,46 @@ function shellPlan(c:Input):{exe:string;args:string[];cwd:string}{
 }
 
 export class TaskSupervisor{
- private fgActive=false;
+ readonly foregroundPool=new ForegroundPool(LIMITS.foregroundConcurrency,32);
  private cancelled=new Set<string>();
+ private batches=new Set<string>();
  private fg=new Map<string,Running>();
  private bg=new Map<string,Running>();
- constructor(private db:DatabaseSync,private outputDir:string,private onChange:()=>void=()=>{}) {
-   mkdirSync(outputDir,{recursive:true});
+ constructor(private db:DatabaseSync,private outputDir:string,private onChange:()=>void=()=>{},private journal?:RecordJournal) {
+   if(!this.journal)mkdirSync(outputDir,{recursive:true});
    db.exec("CREATE TABLE IF NOT EXISTS receipts(id TEXT PRIMARY KEY, status TEXT, created INTEGER, result TEXT)");
    db.exec("CREATE TABLE IF NOT EXISTS background(id TEXT PRIMARY KEY, operation_id TEXT, description TEXT, pid INTEGER, status TEXT, start INTEGER, exit_code INTEGER, stdout_path TEXT, stderr_path TEXT)");
+   try{db.exec('ALTER TABLE background ADD COLUMN record_path TEXT');}catch{}
    for(const name of ["stdout_truncated","stderr_truncated"])try{db.exec("ALTER TABLE background ADD COLUMN "+name+" INTEGER DEFAULT 0");}catch{}
  }
  hasReceipt(id:string){return this.db.prepare('SELECT status,result FROM receipts WHERE id=?').get(id) as {status:string;result:string|null}|undefined;}
  record(id:string, status:string, value:unknown) {
    this.db.prepare('INSERT INTO receipts(id,status,created,result) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status,result=excluded.result')
-     .run(id,status,Date.now(),JSON.stringify(value));
+     .run(id,status,Date.now(),this.journal?null:JSON.stringify(value));
  }
- async foreground(id:string,description:string,command:Input,deadlineMs=120_000){
-   const began=Date.now();
-   while(this.fgActive){if(Date.now()-began>10_000)throw Error('FOREGROUND_BUSY');await new Promise(r=>setTimeout(r,50));}
-   this.fgActive=true;
-   try{return await this.runProcess(id,description,command,Math.max(1,deadlineMs),true);}
-   finally{this.fgActive=false;this.cancelled.delete(id);}
+ async foreground(id:string,description:string,command:Input,deadlineMs=120_000,onStart?:()=>void){
+   return this.foregroundPool.run(id,()=>{
+     if(this.isCancelled(id))throw Error('CANCELLED: Foreground operation cancelled');
+     return this.runProcess(id,description,command,Math.max(1,deadlineMs),true);
+   },onStart);
  }
+ isCancelled(id:string){return [...this.cancelled].some(x=>id===x||id.startsWith(x+':'));}
+ clearCancelled(id:string){this.cancelled.delete(id);}
+ trackBatch(id:string,active:boolean){if(active)this.batches.add(id);else{this.batches.delete(id);this.clearCancelled(id);}}
+
  async runProcess(id:string,description:string,c:Input,timeoutMs:number,fg:boolean){
    const p=shellPlan(c);let child:ChildProcessWithoutNullStreams;
    const jobManaged=process.platform==='win32';
    const exe=jobManaged?resolveWindowsJobBinary():p.exe;
    const args=jobManaged?[Buffer.from(JSON.stringify({File:p.exe,Args:p.args,Cwd:p.cwd,ParentPid:process.pid}),'utf8').toString('base64')]:p.args;
    try{child=spawn(exe,args,{cwd:p.cwd,env:{...process.env,...c.env},windowsHide:true,detached:process.platform!=='win32',stdio:'pipe'}) as ChildProcessWithoutNullStreams;}
-   catch(e){throw Error('SPAWN_FAILED: '+String(e));}
+   catch(e){logEvent('execution','process.spawn_failed','error',{operationId:id,error:e,program:p.exe,cwd:p.cwd});throw Error('SPAWN_FAILED: '+String(e));}
    const safeId=id.replace(/[^a-zA-Z0-9_.-]/g,'_');
    const task:Running={proc:child,id,description,since:Date.now(),out:join(this.outputDir,safeId+'.out'),err:join(this.outputDir,safeId+'.err'),jobManaged};
    if(fg)this.fg.set(id,task);else this.bg.set(id,task);
-   const outFile=createWriteStream(task.out),errFile=createWriteStream(task.err);
+   const journaled=Boolean(this.journal?.getOpenPath(id));
+   if(!journaled)mkdirSync(this.outputDir,{recursive:true});
+   const outFile=journaled?null:createWriteStream(task.out),errFile=journaled?null:createWriteStream(task.err);
    let stdout='',stderr='',outputBytes=0,timedOut=false,outputLimitReached=false,spawnError='';
    let stdoutWritten=0,stderrWritten=0;
    // Keep original bytes on disk. Decode once per completed foreground stream
@@ -106,25 +117,33 @@ export class TaskSupervisor{
    const chunks:{stdout:Buffer[];stderr:Buffer[]}={stdout:[],stderr:[]};
    const handle=(stream:'stdout'|'stderr',data:Buffer)=>{
      const prior=outputBytes;outputBytes+=data.byteLength;
-     if(outputBytes>outputLimit&&fg&&!outputLimitReached){outputLimitReached=true;void stopTree(child,jobManaged);}
+     if(outputBytes>outputLimit&&fg&&!outputLimitReached){outputLimitReached=true;logEvent('execution','foreground.output_limit','warn',{operationId:id,limitBytes:outputLimit,actualBytes:outputBytes});void stopTree(child,jobManaged);}
      const isOut=stream==='stdout';
      const limit=fg?Math.max(0,outputLimit-prior):Math.max(0,backgroundFileLimit-(isOut?stdoutWritten:stderrWritten));
      const recorded=data.subarray(0,Math.min(data.byteLength,limit));
      if(!fg){
        if(isOut)stdoutWritten+=recorded.byteLength;else stderrWritten+=recorded.byteLength;
        if(recorded.byteLength<data.byteLength){
+         if((isOut?stdoutWritten:stderrWritten)===backgroundFileLimit)logEvent('execution','background.output_truncated','warn',{operationId:id,stream,limitBytes:backgroundFileLimit});
          this.db.prepare('UPDATE background SET '+(isOut?'stdout_truncated':'stderr_truncated')+'=1 WHERE id=?').run(id);
        }
      }
      if(fg&&recorded.length)chunks[stream].push(recorded);
-     if(isOut){if(recorded.length)outFile.write(recorded);}
-     else{if(recorded.length)errFile.write(recorded);}
+     if(recorded.length&&journaled){
+       try{this.journal!.stream(id,stream,recorded);}catch(e){
+         spawnError='RECORD_WRITE_FAILED: '+String(e);
+         logEvent('execution','journal.write_failed','error',{operationId:id,stream,error:e});
+         void stopTree(child,jobManaged);
+       }
+     }
+     else if(isOut){if(recorded.length)outFile?.write(recorded);}
+     else{if(recorded.length)errFile?.write(recorded);}
    };
    child.stdout.on('data',(c:Buffer)=>handle('stdout',c));
    child.stderr.on('data',(c:Buffer)=>handle('stderr',c));
-   child.on('error',(e)=>{spawnError=String(e);});
+   child.on('error',(e)=>{spawnError=String(e);logEvent('execution','process.error','error',{operationId:id,error:e,program:p.exe});});
    let timeout:NodeJS.Timeout|undefined;
-   if(fg)timeout=setTimeout(()=>{timedOut=true;void stopTree(child,jobManaged);},timeoutMs);
+   if(fg)timeout=setTimeout(()=>{timedOut=true;logEvent('execution','foreground.timeout','warn',{operationId:id,timeoutMs,program:p.exe});void stopTree(child,jobManaged);},timeoutMs);
    if(!fg){
      // spawn() reports ENOENT/EACCES asynchronously. Do not acknowledge a
      // phantom "running" task with pid 0 before the spawn event succeeds.
@@ -134,15 +153,17 @@ export class TaskSupervisor{
      });
      if(failure){
        this.bg.delete(id);
-       outFile.end();errFile.end();this.onChange();
+       outFile?.end();errFile?.end();this.onChange();
+       logEvent('execution','background.spawn_failed','error',{operationId:id,error:failure,program:p.exe});
        throw Error('SPAWN_FAILED: '+String(failure));
      }
-     this.db.prepare('INSERT INTO background(id,operation_id,description,pid,status,start,stdout_path,stderr_path) VALUES(?,?,?,?,?,?,?,?)')
-       .run(id,id,description,child.pid??0,'running',Date.now(),task.out,task.err);
+     this.db.prepare('INSERT INTO background(id,operation_id,description,pid,status,start,stdout_path,stderr_path,record_path) VALUES(?,?,?,?,?,?,?,?,?)')
+       .run(id,id,description,child.pid??0,'running',Date.now(),journaled?null:task.out,journaled?null:task.err,journaled?this.journal?.getOpenPath(id)??null:null);
      // Unlike 'exit', 'close' is also emitted after a failed spawn.
      child.on('close',(code)=>{
        this.db.prepare("UPDATE background SET status='exited',exit_code=? WHERE id=?").run(code,id);
-       outFile.end();errFile.end();this.bg.delete(id);this.onChange();
+       logEvent('execution','background.exited',code===0?'info':'warn',{operationId:id,pid:child.pid,exitCode:code,durationMs:Date.now()-task.since});
+       outFile?.end();errFile?.end();this.journal?.processExit(id,code);this.bg.delete(id);this.onChange();
      });
      return {backgroundTaskId:id,pid:child.pid??null,description,status:'running',cwd:p.cwd,program:p.exe};
    }
@@ -150,8 +171,11 @@ export class TaskSupervisor{
    stdout=decodeOutputText(Buffer.concat(chunks.stdout));
    stderr=decodeOutputText(Buffer.concat(chunks.stderr));
    if(timeout)clearTimeout(timeout);
-   outFile.end();errFile.end();this.fg.delete(id);this.onChange();
+   outFile?.end();errFile?.end();this.fg.delete(id);this.onChange();
    const readableStderr=normalizeProcessStderr(stderr);
+   if(code!==0||timedOut||outputLimitReached||spawnError)logEvent('execution','foreground.completed_abnormally',timedOut||spawnError?'error':'warn',
+     {operationId:id,exitCode:code,durationMs:Date.now()-task.since,timedOut,outputLimitReached,spawnError,program:p.exe,cwd:p.cwd,
+       stderrSummary:errorSummary(readableStderr,code)?.slice(0,1500)??null});
    return {exitCode:code,stdout,stderr:readableStderr,
      ...(code!==0&&readableStderr?{errorSummary:errorSummary(readableStderr,code)}:{}),
      timedOut,outputLimit:outputLimitReached,spawnError,
@@ -162,16 +186,20 @@ export class TaskSupervisor{
  async startBackground(id:string,description:string,c:Input){return this.runProcess(id,description,c,0,false);}
  async stop(id:string) {
    const tasks=[...this.bg.values(),...this.fg.values()].filter(t=>t.id===id||t.id.startsWith(id+":"));
-   if(tasks.length===0)return {stopped:false,reason:'not-running'};
+   const queued=this.foregroundPool.cancelPending(id);
+   if(tasks.length===0&&queued===0&&!this.batches.has(id))return {stopped:false,reason:'not-running'};
    this.cancelled.add(id);
    await Promise.all(tasks.map(async task=>stopTree(task.proc,task.jobManaged)));
-   return {stopped:true,taskId:id,processesSignalled:tasks.length};
+   logEvent('execution','process.stop_requested','info',{operationId:id,matched:tasks.length,cancelledQueued:queued});
+   return {stopped:true,taskId:id,processesSignalled:tasks.length,queuedCancelled:queued};
  }
  list(){
    return this.db.prepare('SELECT id,description,pid,status,start,exit_code FROM background ORDER BY start DESC LIMIT 200').all();
  }
  latestLine(id:string){
    const task=this.bg.get(id);if(!task)return '';
+   const ref=this.journal?.getOpenPath(id);
+   if(ref){try{const parts=[this.journal!.getTail(ref,'stdout',8192).text,this.journal!.getTail(ref,'stderr',8192).text];return parts.flatMap(s=>s.split(/\r?\n/)).filter(s=>s.trim()).at(-1)??'';}catch{return '';}}
    let latest={mtime:-1,line:''};
    for(const path of [task.out,task.err])try{
      if(!existsSync(path))continue;
@@ -190,6 +218,10 @@ export class TaskSupervisor{
  get(id:string){return this.db.prepare('SELECT * FROM background WHERE id=?').get(id)??null;}
  output(id:string,stream:string,offset:number,maxBytes:number,maxLines=5000){
    const row=this.get(id) as any;if(!row)throw Error('BACKGROUND_NOT_FOUND');
+   if(row.record_path&&this.journal){
+    const streams=stream==='both'?['stdout','stderr']:[stream];
+    return {results:streams.map(s=>{const p=this.journal!.getRecordStream(row.record_path,s as 'stdout'|'stderr',offset,maxBytes);return{path:row.record_path,text:p.text,total:p.totalBytes,nextOffset:p.nextOffset,hasMore:p.hasMore,truncated:s==='stdout'?Boolean(row.stdout_truncated):Boolean(row.stderr_truncated)};})};
+   }
    if(!Number.isSafeInteger(offset)||offset<0)throw Error('INVALID_CURSOR');
    const paths=stream==='stderr'?[row.stderr_path]:stream==='stdout'?[row.stdout_path]:[row.stdout_path,row.stderr_path];
    const results=paths.map((p:string)=>{

@@ -8,9 +8,13 @@ import { spawn } from 'node:child_process';
 import { hostname } from 'node:os';
 import { existsSync } from 'node:fs';
 import { configPath, loadConfig, saveConfig, ClientDaemon } from './daemon.js';
-import { requestIpc, startIpc } from './ipc.js';
-import {demoScenarios, type DemoScenario} from './demo.js';
+import { requestIpc, startIpc, closeIpc } from './ipc.js';
+import type {DemoScenario} from './demo.js';
+declare const __DESKBEACON_RELEASE__:boolean;
+const DEMO_ENABLED=typeof __DESKBEACON_RELEASE__==='undefined'||!__DESKBEACON_RELEASE__;
 import {superviseService,supervisorRunning,requestSupervisorStop} from './service-supervisor.js';
+import {migrateCommand,migrationRequired,codeVersion} from './migration-command.js';
+import {installDiagnostics,logEvent,flushLogs,closeLogs,discardLegacyLog,logsDir} from './diagnostics.js';
 
 // React's development reconciler records unbounded performance.measure entries
 // in long-lived Node TUI processes. Select production before loading Ink/React.
@@ -74,10 +78,12 @@ async function setup(base:string) {
    if(!credentials.access_token)throw Error('OAuth did not return access token');
    saveConfig({url:base,clientId:client.client_id,deviceId:client.client_id,accessToken:credentials.access_token,
      ...(credentials.refresh_token?{refreshToken:credentials.refresh_token}:{}),...(credentials.expires_in?{accessTokenExpiresAt:Date.now()+credentials.expires_in*1000}:{}),deviceName:hostname()});
+   logEvent('security','oauth.device_paired','info',{deviceId:client.client_id,server:base});
    console.log('DeskBeacon device paired. Device ID: '+client.client_id);
- }finally{callback.close();}
+ }catch(error){logEvent('security','oauth.setup_failed','error',{error,server:base});throw error;}
+ finally{callback.close();}
 }
-const pkg={version:'0.2.0'};
+const pkg={version:codeVersion()};
 const entry=fileURLToPath(import.meta.url);
 async function promptUrl():Promise<string>{
   if(!process.stdin.isTTY)throw Error('Run deskbeacon setup --url https://your-worker.example from a terminal');
@@ -102,9 +108,12 @@ async function currentRuntime(timeout=700):Promise<any|null>{
   try{return await requestIpc({action:'status'},timeout);}catch{return null;}
 }
 async function ownerRuntime(background:boolean,title?:string):Promise<void>{
+  installDiagnostics('runtime');discardLegacyLog();
+  if(migrationRequired())throw Error('STORAGE_MIGRATION_REQUIRED: run deskbeacon migrate before Runtime startup');
   process.env.DESKBEACON_RUNTIME_MODE=background?'background':'foreground';
   const instance=new ClientDaemon(loadConfig());
-  const server=startIpc(instance);
+  logEvent('runtime','runtime.started','info',{mode:background?'service':'foreground',version:pkg.version,deviceId:instance.config.deviceId});
+  const server=startIpc(instance,()=>shutdown());
   try{
     // Binding the IPC pipe is the single-owner election. A second process never connects.
     await once(server,'listening');
@@ -113,13 +122,21 @@ async function ownerRuntime(background:boolean,title?:string):Promise<void>{
     if(await currentRuntime(1500))return;
     throw e;
   }
-  void instance.connect().catch(e=>console.error('Runtime initial connection:',String(e)));
-  let exiting=false;
-  const shutdown=async()=>{
-    if(exiting)return;
-    exiting=true;
-    await instance.shutdown();
-    await new Promise<void>(resolve=>server.close(()=>resolve()));
+  void instance.connect().catch(e=>logEvent('connection','initial_connect_failed','error',{error:e}));
+  let shutdownPromise:Promise<void>|undefined;
+  const shutdown=():Promise<void>=>{
+    if(shutdownPromise)return shutdownPromise;
+    shutdownPromise=(async()=>{
+      try{await instance.shutdown();}
+      finally{
+        try{await closeIpc(server);}
+        finally{
+          logEvent('runtime','runtime.stopped','info',{mode:background?'service':'foreground'});
+          await closeLogs();
+        }
+      }
+    })();
+    return shutdownPromise;
   };
   if(background){
     const handleSignal=()=>{void shutdown().then(()=>{process.exitCode=0;});};
@@ -132,9 +149,18 @@ async function ownerRuntime(background:boolean,title?:string):Promise<void>{
 }
 async function serviceStart(){
   const running=await currentRuntime();
-  if(running){console.log('DeskBeacon is already running in '+(running.runtimeMode??'legacy')+' mode ('+running.deviceName+').');return;}
+  if(running){
+    console.log('DeskBeacon is already running in '+(running.runtimeMode??'legacy')+' mode ('+running.deviceName+').');
+    if(migrationRequired())console.log('Storage upgrade pending: stop this Runtime before running deskbeacon migrate or service restart.');
+    return;
+  }
+  if(supervisorRunning()&&migrationRequired())throw Error('Stop the existing service supervisor before migrating; run deskbeacon service stop.');
   if(!supervisorRunning()){
     await configured();
+    console.log('DeskBeacon：正在检查本地存储版本，完成必要的迁移后启动服务。');
+    installDiagnostics('migration');discardLegacyLog();
+    await migrateCommand(false);
+    await closeLogs();
     const child=spawn(process.execPath,[entry,'__service_supervise'],{
       detached:true,stdio:'ignore',windowsHide:true,cwd:process.cwd(),env:process.env
     });
@@ -154,16 +180,25 @@ async function serviceStop(){
   }
   const supervised=supervisorRunning();
   if(supervised)requestSupervisorStop(!active);
-  if(active)await requestIpc({action:'exit'});
-  else if(!supervised){console.log('DeskBeacon is not running.');return;}
-  for(let i=0;i<50;i++){
-    const running=await currentRuntime(400);
-    if(!running&&!supervisorRunning()){
-      console.log('DeskBeacon service stopped.');return;
-    }
-    await sleep(200);
+  if(active)try{await requestIpc({action:'exit'},3500);}
+  catch(error){
+    logEvent('runtime','service.stop_ipc_unavailable','warn',{error});
+    // Stop marker is already visible to the supervisor, which can terminate a stuck worker.
+    if(!supervised)throw error;
   }
-  throw Error('Service did not stop within the timeout. Check the service log.');
+  else if(!supervised){console.log('DeskBeacon is not running.');return;}
+  // A supervisor may need its 7.5s task-drain interval and force-stop fallback.
+  // Use a real deadline, not an arbitrary number of slow IPC probes.
+  const deadline=Date.now()+25_000;
+  while(Date.now()<deadline){
+    if(!supervisorRunning()){
+      const running=await currentRuntime(350);
+      if(!running){console.log('DeskBeacon service stopped.');return;}
+    }
+    await sleep(175);
+  }
+  logEvent('runtime','service.stop_timeout','error',{supervisorRunning:supervisorRunning()});
+  throw Error('Service did not stop within 25 seconds. See deskbeacon service logs service.');
 }
 const usage=()=>{
  console.log([
@@ -174,12 +209,15 @@ const usage=()=>{
   '  (no command)            Open full-screen DeskBeacon. Own the Runtime unless',
   '                          an existing background service is running.',
   '  setup [--url URL]       Pair this device using OAuth (prompts for URL).',
-  '  demo [scenario]        Offline, interactive TUI preview (for development).',
+  '  config <name|url> [value]  查看或设置设备名称 / 服务器 URL，与 TUI /config 相同。',
+  ...(DEMO_ENABLED?['  demo [scenario]        Offline, interactive TUI preview (for development).',
+  '                          Use demo migration to preview the upgrade screen.']:[]),
   '  --title NAME           Terminal window title (also DESKBEACON_TITLE env).',
-  '  service start           Start the Runtime in the background (no TUI).',
+  '  service start           Migrate if needed, then start the background Runtime.',
+  '  migrate                 Upgrade local storage before starting a Runtime.',
   '  service stop            Stop the running Runtime.',
   '  service restart         Restart the background service.',
-  '  service logs            Print last 18 KB of background service logs.',
+  '  service logs [domain]   查看轮转的结构化诊断日志 (service/runtime/connection/execution/migration/security)。',
   '  service status          Show background Runtime status.',
   '  status                  Print connected device/Runtime status.',
   '  doctor                  Check configuration and Runtime.',
@@ -208,14 +246,31 @@ async function main(){
  if(action==='help'||action==='-h'||action==='--help'){usage();return;}
  if(action==='version'||action==='-v'||action==='--version'){console.log(pkg.version);return;}
  if(action==='update'){await updateCli();return;}
- if(action==='demo'){
+ if(DEMO_ENABLED&&action==='demo'){
+   const {demoScenarios}=await import('./demo.js');
    if(!process.stdin.isTTY||!process.stdout.isTTY)
      throw Error('Demo preview requires an interactive terminal.');
    const scenario=args[0]??'connected';
+   if(scenario==='migration'){
+     const {showMigrationDemo}=await import('./migration-demo-ui.js');
+     await showMigrationDemo();return;
+   }
    if(!demoScenarios.includes(scenario as DemoScenario))
-     throw Error('Unknown demo scenario. Options: '+demoScenarios.join(', '));
+     throw Error('Unknown demo scenario. Options: '+[...demoScenarios,'migration'].join(', '));
    await showTui(scenario as DemoScenario,title);
    return;
+ }
+ if(action==='migrate'){
+   installDiagnostics('migration');discardLegacyLog();
+   if(await currentRuntime(900)||supervisorRunning())throw Error('Stop the DeskBeacon service/Runtime before migrating.');
+   const result=await migrateCommand(!args.includes('--no-tui'));
+   console.log('DeskBeacon 存储版本 '+result.from+' → '+result.to+'；'+(result.changed?'迁移已完成':'已经是最新版本')+'。');
+   await closeLogs();return;
+ }
+ if(action==='config'){
+   const {runConfigCli}=await import('./config-cli.js');
+   console.log(await runConfigCli(args));
+   await closeLogs();return;
  }
  if(action==='setup'){
    const index=args.indexOf('--url');
@@ -236,9 +291,12 @@ async function main(){
  }
  if(action==='service'&&args[0]==='logs'){
    const {readFileSync}=await import('node:fs');
-   const {dataDir}=await import('./daemon.js');
-   const logPath=(await import('node:path')).join(dataDir,'service.log');
-   console.log(existsSync(logPath)?readFileSync(logPath,'utf8').slice(-18000):'No service diagnostics recorded yet.');return;
+   const {join}=await import('node:path');
+   const domains=['service','runtime','connection','execution','migration','security','tui'];
+   const selected=args[1]??'service';
+   if(!domains.includes(selected))throw Error('Unknown log domain. Choose: '+domains.join(', '));
+   const path=join(logsDir,selected+'.jsonl');
+   console.log(existsSync(path)?readFileSync(path,'utf8').slice(-18000):'No '+selected+' diagnostics recorded yet.');return;
  }
  if(action==='service'){
    if(args[0]==='start'){await serviceStart();return;}
@@ -252,9 +310,16 @@ async function main(){
    if(!process.stdin.isTTY||!process.stdout.isTTY)
      throw Error('The DeskBeacon app requires an interactive terminal. Use deskbeacon service start for headless operation.');
    await configured();
-   if(await currentRuntime(900)){await showTui(undefined,title);return;}
+   if(await currentRuntime(900)){
+     if(migrationRequired())throw Error('Existing Runtime must be stopped before storage migration. Run deskbeacon service stop.');
+     await showTui(undefined,title);return;
+   }
+   if(supervisorRunning())throw Error('Service supervisor is starting; wait or stop the background service before migrating.');
+   if(migrationRequired()){installDiagnostics('migration');discardLegacyLog();await migrateCommand(true);await closeLogs();}
+   else if(!existsSync((await import('node:path')).join((await import('./daemon.js')).dataDir,'state.sqlite'))){installDiagnostics('migration');await migrateCommand(false);await closeLogs();}
    await ownerRuntime(false,title);return;
  }
  throw Error('Unknown command '+action+'. Use deskbeacon help.');
 }
-void main().catch(e=>{console.error('DeskBeacon:',e instanceof Error?e.message:String(e));process.exitCode=1;});
+void main().catch(async e=>{logEvent('runtime','cli.command_failed','error',{error:e});
+  console.error('DeskBeacon:',e instanceof Error?e.message:String(e));await flushLogs();process.exitCode=1;});

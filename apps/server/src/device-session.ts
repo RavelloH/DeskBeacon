@@ -24,7 +24,7 @@ function utf8size(value: string) { return new TextEncoder().encode(value).byteLe
 
 export class DeviceSession extends DurableObject<Env> {
   private waiters = new Map<string, Waiter>();
-  private foregroundTail: Promise<void> = Promise.resolve();
+  // Foreground admission and scheduling are owned by the device runtime.
   // These exist only while a synchronous MCP request is alive. No polling or alarms.
   private socketWaiters=new Set<(socket:WebSocket)=>void>();
   private pendingDispatches=new Map<string,{send:(socket:WebSocket)=>void;attempts:number}>();
@@ -39,12 +39,8 @@ export class DeviceSession extends DurableObject<Env> {
     try{ctx.storage.sql.exec("ALTER TABLE ops ADD COLUMN dispatch_attempts INTEGER DEFAULT 0");}catch{}
     try{ctx.storage.sql.exec("ALTER TABLE ops ADD COLUMN accepted_at INTEGER");}catch{}
     try{ctx.storage.sql.exec("ALTER TABLE ops ADD COLUMN started_at INTEGER");}catch{}
-    ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS fg_queue(id TEXT PRIMARY KEY,grant_id TEXT NOT NULL,enqueued INTEGER NOT NULL,deadline INTEGER NOT NULL,status TEXT NOT NULL)");
-    ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS fg_queue_deadline ON fg_queue(deadline)");
-    // Memory-only pending HTTP promises cannot survive a DO reconstruction.
-    // Preserve the audit record as unknown, but never redispatch those side effects.
-    ctx.storage.sql.exec("UPDATE fg_queue SET status='unknown' WHERE status IN ('queued','dispatched')");
-    ctx.storage.sql.exec("DELETE FROM fg_queue WHERE deadline<?",Date.now()-LIMITS.operationTtlMs);
+    // Legacy fg_queue tables may exist on upgraded DOs, but are no longer used.
+    // The client is the sole owner of admission, queuing and execution slots.
     try{ctx.storage.sql.exec("ALTER TABLE ops ADD COLUMN history_evicted INTEGER DEFAULT 0");}catch{}
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping","pong"));
   }
@@ -149,40 +145,8 @@ export class DeviceSession extends DurableObject<Env> {
         typeof body.grantId!=="string" || !body.input || typeof body.input!=="object")
         return json(failure("INVALID_INPUT","Invalid RPC message"),400);
       if(HISTORY.has(body.name)) return json(this.readHistory(body));
-      if(FG.has(body.name)) {
-        // A caller with the same idempotency key can rejoin an existing operation
-        // without waiting behind the command queue or replaying side effects.
-        const key=typeof body.input.idempotencyKey==="string" ? body.grantId+":"+body.input.idempotencyKey : null;
-        if(key && this.ctx.storage.sql.exec("SELECT 1 FROM ops WHERE idem=?",key).toArray().length)
-          return json(await this.dispatch(body));
-        const now=Date.now(), deadline=now+LIMITS.queueTtlMs;
-        // This queue is for *live synchronous* MCP calls. On DO restart abandoned queue records
-        // become unknown; DO must never silently replay a potentially side-effecting operation.
-        this.ctx.storage.sql.exec("UPDATE fg_queue SET status='unknown' WHERE deadline<? AND status IN ('queued','dispatched')",now);
-        const count=Number((this.ctx.storage.sql.exec("SELECT COUNT(*) AS n FROM fg_queue WHERE status='queued'").one() as Row).n);
-        if(count>=32)return json(failure("QUEUE_FULL","Foreground queue is full",body.operationId));
-        this.ctx.storage.sql.exec("INSERT INTO fg_queue(id,grant_id,enqueued,deadline,status) VALUES(?,?,?,?,'queued')",
-          body.operationId,body.grantId,now,deadline);
-        const prior=this.foregroundTail;
-        let release!:()=>void;
-        this.foregroundTail=new Promise<void>(r => {release=r;});
-        try {
-          await prior;
-          if(Date.now()>deadline){
-            this.ctx.storage.sql.exec("UPDATE fg_queue SET status='timedout' WHERE id=?",body.operationId);
-            return json(failure("QUEUE_TIMEOUT","Foreground queue timeout. Operation was never dispatched",body.operationId));
-          }
-          // The device may have disconnected while this request waited behind a long command.
-          // Wait for the same connection to recover, but never execute more than once.
-          const socket=await this.waitForSocket(Math.min(LIMITS.shortDisconnectGraceMs,Math.max(0,deadline-Date.now())));
-          if(!socket)return json(failure("DEVICE_OFFLINE","Device did not reconnect within the 60s dispatch window; command was not sent",body.operationId));
-          this.ctx.storage.sql.exec("UPDATE fg_queue SET status='dispatched' WHERE id=?",body.operationId);
-          return json(await this.dispatch(body));
-        } finally {
-          this.ctx.storage.sql.exec("DELETE FROM fg_queue WHERE id=?",body.operationId);
-          release();
-        }
-      }
+      // The DO forwards independent Agent calls immediately. The client owns the
+      // sole FIFO queue and its four command slots, including commands in batches.
       return json(await this.dispatch(body));
     }
     if(pathname==="/status") return json({ online:!!this.currentSocket(),epoch:this.epoch() });
@@ -228,6 +192,7 @@ export class DeviceSession extends DurableObject<Env> {
 
   private async dispatch(body:Rpc):Promise<Record<string,unknown>> {
     const isFg=FG.has(body.name);
+    const canCancel=isFg||body.name==='batch';
     const input=body.input;
     const digest=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(JSON.stringify([body.name,input])));
     const requestHash=Array.from(new Uint8Array(digest)).map(x=>x.toString(16).padStart(2,"0")).join("");
@@ -249,16 +214,17 @@ export class DeviceSession extends DurableObject<Env> {
     if(!this.currentSocket()&&!await this.waitForSocket(LIMITS.shortDisconnectGraceMs))
       return failure("DEVICE_OFFLINE","Device did not reconnect within the 60s dispatch window; command was not sent",body.operationId);
     const opId=body.operationId;
-    const timeout=Math.min(LIMITS.maxForegroundTimeoutMs,Math.max(1000,Number(body.input.timeoutMs??(isFg?LIMITS.defaultForegroundTimeoutMs:30_000))));
+    const timeout=Math.min(LIMITS.maxForegroundTimeoutMs,Math.max(1000,Number(body.input.timeoutMs??(body.name==='batch'?LIMITS.maxForegroundTimeoutMs:isFg?LIMITS.defaultForegroundTimeoutMs:30_000))));
+    const totalWaitMs=timeout+(canCancel?LIMITS.localQueueWaitMs:0);
     // The device must also accept a delivery postponed by the bounded outage allowance.
-    const expires=Date.now()+timeout+LIMITS.shortDisconnectGraceMs+10_000;
+    const expires=Date.now()+totalWaitMs+LIMITS.shortDisconnectGraceMs+10_000;
     this.ctx.storage.sql.exec("INSERT INTO ops(id,grant_id,tool,status,created,expires,idem,request_hash) VALUES(?,?,?,?,?,?,?,?)",
       opId,body.grantId,body.name,"dispatched",Date.now(),Date.now()+LIMITS.operationTtlMs,existingKey,requestHash);
     const socket=this.currentSocket();
     if(!socket) {this.saveStatus(opId,"unknown");return failure("DEVICE_OFFLINE","Device disconnected",opId);}
     const epoch=(socket.deserializeAttachment() as {epoch?:number}|null)?.epoch??this.epoch();
     const response=new Promise<Record<string,unknown>>(resolve=>{
-      const deadline=Date.now()+timeout+5_000;
+      const deadline=Date.now()+totalWaitMs+5_000;
       const expire=()=>{
         const expired=this.waiters.get(opId);
         if(!expired)return;
@@ -266,7 +232,7 @@ export class DeviceSession extends DurableObject<Env> {
         if(expired.disconnectTimer)clearTimeout(expired.disconnectTimer);
         this.ctx.storage.sql.exec("UPDATE ops SET status='unknown' WHERE id=? AND status NOT IN ('completed','failed')",opId);
         const cancelSocket=this.currentSocket();
-        if(isFg && cancelSocket){
+        if(canCancel && cancelSocket){
           try{cancelSocket.send(JSON.stringify({
             version:PROTOCOL_VERSION,type:"foreground.cancel",messageId:crypto.randomUUID(),
             deviceId:"self",connectionEpoch:this.epoch(),operationId:opId,payload:{reason:"server timeout"}
@@ -276,7 +242,7 @@ export class DeviceSession extends DurableObject<Env> {
         for(const subscriber of expired?.subscribers??[])subscriber(value);
         resolve(value);
       };
-      const timer=setTimeout(expire,timeout+5_000);
+      const timer=setTimeout(expire,totalWaitMs+5_000);
       this.waiters.set(opId,{resolve,timer,subscribers:new Set(),deadline,extraMs:0,expire});
     });
     // Until the device acknowledges receipt, the frame may have been dropped by a

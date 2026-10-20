@@ -69,6 +69,21 @@ try{
  dispose();
  console.log('PASS watchdog restored Runtime after forced crash and IPC recovered',secondPid);
 
+ // A graceful worker exit without a matching service-stop request must also
+ // be healed; otherwise a stray IPC 'exit' could leave the TUI offline forever.
+ await requestIpc({action:'exit'},2000);
+ const thirdPid=await wait(async()=>{
+  if(!existsSync(pidFile))return null;
+  const pid=readPid(pidFile);
+  if(pid===secondPid)return null;
+  const current=await requestIpc({action:'status'},1500);
+  return current.runtimeMode==='background'?pid:null;
+ },18000);
+ assert.notEqual(thirdPid,secondPid);
+ assert.equal(readPid(supervisorFile),superPid,
+  'watchdog must remain active following unexpected clean worker exit');
+ console.log('PASS watchdog restored Runtime after unexpected exit code 0',thirdPid);
+
  const status=run('service','status');
  assert.ok(status.includes('background'),'service status should recognize recovered child');
  run('service','stop');
@@ -76,15 +91,15 @@ try{
  await delay(750);
  assert.ok(!existsSync(pidFile)&&!existsSync(supervisorFile),
   'normal service stop must not trigger another restart');
- const log=readFileSync(join(root,'service.log'),'utf8');
- assert.match(log,/restart scheduled/);
- assert.match(log,/runtime spawned/);
- assert.match(log,/supervisor stopped/);
+ const log=readFileSync(join(root,'logs','service.jsonl'),'utf8');
+ assert.match(log,/worker.restart_scheduled/);
+ assert.match(log,/worker.spawned/);
+ assert.match(log,/supervisor.stopped/);
  console.log('PASS normal service stop prevents restarts and bounded diagnostics retained');
 }catch(e){
  console.error('SUPERVISOR_CI_FAILED',e);
  if(existsSync(root)){
-  const logPath=join(root,'service.log');
+  const logPath=join(root,'logs','service.jsonl');
   if(existsSync(logPath))console.error(readFileSync(logPath,'utf8').slice(-4000));
  }
  process.exitCode=1;

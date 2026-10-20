@@ -29,7 +29,7 @@ DeskBeacon 当前提供 **35 个 MCP 工具**，按功能划分如下。完整�
 | 网络诊断 | `net_ports`、`net_probe`、`http_request` |
 | 系统观测 | `system_snapshot`、`system_processes`、`screen_capture` |
 
-`batch` 支持在同一设备上组合多个工具：最多 6 个阶段、每阶段 6 次调用、总计最多 16 次调用；阶段顺序执行，只读工具可在同一阶段并行（最多 4 次同时进行）。写入和执行命令须使用串行阶段。批处理不会自动回滚，也不支持跨设备操作或自动传递上一步的输出。
+`batch` 支持在同一设备上组合多个工具：最多 6 个阶段、每阶段 6 次调用、总计最多 16 次调用。阶段按顺序执行，同一并行阶段内可包含前台命令；所有 Agent 的普通前台命令与 Batch 子命令共享设备本地 **4 槽位 FIFO 执行池**，Batch 本身不占槽位。文件/网络/系统工具不占用命令槽位。队列最多等待 60 秒，等待中也可以取消，且不会消耗命令运行超时。批处理不会自动回滚，也不支持跨设备操作或自动传递上一步的输出。Batch 子命令返回有界文本预览，完整本地进程输出留在设备上；包含 DO 历史查询或超大请求的 Batch 会回退到服务器分阶段编排。
 
 ## 部署
 
@@ -121,7 +121,7 @@ node apps/client/dist/index.js service stop
 
 后台服务运行时，根命令只打开 TUI，不再创建第二条连接；关闭 TUI 也不会停止后台服务。未运行后台服务时，主窗口关闭即停止远程连接。
 
-0.2.0 的后台服务新增独立监督进程：若 Runtime 意外崩溃，会记录错误并自动重启、恢复本地 IPC 和设备连接；执行 `service stop` 则会同时正常停止监督进程，不会意外拉起。诊断日志保存在用户目录下的 `.deskbeacon/service.log`（最多保留两份滚动日志），可使用 `deskbeacon service logs` 查看。TUI 在本地 IPC 断开时会持续显示断开原因和恢复状态，成功重连后自动清除。
+0.2.0 的后台服务新增独立监督进程：若 Runtime 意外崩溃，会记录错误并自动重启、恢复本地 IPC 和设备连接；执行 `service stop` 则会同时正常停止监督进程，不会意外拉起。诊断日志使用 rlog-js，按六个领域写入 `.deskbeacon/logs/*.jsonl` 并独立轮转；可运行 `deskbeacon service logs [service|runtime|connection|execution|migration|security]` 查看。详见 [可观测性文档](docs/observability.md)。TUI 在本地 IPC 断开时会持续显示断开原因和恢复状态，成功重连后自动清除。
 
 其他常用命令有 help、version、doctor 和 update。
 
