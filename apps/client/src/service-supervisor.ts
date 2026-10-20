@@ -104,7 +104,10 @@ export async function superviseService(options:SupervisorOptions):Promise<void>{
    });
    childPid=0;
    log(stamp('runtime exit code='+status.code+' signal='+status.signal));
-   if(stopping||status.code===0)break;
+   // Only an explicit stop request ends supervision. A worker may exit 0
+   // unexpectedly (including a stray IPC exit); restart it rather than
+   // leaving a healthy-looking but permanently disconnected TUI behind.
+   if(stopping)break;
    const now=Date.now();
    restarts=restarts.filter(time=>now-time<restartWindowMs);
    restarts.push(now);
