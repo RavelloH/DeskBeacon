@@ -6,7 +6,7 @@ import { existsSync, rmSync, chmodSync, readdirSync, openSync, closeSync, readSy
   mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import type { ClientDaemon } from './daemon.js';
 import { dataDir, loadConfig, saveConfig } from './daemon.js';
-import {normalizeServerUrl} from './command-palette.js';
+import {getConfigView,setPendingServerUrl} from './config-actions.js';
 import {detectFileOutputEncoding,decodeOutputPage} from './output-encoding.js';
 export const ipcPath=process.env.DESKBEACON_IPC_PATH ?? (platform()==='win32'?'\\\\.\\pipe\\deskbeacon-'+process.env.USERNAME:
   join(dataDir,'daemon.sock'));
@@ -270,22 +270,12 @@ export function startIpc(daemon:ClientDaemon){
            }
            else if(request.action==='status-lite')result=await daemon.status(false);
            else if(request.action==='status')result=await daemon.status();
-           else if(request.action==='config-get'){
-             const cfg=loadConfig();
-             result={url:cfg.pendingUrl??cfg.url,activeUrl:cfg.url,
-               pending:Boolean(cfg.pendingUrl),name:cfg.deviceName};
-           }
+           else if(request.action==='config-get')result=getConfigView();
            else if(request.action==='config-set'){
              const key=request.key,value=String(request.value??'').trim();
              if(key==='name')result={name:await daemon.rename(value)};
-             else if(key==='url'){
-               const url=normalizeServerUrl(value),cfg=loadConfig();
-               const pendingUrl=url===cfg.url?undefined:url;
-               // Keep the old connection alive until re-pairing.
-               // Never replay existing OAuth credentials to another origin.
-               saveConfig({...cfg,pendingUrl});
-               result={url:pendingUrl??cfg.url,activeUrl:cfg.url,pending:Boolean(pendingUrl)};
-             }else throw Error('UNKNOWN_CONFIG_KEY');
+             else if(key==='url')result=setPendingServerUrl(value);
+             else throw Error('UNKNOWN_CONFIG_KEY');
            }
            else if(request.action==='activity-list'){
              const options={cursor:request.cursor,query:request.query,limit:request.limit,watchIds:request.watchIds};

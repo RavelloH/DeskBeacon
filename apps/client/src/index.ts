@@ -183,6 +183,7 @@ const usage=()=>{
   '  (no command)            Open full-screen DeskBeacon. Own the Runtime unless',
   '                          an existing background service is running.',
   '  setup [--url URL]       Pair this device using OAuth (prompts for URL).',
+  '  config <name|url> [value]  查看或设置设备名称 / 服务器 URL，与 TUI /config 相同。',
   '  demo [scenario]        Offline, interactive TUI preview (for development).',
   '                          Use demo migration to preview the upgrade screen.',
   '  --title NAME           Terminal window title (also DESKBEACON_TITLE env).',
@@ -236,6 +237,11 @@ async function main(){
    if(await currentRuntime(900)||supervisorRunning())throw Error('Stop the DeskBeacon service/Runtime before migrating.');
    const result=await migrateCommand(!args.includes('--no-tui'));
    console.log('DeskBeacon 存储版本 '+result.from+' → '+result.to+'；'+(result.changed?'迁移已完成':'已经是最新版本')+'。');
+   return;
+ }
+ if(action==='config'){
+   const {runConfigCli}=await import('./config-cli.js');
+   console.log(await runConfigCli(args));
    return;
  }
  if(action==='setup'){
