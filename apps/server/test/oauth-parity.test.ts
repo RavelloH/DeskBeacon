@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 
 const auth = readFileSync(new URL('../src/auth.ts', import.meta.url), 'utf8');
+const authPage = readFileSync(new URL('../src/auth-page.ts', import.meta.url), 'utf8');
 const entry = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
 const environment = readFileSync(new URL('../src/env.ts', import.meta.url), 'utf8');
 const client = readFileSync(new URL('../../client/src/setup-flow.ts', import.meta.url), 'utf8');
@@ -25,8 +26,8 @@ describe('upstream cf-browser-mcp OAuth contract', () => {
     expect(environment).not.toMatch(/OWNER_LOGIN|OWNER_PASSWORD_HASH|OWNER_SESSION_SECRET|OWNER_PASSWORD/);
     expect(entry).not.toMatch(/\/login|\/consent/);
   });
-  it('allows HTTPS OAuth form redirects while retaining server-side 302', () => {
-    expect(auth).toContain("form-action 'self' https:");
+  it('allows HTTPS and exact loopback OAuth redirects while retaining server-side 302', () => {
+    expect(authPage).toContain("form-action 'self' https: http://127.0.0.1:*");
     expect(auth).toContain('status: 302');
     expect(auth).not.toContain('allowedFormOrigin');
   });

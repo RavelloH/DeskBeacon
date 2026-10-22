@@ -27,12 +27,90 @@ async function atomicWrite(path:string,data:Buffer,overwrite=true){
    await fs.rename(temp,path);
  }finally{await fs.rm(temp,{force:true}).catch(()=>{});}
 }
+function versionConflict(bytes:Buffer):never {
+ const error=Object.assign(new Error('FILE_VERSION_CONFLICT: expectedHash differs from the current file'),{
+  code:'FILE_VERSION_CONFLICT',partialResult:{currentSha256:hash(bytes)}
+ });
+ throw error;
+}
 function location(p:string,root?:string){return isAbsolute(p)?resolve(p):resolve(root??process.cwd(),p);}
 async function statOne(path:string,includeHash=false){
  const s=await fs.lstat(path);return {path,kind:s.isFile()?'file':s.isDirectory()?'directory':s.isSymbolicLink()?'symlink':'other',
  size:s.size,createdAt:s.birthtime.toISOString(),modifiedAt:s.mtime.toISOString(),
+ type:s.isFile()?'file':s.isDirectory()?'directory':s.isSymbolicLink()?'symlink':'other',modified:s.mtime.toISOString(),
  ...(includeHash&&s.isFile()?{sha256:await fileHash(path)}:{})};
 }
+
+async function gitIgnoredDirectories(root:string,paths:string[]):Promise<Set<string>>{
+ if(!paths.length)return new Set();
+ return await new Promise<Set<string>>(done=>{
+  const child=spawn('git',['-C',root,'check-ignore','--stdin','-z'],{windowsHide:true,stdio:['pipe','pipe','ignore']});
+  const chunks:Buffer[]=[];let settled=false;
+  const finish=(items:Set<string>)=>{if(!settled){settled=true;done(items);}};
+  child.stdout.on('data',(chunk:Buffer)=>chunks.push(chunk));
+  child.on('error',()=>finish(new Set()));
+  child.on('close',code=>{
+   if(code!==0){finish(new Set());return;}
+   const ignored=Buffer.concat(chunks).toString('utf8').split('\0').filter(Boolean)
+     .map(p=>resolve(p.replace(/[\\/]+$/,'')));
+   finish(new Set(ignored));
+  });
+  child.stdin.on('error',()=>{});
+  child.stdin.end(paths.map(p=>p+sep).join('\0')+'\0');
+ });
+}
+function searchDirectoryGlob(path:string,root:string,glob:string):boolean{
+ const candidate=relative(root,path).split(sep).join('/');
+ const part=glob.replace(/\\/g,'/').replace(/^\//,'');
+ let expression='';
+ for(let n=0;n<part.length;n++){
+  const ch=part.charAt(n);
+  if(ch==='*'){
+   if(part[n+1]==='*'){expression+='.*';n++;if(part[n+1]==='/'){expression+='(?:/)?';n++;}}
+   else expression+='[^/]*';
+  }else if(ch==='?')expression+='[^/]';
+  else expression+=/[.*+?^$()|[\]{}\\]/.test(ch)?'\\'+ch:ch;
+ }
+ const regex=new RegExp('^'+expression+'$');
+ return regex.test(candidate)||(!part.includes('/')&&regex.test(basename(path)));
+}
+function includeSearchDirectory(path:string,root:string,input:Input):boolean{
+ if(input.pattern&&!basename(path).includes(String(input.pattern)))return false;
+ const globs:(string[])=input.glob??[];
+ const positive=globs.filter(g=>!g.startsWith('!'));
+ if(positive.length&&!positive.some(g=>searchDirectoryGlob(path,root,g)))return false;
+ return !globs.some(g=>g.startsWith('!')&&searchDirectoryGlob(path,root,g.slice(1)));
+}
+// Ripgrep --files does not list directories. A bounded breadth-first walk adds
+// empty directories without following directory symlinks.
+async function discoverSearchDirectories(root:string,input:Input):Promise<{paths:string[],truncated:boolean}>{
+ const maxResults=input.maxResults??1000;
+ const scanLimit=Math.min(50000,Math.max(4000,maxResults*16));
+ const deadline=Date.now()+Math.min(input.timeoutMs??30000,30000);
+ let frontier=[resolve(root)],scanned=0,truncated=false;
+ const selected:string[]=[];
+ while(frontier.length){
+  if(scanned>=scanLimit||Date.now()>=deadline){truncated=true;break;}
+  const current=frontier.slice(0,64);frontier=frontier.slice(64);
+  const results=await Promise.all(current.map(async dir=>{
+   try{return(await fs.readdir(dir,{withFileTypes:true}))
+     .filter(entry=>entry.isDirectory()&&(input.includeHidden||!entry.name.startsWith('.')))
+     .map(entry=>join(dir,entry.name));}
+   catch(e:any){if(['ENOENT','EACCES','EPERM'].includes(e?.code))return [];throw e;}
+  }));
+  scanned+=current.length;
+  const candidates=results.flat();
+  const ignored=input.respectIgnore===false?new Set<string>():await gitIgnoredDirectories(root,candidates);
+  const allowed=candidates.filter(candidate=>!ignored.has(resolve(candidate)));
+  for(const candidate of allowed){
+   if(includeSearchDirectory(candidate,root,input))selected.push(candidate);
+   if(selected.length>=maxResults){truncated=true;return{paths:selected.slice(0,maxResults),truncated};}
+  }
+  frontier.push(...allowed);
+ }
+ return{paths:selected,truncated};
+}
+
 async function search(name:string,input:Input,path:string){
  const args:string[]=[];
  if(name==='fs_find'){
@@ -56,12 +134,24 @@ async function search(name:string,input:Input,path:string){
    child.stdout.on('data',(b:Buffer)=>{stdout+=b.toString('utf8');if(Buffer.byteLength(stdout)>max){exceeded=true;child.kill();}});
    child.stderr.on('data',(b:Buffer)=>{stderr+=b.toString('utf8').slice(0,4000);});
    child.on('error',reject);
-   child.on('close',code=>{
+   child.on('close',async code=>{
      clearTimeout(timer);
      if(code!==0&&code!==1&&!exceeded)return reject(Error('RIPGREP_FAILED '+stderr));
      if(name==='fs_find'){
        const found=stdout.split(/\r?\n/).filter(Boolean);
-       return accept({paths:found.slice(0,input.maxResults??1000),truncated:exceeded||found.length>(input.maxResults??1000),
+       const maxResults=input.maxResults??1000;
+       let directoryResult={paths:[] as string[],truncated:false};
+       if(input.includeDirectories){
+         try{directoryResult=await discoverSearchDirectories(path,input);}
+         catch(error){return reject(error);}
+       }
+       const directories=new Set<string>(directoryResult.paths);
+       const paths=input.includeDirectories?[...directories,...found]:found;
+       return accept({paths:paths.slice(0,maxResults),
+         truncated:exceeded||directoryResult.truncated||paths.length>maxResults,
+         ...(input.includeDirectories?{directoryCount:directories.size,
+           entries:paths.slice(0,maxResults).map(p=>({path:p,kind:directories.has(p)?'directory':'file'})),
+           directoryDiscovery:'bounded directory traversal including empty directories; Git ignore rules honored when available'}:{}),
          searchedRoot:path});
      }
      const matches:any[]=[];
@@ -106,18 +196,25 @@ async function archive(i:Input) {
    await tar.c({file:dest,cwd:archiveRoot,gzip:i.format==='tar.gz',portable:true},paths.map(p=>relative(archiveRoot,p)));
    const st=await fs.stat(dest);
    if(st.size>i.maxBytes){await fs.rm(dest,{force:true});throw Error('ARCHIVE_TOO_LARGE');}
-   return{path:dest,bytes:st.size};
+   return{path:dest,bytes:st.size,sha256:await fileHash(dest)};
  }
  if(i.action==='list'){
    const source=location(i.archivePath);
    if(source.endsWith('.zip')){
      const zip=new AdmZip(source);const entries=zip.getEntries();
-     return{entries:entries.slice(0,i.limit??200).map(e=>({name:e.entryName,size:e.header.size,compressedSize:e.header.compressedSize,directory:e.isDirectory})),
+     return{entries:entries.slice(0,i.limit??200).map(e=>({name:e.entryName,size:e.header.size,compressedSize:e.header.compressedSize,directory:e.isDirectory,type:e.isDirectory?'directory':'file'})),
        truncated:entries.length>(i.limit??200)};
    }
-   const entries:any[]=[];
-   await tar.t({file:source,onReadEntry(e:any){if(entries.length<(i.limit??200))entries.push({name:e.path,size:e.size,type:e.type});}});
-   return{entries};
+   const entries:any[]=[];let totalEntries=0;
+   await tar.t({file:source,onReadEntry(e:any){
+     totalEntries++;
+     if(entries.length<(i.limit??200)){
+       const directory=e.type==='Directory';
+       entries.push({name:e.path,size:e.size,type:directory?'directory':'file',
+         archiveType:e.type,directory,compressedSize:null});
+     }
+   }});
+   return{entries,truncated:totalEntries>(i.limit??200)};
  }
  const source=location(i.archivePath),target=location(i.targetDirectory);
  await fs.mkdir(target,{recursive:true});
@@ -188,7 +285,9 @@ export async function fileTool(tool:string,input:Input,workspace?:string):Promis
        if(entries.length>=max)break;
        if(!input.includeHidden&&item.name.startsWith('.'))continue;
        const child=join(node.dir,item.name),s=await fs.lstat(child);
-       entries.push({path:child,name:item.name,type:item.isDirectory()?'directory':item.isFile()?'file':'other',size:s.size,modified:s.mtime.toISOString()});
+       const kind=item.isDirectory()?'directory':item.isFile()?'file':'other';
+       const modifiedAt=s.mtime.toISOString();
+       entries.push({path:child,name:item.name,type:kind,kind,size:s.size,modified:modifiedAt,modifiedAt});
        if(item.isDirectory()&&node.depth<(input.depth??1))queue.push({dir:child,depth:node.depth+1});
      }
    }
@@ -236,7 +335,8 @@ export async function fileTool(tool:string,input:Input,workspace?:string):Promis
  case 'fs_find':case 'fs_grep':return search(tool,input,path);
  case 'fs_write':{
    const data=Buffer.from(input.content,input.encoding==='base64'?'base64':'utf8');
-   if(input.expectedHash){const original=await fs.readFile(path);if(hash(original)!==input.expectedHash)throw Error('FILE_VERSION_CONFLICT');}
+   if(input.createParents)await fs.mkdir(dirname(path),{recursive:true});
+   if(input.expectedHash){const original=await fs.readFile(path);if(hash(original)!==input.expectedHash)versionConflict(original);}
    if(input.mode==='append')await fs.appendFile(path,data);
    else if(input.mode==='create')await fs.writeFile(path,data,{flag:'wx'});
    else await atomicWrite(path,data,true);
@@ -244,7 +344,7 @@ export async function fileTool(tool:string,input:Input,workspace?:string):Promis
  }
  case 'fs_edit':{
    const original=await fs.readFile(path,'utf8');
-   if(input.expectedHash&&hash(utf8(original))!==input.expectedHash)throw Error('FILE_VERSION_CONFLICT');
+   if(input.expectedHash&&hash(utf8(original))!==input.expectedHash)versionConflict(utf8(original));
    // Validate every replacement before the single atomic file write.
    const result=editText(original,input as EditTextRequest);
    const changed=utf8(result.text);
@@ -255,10 +355,14 @@ export async function fileTool(tool:string,input:Input,workspace?:string):Promis
      addedLines=difference.filter(part=>part.added).reduce((sum,part)=>sum+(part.count??0),0);
      removedLines=difference.filter(part=>part.removed).reduce((sum,part)=>sum+(part.count??0),0);
    }
+   const diff=input.dryRun&&result.text!==original
+     ?(await import('diff')).createTwoFilesPatch(path,path,original,result.text,'before','after',{context:3}).slice(0,65_536)
+     :undefined;
    if(!input.dryRun&&result.text!==original)await atomicWrite(path,changed,true);
    return{path,sha256:hash(changed),bytes:changed.length,
      replacements:result.replacements,normalizedEol:result.normalizedEol,
      changed:result.text!==original,dryRun:input.dryRun===true,
+     ...(diff!==undefined?{diff,diffTruncated:diff.length>=65_536}:{}) ,
      ...(addedLines!==undefined&&removedLines!==undefined?{addedLines,removedLines}:{})};
  }
  case 'fs_manage':{

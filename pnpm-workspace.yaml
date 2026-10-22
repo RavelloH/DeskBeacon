@@ -5,3 +5,5 @@ allowBuilds:
   esbuild: true
   sharp: true
   workerd: true
+patchedDependencies:
+  '@alcalzone/ansi-tokenize@0.3.1': patches/@alcalzone__ansi-tokenize@0.3.1.patch

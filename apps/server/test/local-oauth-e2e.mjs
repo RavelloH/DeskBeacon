@@ -29,6 +29,8 @@ async function oauth(scope,resource){
    state:"test-state",code_challenge:challenge,code_challenge_method:"S256",...(resource?{resource}:{})});
  let r=await req(auth);
  if(r.status!==200){const loc=r.headers.get("location");const next=loc?new URL(loc,base):null;throw Error("Authorize GET "+r.status+" redirectPath="+(next?.pathname??"none")+" error="+(next?.searchParams.get("error")??"none"));}
+ const csp=r.headers.get("content-security-policy")??"";
+ assert.ok(csp.includes("form-action 'self' https: http://127.0.0.1:*"),"Device OAuth form must permit loopback HTTP callback on any ephemeral port");
  const screen=await r.text();
  assert.ok(screen.includes("name=\"secret\""),"Upstream-style secret field required");
  assert.ok(!screen.includes("name=\"username\""),"Custom username login must not return");

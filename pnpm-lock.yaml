@@ -4,6 +4,9 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  '@alcalzone/ansi-tokenize@0.3.1': f07bca53b5c3335772faab5c3119d4eec9ac7e84246a80784f2d57d586984591
+
 importers:
 
   .:
@@ -1880,7 +1883,7 @@ packages:
 
 snapshots:
 
-  '@alcalzone/ansi-tokenize@0.3.1':
+  '@alcalzone/ansi-tokenize@0.3.1(patch_hash=f07bca53b5c3335772faab5c3119d4eec9ac7e84246a80784f2d57d586984591)':
     dependencies:
       ansi-styles: 6.2.3
       is-fullwidth-code-point: 5.1.0
@@ -2719,7 +2722,7 @@ snapshots:
 
   ink@7.1.1(@types/react@19.3.0)(react@19.3.1):
     dependencies:
-      '@alcalzone/ansi-tokenize': 0.3.1
+      '@alcalzone/ansi-tokenize': 0.3.1(patch_hash=f07bca53b5c3335772faab5c3119d4eec9ac7e84246a80784f2d57d586984591)
       ansi-escapes: 7.3.0
       ansi-styles: 6.2.3
       auto-bind: 5.0.1

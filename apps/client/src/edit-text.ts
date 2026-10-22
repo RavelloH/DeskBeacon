@@ -60,16 +60,16 @@ function preferredEol(original:string,region:string):string{
 function diagnostic(original:string,oldText:string,exact:number,normalized:number,expected:number):Error{
  const file= lineEndings(original),needle=lineEndings(oldText);
  const normalizedText=mappedLf(original).text,firstLine=mappedLf(oldText).text.split('\n')
-  .map(line=>line.trim()).find(line=>line.length>=8);
+  .map(line=>line.trim()).find(line=>line.length>0);
  const candidates:number[]=[];
  if(firstLine){
   for(const [index,line] of normalizedText.split('\n').entries()){
-   if(line.includes(firstLine)){candidates.push(index+1);if(candidates.length===3)break;}
+   if(line.includes(firstLine)){candidates.push(index+1);if(candidates.length===5)break;}
   }
  }
  return Error('REPLACEMENT_COUNT_MISMATCH exact='+exact+' normalized='+normalized+
   ' expected='+expected+' fileEOL='+file+' inputEOL='+needle+
-  (candidates.length?' candidateLines='+candidates.join(','):'')+
+  ' candidateLines='+ (candidates.length?candidates.join(','):'none')+
   '; matching ignores line-ending differences only; no file changes were written');
 }
 function replaceOne(original:string,{oldText,newText,expectedReplacements=1}:Replacement):{

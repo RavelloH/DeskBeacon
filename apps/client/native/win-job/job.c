@@ -244,7 +244,7 @@ static DWORD WINAPI monitor_parent(void *value){
     WaitForSingleObject(parent,INFINITE);
     ExitProcess(125);return 0;
 }
-typedef struct {HANDLE source,target;} copy_t;
+typedef struct {HANDLE source,target;HANDLE *closeOnEof;} copy_t;
 static DWORD WINAPI copy_stream(void *raw){
     copy_t *ctx=(copy_t *)raw;char block[65536];DWORD n=0,used=0;
     while(ReadFile(ctx->source,block,sizeof(block),&n,NULL)&&n){
@@ -253,7 +253,13 @@ static DWORD WINAPI copy_stream(void *raw){
             if(!WriteFile(ctx->target,block+used,n-used,&step,NULL)||!step)return 0;
             used+=step;
         }
-    }return 0;
+    }
+    /* Propagate EOF from the Agent to the actual subprocess. */
+    if(ctx->closeOnEof && *ctx->closeOnEof==ctx->target){
+        CloseHandle(*ctx->closeOnEof);
+        *ctx->closeOnEof=NULL;
+    }
+    return 0;
 }
 static void close_valid(HANDLE *handle){if(*handle&&*handle!=INVALID_HANDLE_VALUE){CloseHandle(*handle);*handle=NULL;}}
 static int run(const request_t *req){
@@ -305,9 +311,9 @@ static int run(const request_t *req){
     if(!AssignProcessToJobObject(job,childProcess)){fail("AssignProcessToJobObject");goto cleanup;}
     if(ResumeThread(childThread)==(DWORD)-1){fail("ResumeThread");goto cleanup;}
     close_valid(&childThread);close_valid(&stdinRead);close_valid(&stdoutWrite);close_valid(&stderrWrite);
-    copy_t ioOut={stdoutRead,GetStdHandle(STD_OUTPUT_HANDLE)};
-    copy_t ioErr={stderrRead,GetStdHandle(STD_ERROR_HANDLE)};
-    copy_t ioIn={GetStdHandle(STD_INPUT_HANDLE),stdinWrite};
+    copy_t ioOut={stdoutRead,GetStdHandle(STD_OUTPUT_HANDLE),NULL};
+    copy_t ioErr={stderrRead,GetStdHandle(STD_ERROR_HANDLE),NULL};
+    copy_t ioIn={GetStdHandle(STD_INPUT_HANDLE),stdinWrite,&stdinWrite};
     outThread=CreateThread(NULL,0,copy_stream,&ioOut,0,NULL);
     errThread=CreateThread(NULL,0,copy_stream,&ioErr,0,NULL);
     inThread=CreateThread(NULL,0,copy_stream,&ioIn,0,NULL);

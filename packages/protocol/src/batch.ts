@@ -5,7 +5,7 @@ const names = [
   'fs_write','fs_edit','fs_manage','fs_archive',
   'exec_foreground','exec_background',
   'background_list','background_get','background_output','background_input','background_stop',
-  'operation_get','operation_output','transfer_status','transfer_cancel',
+  'operation_get','operation_output','batch_output','transfer_upload','transfer_download','transfer_status','transfer_cancel',
   'net_ports','net_probe','http_request','system_snapshot','system_processes'
 ] as const;
 /** Tools that return bounded structured results and do not include inline binary payloads. */
@@ -15,7 +15,7 @@ export type BatchToolName = typeof names[number];
 export const BATCH_PARALLEL_TOOLS:ReadonlySet<BatchToolName> = new Set([
   'device_info','workspace_info','fs_list','fs_stat','fs_read','fs_read_many',
   'fs_find','fs_grep','background_list','background_get','background_output',
-  'operation_get','operation_output','transfer_status',
+  'operation_get','operation_output','batch_output','transfer_status',
   'net_ports','net_probe','system_snapshot','system_processes'
 ]);
 export const batchInputSchema=z.object({

@@ -12,6 +12,7 @@ import {terminalWindowTitle,writeTerminalTitle} from './terminal-title.js';
 import {activityFileLink,openActivityFile,decodeSgrMouse} from './action-link.js';
 import {logEvent,flushLogs} from './diagnostics.js';
 import {TuiInputBridge,stripMouseControlText} from './tui-input.js';
+import {installTuiTerminalGuard} from './tui-terminal-guard.js';
 import type {EventEmitter} from 'node:events';
 import {ACTIVITY_PAGE_SIZE, sortActivityRows, compatibleDayStats, type ActivityPage, type ActivityDayStats} from './activity-query.js';
 import {createDemoStatus, advanceDemo, demoHelp, type DemoScenario, type DemoStatus} from './demo.js';
@@ -309,7 +310,7 @@ function RunningDurationDetailCell({entry,item,width}:{entry:ActivityEntry;item:
 }
 declare const __DESKBEACON_RELEASE__:boolean;
 const DEMO_ENABLED=typeof __DESKBEACON_RELEASE__==='undefined'||!__DESKBEACON_RELEASE__;
-export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoScenario?:DemoScenario;mouseEvents?:EventEmitter;terminalTitle?:string}={}){
+export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon',onIntentionalExit}:{demoScenario?:DemoScenario;mouseEvents?:EventEmitter;terminalTitle?:string;onIntentionalExit?:(reason:string)=>void}={}){
  const demo=DEMO_ENABLED&&demoScenario!==undefined;
  const [demoStatus,setDemoStatus]=useState<DemoStatus|null>(()=>demo&&demoScenario?createDemoStatus(demoScenario):null);
  const {exit}=useApp(),{w,h}=useSize();
@@ -899,7 +900,7 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
   if('error' in parsed){setNotice(parsed.error);return false;}
   const {id,args,value}=parsed;
   if(id==='help'){setNotice('命令：/config · /tasks · /latest · /stop · /view · /copy · /quit');return true;}
-  if(id==='quit'){if(!demo)logEvent('tui','exit.requested','info',{reason:'slash_quit'});exit();return true;}
+  if(id==='quit'){if(!demo){logEvent('tui','exit.requested','info',{reason:'slash_quit'});onIntentionalExit?.('slash_quit');}exit();return true;}
   if(id==='tasks'){
    if(tasks.length){setFocus('tasks');setDetailTask(true);resetDetail();}
    else setNotice('当前没有后台任务');
@@ -962,7 +963,7 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
  };
  useInput((input,key)=>{
   if(key.ctrl&&input==='c'){
-   if(Date.now()-exitArmedAt<2500){if(!demo)logEvent('tui','exit.requested','info',{reason:'double_ctrl_c'});exit();return;}
+   if(Date.now()-exitArmedAt<2500){if(!demo){logEvent('tui','exit.requested','info',{reason:'double_ctrl_c'});onIntentionalExit?.('double_ctrl_c');}exit();return;}
    setExitArmedAt(Date.now());setNotice('再次按 Ctrl+C 退出 · 2 秒内有效');return;
   }
   if(edit){
@@ -1008,7 +1009,7 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
    if(input==='n'||key.escape)setConfirm(null);
    return;
   }
-  if(input==='q'){if(!demo)logEvent('tui','exit.requested','info',{reason:'q'});exit();return;}
+  if(input==='q'){if(!demo){logEvent('tui','exit.requested','info',{reason:'q'});onIntentionalExit?.('q');}exit();return;}
   if(key.escape){
    if(view!=='main'||inspectorTab!=='summary'){resetDetail();return;}
    if(query){setQuery('');setSelectedId(null);return;}
@@ -1174,23 +1175,26 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon'}:{demoS
  </Box>;
 }
 
-export async function showTui(demoScenario?:DemoScenario,terminalTitle='DeskBeacon'){
+export async function showTui(demoScenario?:DemoScenario,terminalTitle='DeskBeacon',onIntentionalExit?:(reason:string)=>void){
  const bridge=new TuiInputBridge(process.stdin);
+ const guard=installTuiTerminalGuard();
  const startedAt=Date.now();
+ let exitReason:string|null=null;
+ const onExit=(reason:string)=>{exitReason=reason;onIntentionalExit?.(reason);};
  logEvent('tui','session.started','info',{pid:process.pid,terminal:process.env.TERM_PROGRAM??'unknown',isTTY:process.stdout.isTTY===true});
- if(process.stdout.isTTY)process.stdout.write('\x1b[?1049h\x1b[?1003h\x1b[?1006h');
  try{
-  const app=render(<App {...(demoScenario?{demoScenario}:{})} mouseEvents={bridge.mouse} terminalTitle={terminalTitle}/>,{
+  guard.enter();
+  const app=render(<App {...(demoScenario?{demoScenario}:{})} mouseEvents={bridge.mouse} terminalTitle={terminalTitle} onIntentionalExit={onExit}/>,{
    stdin:bridge.keyboard as unknown as typeof process.stdin,
    interactive:process.stdout.isTTY===true,exitOnCtrlC:false});
   await app.waitUntilExit();
-  logEvent('tui','session.exited','info',{durationMs:Date.now()-startedAt});
+  logEvent('tui','session.exited',exitReason?'info':'warn',{reason:exitReason??'unknown',durationMs:Date.now()-startedAt});
  }catch(error){logEvent('tui','session.failed','error',{error,durationMs:Date.now()-startedAt});throw error;}
  finally{
   // Turn off reporting before removing the input handler, or late SGR mouse packets
   // leak into the PowerShell prompt while the terminal is still processing teardown.
-  if(process.stdout.isTTY)await new Promise<void>(resolve=>process.stdout.write('\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1049l',()=>resolve()));
-  bridge.dispose();
+  try{await guard.restore();}
+  finally{guard.dispose();bridge.dispose();}
   writeTerminalTitle('DeskBeacon');
   await flushLogs();
  }

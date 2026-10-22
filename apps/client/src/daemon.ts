@@ -9,7 +9,7 @@ import { relative,sep } from 'node:path';
 import {rgPath} from '@vscode/ripgrep';
 import { WebSocket } from 'ws';
 import si from 'systeminformation';
-import { PROTOCOL_VERSION, LIMITS, ProtocolMessageSchema, toolInputSchemas, executeToolBatch, type ProtocolMessage, type BatchInput } from '@deskbeacon/protocol';
+import { PROTOCOL_VERSION, LIMITS, ProtocolMessageSchema, toolInputSchemas, executeToolBatch, normalizeToolError, type ProtocolMessage, type BatchInput } from '@deskbeacon/protocol';
 import { RecordJournal } from './record-journal.js';
 import { TaskSupervisor } from './process.js';
 import { batchActivityInput, batchActivityResult } from './batch-activity.js';
@@ -559,15 +559,15 @@ export class ClientDaemon extends EventEmitter {
       try{await this.final(opId,tool,result);}
       catch(e){logEvent('execution','result.awaiting_retry','warn',{operationId:opId,error:e});}
     }catch(e){
-      const message=err(e);
-      try{this.journal.finish(opId,{error:message},'failed');}catch{}
-      this.supervisor.record(opId,'failed',{error:message});
+      const error=normalizeToolError(e),message=error.message;
+      try{this.journal.finish(opId,{error:message,code:error.code,...(error.partialResult?{partialResult:error.partialResult}:{})},'failed');}catch{}
+      this.supervisor.record(opId,'failed',{error:message,code:error.code});
       this.db.prepare('UPDATE activity SET status=?,result=NULL,finished_at=?,duration_ms=?,outcome=?,error_code=? WHERE id=?')
-        .run('failed',Date.now(),Date.now()-started,'failed',message.split(':')[0]?.slice(0,64)??null,opId);
+        .run('failed',Date.now(),Date.now()-started,'failed',error.code,opId);
       this.activityRevision++;
       this.emit('change');
       if(this.ws?.readyState===WebSocket.OPEN){
-        this.send({type:'operation.failed',operationId:opId,payload:{code:message.split(':')[0]?.slice(0,64)||'INTERNAL',message:message.slice(0,2000),retryable:false}});
+        this.send({type:'operation.failed',operationId:opId,payload:{...error}});
       }
     }finally{this.operationInFlight.delete(opId);this.supervisor.clearCancelled(opId);}
   }
@@ -624,19 +624,36 @@ export class ClientDaemon extends EventEmitter {
             const budget=Math.min(batch.maxResultBytes,8192);
             const out=String(stdout??''),err=String(stderr??'');
             const preview=Math.max(128,Math.floor((budget-1024)/2));
-            return {status:'completed',data:{...metadata,stdout:out.slice(0,preview),stderr:err.slice(0,preview),
-              stdoutTruncated:out.length>preview,stderrTruncated:err.length>preview}};
+            return {status:'completed',childOperationId:localId,
+              data:{...metadata,stdout:out.slice(0,preview),stderr:err.slice(0,preview),
+                stdoutTruncated:out.length>preview,stderrTruncated:err.length>preview,
+                stdoutBytes:Buffer.byteLength(out),stderrBytes:Buffer.byteLength(err)}};
           }
-          return {status:'completed',data:result};
+          return {status:'completed',childOperationId:localId,data:result};
         },()=>this.supervisor.isCancelled(operationId));
       }finally{this.supervisor.trackBatch(operationId,false);}
+    }
+    if(tool==='batch_output'){
+      const parent=this.db.prepare('SELECT grant_id,record_path FROM activity WHERE id=? AND tool=?')
+        .get(input.parentOperationId,'batch') as {grant_id:string;record_path:string|null}|undefined;
+      if(!parent||parent.grant_id!==grantId||!parent.record_path)throw Error('OPERATION_UNKNOWN');
+      const childId=input.parentOperationId+':'+input.callId;
+      const child=this.journal.getChildren(parent.record_path).find(item=>item.id===childId);
+      if(!child)throw Error('OPERATION_UNKNOWN: batch call not found');
+      const page=this.journal.getRecordStream(child.path,input.stream,input.byteOffset,input.maxBytes);
+      return {parentOperationId:input.parentOperationId,childOperationId:childId,callId:input.callId,...page};
     }
     if(tool==='device_info')return{deviceId:this.config.deviceId,name:this.config.deviceName,platform:platform(),
       architecture:arch(),hostname:hostname(),cpuCount:cpus().length,freeMemoryBytes:freemem(),
       totalMemoryBytes:totalmem(),defaultCwd:process.cwd(),nodeVersion:process.version,
       availableShells:availableShells(),defaultShell:process.platform==='win32'?(availableShells().includes('pwsh.exe')?'pwsh':'powershell'):process.platform==='darwin'?'zsh':'bash'};
     if(tool==='workspace_open'){
-      const id=randomUUID(),cwd=resolve(input.path);
+      const id=input.workspaceId??randomUUID(),cwd=resolve(input.path);
+      const existing=this.db.prepare('SELECT * FROM workspaces WHERE id=?').get(id) as any;
+      if(existing){
+        if(existing.grant_id!==grantId)throw Error('WORKSPACE_FORBIDDEN');
+        return {workspaceId:id,cwd:existing.cwd,shellProfile:existing.shell,version:existing.version,reused:true};
+      }
       await fs.stat(cwd).then(s=>{if(!s.isDirectory())throw Error('NOT_A_DIRECTORY');});
       this.db.prepare('INSERT INTO workspaces(id,grant_id,cwd,shell,version) VALUES(?,?,?,?,?)')
         .run(id,grantId,cwd,input.shellProfile??(platform()==='win32'?(availableShells().includes('pwsh.exe')?'pwsh':'powershell'):platform()==='darwin'?'zsh':'bash'),0);
@@ -666,7 +683,7 @@ export class ClientDaemon extends EventEmitter {
     if(tool.startsWith('fs_'))return fileTool(tool,input,workspace);
     if(tool==='exec_foreground'){
       const command={...input.command,cwd:input.command.cwd??workspace??process.cwd(),shellProfile:input.command.shellProfile??profile};
-      return await this.supervisor.foreground(operationId,input.description,command,input.timeoutMs,
+      return await this.supervisor.foreground(operationId,input.description,command,input.timeoutMs??input.command.timeoutMs??LIMITS.defaultForegroundTimeoutMs,
         operationId.includes(':')?undefined:()=>{
           this.db.prepare("UPDATE activity SET status='running' WHERE id=?").run(operationId);
           this.activityRevision++;this.emit('change');
@@ -679,7 +696,13 @@ export class ClientDaemon extends EventEmitter {
       return await this.supervisor.startBackground(operationId,input.description,cmd);
     }
     if(tool==='background_list')return{tasks:this.supervisor.list()};
-    if(tool==='background_get')return{task:this.supervisor.get(input.backgroundTaskId)};
+    if(tool==='background_get'){
+      const item=this.supervisor.get(input.backgroundTaskId) as Record<string,any>|null;
+      return{task:item?{...item,backgroundTaskId:item.id,operationId:item.operation_id,
+        exitCode:item.exit_code,startedAt:new Date(item.start).toISOString(),
+        stdoutPath:item.stdout_path,stderrPath:item.stderr_path,
+        recordPath:item.record_path}:null};
+    }
     if(tool==='background_stop')return this.supervisor.stop(input.backgroundTaskId);
     if(tool==='background_input')return this.supervisor.input(input.backgroundTaskId,input.data,input.signal);
     if(tool==='background_output'){
@@ -706,12 +729,17 @@ export class ClientDaemon extends EventEmitter {
       return{transferId,status:'completed',writtenBytes:bytes.length,path:target};
     }
     if(tool==='transfer_download'){
-      const bytes=await fs.readFile(resolve(input.sourcePath));
-      if(bytes.length>Math.min(input.maxBytes??LIMITS.transferInlineBytes,LIMITS.transferInlineBytes))
-        throw Error('UNSUPPORTED_HOST_TRANSFER: requires streaming byte endpoint');
+      const source=resolve(input.sourcePath);
+      const stat=await fs.stat(source),offset=Math.min(input.offset??0,stat.size);
+      const length=Math.min(stat.size-offset,input.maxBytes??LIMITS.transferInlineBytes,LIMITS.transferInlineBytes);
+      const handle=await fs.open(source,'r');
+      const bytes=Buffer.alloc(length);
+      try{await handle.read(bytes,0,length,offset);}finally{await handle.close();}
       const transferId=randomUUID();
       this.transfers.set(transferId,{status:'completed',bytes:bytes.length,path:input.sourcePath});
-      return{transferId,status:'completed',bytes:bytes.length,dataBase64:bytes.toString('base64'),
+      return{transferId,status:'completed',bytes:bytes.length,totalBytes:stat.size,
+        offset,nextOffset:offset+bytes.length,hasMore:offset+bytes.length<stat.size,
+        dataBase64:bytes.toString('base64'),
         sha256:createHash('sha256').update(bytes).digest('hex')};
     }
     if(tool==='transfer_status')return{transferId:input.transferId,...this.transfers.get(input.transferId)};
