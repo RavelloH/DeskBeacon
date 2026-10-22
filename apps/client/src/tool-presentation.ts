@@ -118,6 +118,7 @@ const templates:Record<ToolName,Template>={
  fs_manage:{label:'文件管理',action:i=>filename(i.path??i.sourcePath??i.targetPath)+(i.destination?' → '+filename(i.destination):'')+' · '+clean(i.action??'manage'),result:r=>part(r.ok===false?'未完成':'已完成')},
  fs_archive:{label:'归档处理',action:i=>filename(i.outputPath??i.archivePath??i.sourcePaths?.[0])+' · '+clean(i.action??'archive')+(i.format?' · '+clean(i.format):''),result:r=>part(r.extracted!==undefined?qty(r.extracted,'项已解压'):r.entries?qty(r.entries.length,'项'):r.bytes!==undefined?'归档 '+bytes(r.bytes):'已完成')},
  exec_foreground:{label:'命令执行',action:(i,a)=>clean(a.description&&a.description!==a.tool?a.description:cmd(i),220)||'执行命令',result:commandResult},
+ batch_output:{label:'批处理子输出',action:i=>clean(i.callId)+' · '+clean(i.stream??'stdout'),result:r=>part('已读取 '+bytes(r.text?.length??0)+(r.hasMore?' · 可继续读取':''))},
  batch:{label:'批量操作',action:i=>qty(Array.isArray(i.stages)?i.stages.reduce((n:number,s:Fields)=>n+(s.calls?.length??0),0):0,'项操作')+' · '+qty(i.stages?.length,'阶段'),result:r=>part((r.completed??0)+' 成功 · '+(r.failed??0)+' 失败'+(r.skipped?' · '+r.skipped+' 跳过':''),r.failed?'danger':'muted')},
  exec_background:{label:'后台启动',action:(i,a)=>clean(a.description&&a.description!==a.tool?a.description:cmd(i))||'启动后台任务',result:r=>part('已启动'+(r.pid?' · PID '+r.pid:r.backgroundTaskId?' · '+clean(r.backgroundTaskId,12):''))},
  background_list:{label:'后台列表',action:i=>(i.state==='running'?'运行中':i.state==='exited'?'已退出':'全部')+' · 后台任务',result:r=>listResult(r,'tasks','个任务')},

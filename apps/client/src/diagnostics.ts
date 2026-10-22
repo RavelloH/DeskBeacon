@@ -1,5 +1,5 @@
 import Rlog from 'rlog-js';
-import {mkdirSync,rmSync} from 'node:fs';
+import {appendFileSync,mkdirSync,rmSync} from 'node:fs';
 import {join} from 'node:path';
 import {homedir} from 'node:os';
 export const diagnosticDataDir=process.env.DESKBEACON_DATA_DIR??join(homedir(),'.deskbeacon');
@@ -45,6 +45,20 @@ function get(domain:LogDomain):Rlog{
 export function logEvent(domain:LogDomain,event:string,level:Severity='warn',details:Record<string,unknown>={}):void{
  try{get(domain).jsonl.event(event,sanitize(details) as Record<string,unknown>,{level,message:event});}
  catch(error){try{process.stderr.write('[DeskBeacon logger] '+String(error)+'\n');}catch{}}
+}
+/** Last-resort crash report: synchronous so fatal exits cannot lose it in RLog buffers.
+ * This is deliberately limited to fatal events and termination signals.
+ */
+export function logCriticalTuiSync(event:string,details:Record<string,unknown>):void{
+ try{
+  mkdirSync(logsDir,{recursive:true,mode:0o700});
+  const record={schema:'rlog.record',version:1,domain:'tui',pid:process.pid,
+   timestamp:new Date().toISOString(),level:'fatal',message:event,
+   args:[event],context:{},meta:{},event:{type:event,data:sanitize(details)}};
+  appendFileSync(join(logsDir,'tui.jsonl'),JSON.stringify(record)+'\n',{encoding:'utf8',mode:0o600});
+ }catch(error){
+  try{process.stderr.write('[DeskBeacon fatal TUI log failure] '+String(error)+'\n');}catch{}
+ }
 }
 export async function flushLogs():Promise<void>{
  await Promise.allSettled([...active.values()].map(log=>log.flush()));

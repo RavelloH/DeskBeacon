@@ -1,10 +1,11 @@
 import type { BatchInput, BatchToolName } from './batch.js';
+import { normalizeToolError } from './errors.js';
 
 export type BatchInvoke = (tool:BatchToolName,input:Record<string,unknown>,callId:string)=>Promise<Record<string,unknown>>;
 export type BatchCallResult = {
   id:string;tool:BatchToolName;ok:boolean;durationMs:number;
   result?:unknown;error?:{code:string;message:string};
-  truncated?:boolean;resultBytes?:number;operationId?:string;
+  truncated?:boolean;resultBytes?:number;operationId?:string;childOperationId?:string;
 };
 type BatchStageResult={index:number;parallel:boolean;results:BatchCallResult[];stoppedEarly:boolean};
 const clip=(text:string,n=900)=>text.slice(0,n);
@@ -30,9 +31,11 @@ function bounded(value:Record<string,unknown>,maxBytes:number){
   // The complete result may be available via operation_get/output. Returning
   // an explicit size indicator is safer than silently emitting broken JSON.
   const opId=typeof value.operationId==='string'?value.operationId:undefined;
+  const childId=typeof value.childOperationId==='string'?value.childOperationId:undefined;
   return {truncated:true,resultBytes:size,...(opId?{operationId:opId}:{}),
+    ...(childId?{childOperationId:childId}:{}),
     result:{summary:'Sub-tool output exceeds the batch preview budget; call the tool separately or page its output.',
-      ...(opId?{operationId:opId}:{})}};
+      ...(opId?{operationId:opId}:{}),...(childId?{childOperationId:childId}:{})}};
 }
 export async function executeToolBatch(
   request:BatchInput,invoke:BatchInvoke,shouldStop:()=>boolean=()=>false
@@ -56,11 +59,12 @@ export async function executeToolBatch(
       const output=bounded(result,request.maxResultBytes);
       if(error)failed++;else completed++;
       return {id:call.id,tool:call.tool,ok:!error,durationMs:Date.now()-began,
-        ...(error?{error}:{}),...output};
+        ...(error?{error}:{}),
+        ...(typeof result.childOperationId==='string'?{childOperationId:result.childOperationId}:{}),...output};
     }catch(e){
       failed++;
       return {id:call.id,tool:call.tool,ok:false,durationMs:Date.now()-began,
-        error:{code:'TOOL_EXCEPTION',message:clip(e instanceof Error?e.message:String(e))}};
+        error:normalizeToolError(e)};
     }
   };
   for(const [index,stage] of request.stages.entries()){

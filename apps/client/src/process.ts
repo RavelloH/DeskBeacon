@@ -141,6 +141,9 @@ export class TaskSupervisor{
    };
    child.stdout.on('data',(c:Buffer)=>handle('stdout',c));
    child.stderr.on('data',(c:Buffer)=>handle('stderr',c));
+   // Foreground commands are non-interactive unless explicit input is supplied.
+   child.stdin.on('error',()=>{});
+   if(fg)child.stdin.end(typeof c.stdin==='string'?c.stdin:'');
    child.on('error',(e)=>{spawnError=String(e);logEvent('execution','process.error','error',{operationId:id,error:e,program:p.exe});});
    let timeout:NodeJS.Timeout|undefined;
    if(fg)timeout=setTimeout(()=>{timedOut=true;logEvent('execution','foreground.timeout','warn',{operationId:id,timeoutMs,program:p.exe});void stopTree(child,jobManaged);},timeoutMs);
@@ -172,6 +175,10 @@ export class TaskSupervisor{
    stderr=decodeOutputText(Buffer.concat(chunks.stderr));
    if(timeout)clearTimeout(timeout);
    outFile?.end();errFile?.end();this.fg.delete(id);this.onChange();
+   // The Windows Job launcher itself starts, but a missing target exits 125.
+   if(jobManaged&&code===125&&!spawnError&&/DESKBEACON_JOB_ERROR:/i.test(stderr)){
+     spawnError=stderr.split(/\r?\n/).find(x=>x.includes('DESKBEACON_JOB_ERROR:'))?.trim()??'WINDOWS_JOB_SPAWN_FAILED';
+   }
    const readableStderr=normalizeProcessStderr(stderr);
    if(code!==0||timedOut||outputLimitReached||spawnError)logEvent('execution','foreground.completed_abnormally',timedOut||spawnError?'error':'warn',
      {operationId:id,exitCode:code,durationMs:Date.now()-task.since,timedOut,outputLimitReached,spawnError,program:p.exe,cwd:p.cwd,

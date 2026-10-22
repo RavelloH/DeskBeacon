@@ -1,4 +1,47 @@
 import si from 'systeminformation';
+import {cpus,freemem,networkInterfaces,totalmem} from 'node:os';
+import {execFile} from 'node:child_process';
+import {promisify} from 'node:util';
+const execFileAsync=promisify(execFile);
+
+async function windowsProcessOwners():Promise<Map<number,{name:string;user:string|null}>> {
+ const map=new Map<number,{name:string;user:string|null}>();
+ try{
+  const script="[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false); Get-Process -IncludeUserName -ErrorAction SilentlyContinue | Select-Object Id,ProcessName,UserName | ConvertTo-Json -Compress";
+  const {stdout}=await execFileAsync('powershell.exe',['-NoLogo','-NoProfile','-NonInteractive','-Command',script],
+    {windowsHide:true,timeout:7000,maxBuffer:4*1024*1024});
+  const rows=JSON.parse(stdout.trim()||'[]');
+  for(const row of Array.isArray(rows)?rows:[rows]){
+   if(Number.isInteger(row.Id))map.set(row.Id,{name:row.ProcessName,user:row.UserName??null});
+  }
+ }catch{/* Not all Windows service identities can query process owners. */}
+ return map;
+}
+
+async function windowsNetstat(protocol:string):Promise<any[]> {
+ const protocols=protocol==='all'?['tcp','udp']:[protocol];
+ const results=await Promise.all(protocols.map(async value=>{
+  const {stdout}=await execFileAsync('netstat',['-ano','-p',value],
+    {windowsHide:true,timeout:7000,maxBuffer:8*1024*1024});
+  return stdout;
+ }));
+ const split=(value:string)=>{
+  const end=value.lastIndexOf(':');
+  return {address:end>=0?value.slice(0,end).replace(/^\[|\]$/g,''):value,
+    port:end>=0?Number(value.slice(end+1))||0:0};
+ };
+ const rows:any[]=[];
+ for(const result of results)for(const line of result.split(/\r?\n/)){
+  const match=/^\s*(TCP|UDP)\s+(\S+)\s+(\S+)\s+(?:(\S+)\s+)?(\d+)\s*$/i.exec(line);
+  if(!match)continue;
+  const [,protocol,local,peer,rawState,pid]=match;
+  const l=split(local!),p=split(peer!);
+  if(!l.port)continue;
+  rows.push({protocol:protocol!.toLowerCase(),state:rawState?.toLowerCase()==='listening'||protocol?.toLowerCase()==='udp'?'listen':rawState?.toLowerCase()??'',
+    localAddress:l.address,localPort:l.port,peerAddress:p.address,peerPort:p.port,pid:Number(pid)});
+ }
+ return rows;
+}
 import { lookup, resolve as resolveDns } from 'node:dns/promises';
 import { connect as tcpConnect, isIP } from 'node:net';
 import { connect as tlsConnect } from 'node:tls';
@@ -9,28 +52,38 @@ const limited=(s:string,max:number)=>s.length>max?s.slice(0,max):s;
 export async function systemTool(name:string,i:I){
  switch(name){
  case 'system_snapshot':{
-   const [cpu,load,mem,disks,network]=await Promise.all([
-     si.cpu(),si.currentLoad(),si.mem(),
-     i.includeDisks===false?Promise.resolve([]):si.fsSize(),
-     i.includeNetwork===false?Promise.resolve([]):si.networkInterfaces()]);
+   const [load,disks]=await Promise.all([
+     si.currentLoad(),
+     i.includeDisks===false?Promise.resolve([]):si.fsSize()]);
+   const cpu=cpus(),available=freemem(),total=totalmem();
+   const network=i.includeNetwork===false?[]:Object.entries(networkInterfaces()).map(([name,addresses])=>({
+     name,ip4:addresses?.find(x=>x.family==='IPv4')?.address??'',
+     ip6:addresses?.find(x=>x.family==='IPv6')?.address??'',
+     internal:addresses?.every(x=>x.internal)??false
+   }));
    return {timestamp:new Date().toISOString(),platform:process.platform,architecture:process.arch,
-     cpu:{model:cpu.brand,cores:cpu.cores,loadPercent:load.currentLoad},
-     memory:{totalBytes:mem.total,availableBytes:mem.available,usedBytes:mem.used},
+     cpu:{model:cpu[0]?.model??'unknown',cores:cpu.length,loadPercent:load.currentLoad},
+     memory:{totalBytes:total,availableBytes:available,usedBytes:total-available},
      disks:(disks as any[]).map(x=>({mount:x.mount,totalBytes:x.size,usedBytes:x.used,usedPercent:x.use})),
-     network:(network as any[]).map(x=>({name:x.iface,ip4:x.ip4,ip6:x.ip6,internal:x.internal}))};
+     network};
  }
  case 'system_processes':{
-   const all=await si.processes();let rows=all.list as any[];
+   const [all,owners]=await Promise.all([
+     si.processes(),process.platform==='win32'?windowsProcessOwners():Promise.resolve(new Map<number,{name:string;user:string|null}>())
+   ]);let rows=all.list as any[];
    if(i.pid)rows=rows.filter(p=>p.pid===i.pid);
    if(i.name)rows=rows.filter(p=>String(p.name).toLowerCase().includes(String(i.name).toLowerCase()));
    rows.sort((a,b)=>i.sortBy==='name'?String(a.name).localeCompare(String(b.name)):
      i.sortBy==='pid'?a.pid-b.pid:(b[i.sortBy??'cpu']??0)-(a[i.sortBy??'cpu']??0));
    return {processes:rows.slice(0,i.limit??200).map(p=>({pid:p.pid,parentPid:p.parentPid,name:p.name,
-     cpuPercent:p.cpu,memoryBytes:p.memRss,started:p.started,user:p.user})),
+     cpuPercent:p.cpu,memoryBytes:Math.round((p.memRss??0)*1024),started:p.started,user:p.user||owners.get(p.pid)?.user||null})),
      totalMatches:rows.length,truncated:rows.length>(i.limit??200)};
  }
  case 'net_ports':{
-   const all=await si.networkConnections();
+   const [all,owners]=await Promise.all([
+     process.platform==='win32'?windowsNetstat(i.protocol??'tcp'):si.networkConnections(),
+     process.platform==='win32'?windowsProcessOwners():Promise.resolve(new Map<number,{name:string;user:string|null}>())
+   ]);
    let rows=all as any[];
    if(i.protocol&&i.protocol!=='all')rows=rows.filter(r=>String(r.protocol).toLowerCase().includes(i.protocol));
    if(i.state&&i.state!=='all')rows=rows.filter(r=>i.state==='listen'?/listen/i.test(r.state):/established/i.test(r.state));
@@ -38,8 +91,8 @@ export async function systemTool(name:string,i:I){
    if(i.pid)rows=rows.filter(r=>r.pid===i.pid);
    if(i.address)rows=rows.filter(r=>String(r.localAddress).includes(i.address));
    return{connections:rows.slice(0,i.limit??200).map(r=>({protocol:r.protocol,state:r.state,
-     localAddress:r.localAddress,localPort:r.localPort,peerAddress:r.peerAddress,peerPort:r.peerPort,
-     pid:r.pid,process:r.process})),truncated:rows.length>(i.limit??200)};
+     localAddress:r.localAddress,localPort:Number(r.localPort)||0,peerAddress:r.peerAddress,peerPort:r.peerPort?Number(r.peerPort):null,
+     pid:r.pid,process:r.process||owners.get(r.pid)?.name||null})),truncated:rows.length>(i.limit??200)};
  }
  case 'screen_capture':{
    if(process.platform==='linux'&&!process.env.DISPLAY&&!process.env.WAYLAND_DISPLAY)
@@ -118,6 +171,10 @@ export async function networkTool(name:string,i:I){
      const headers=Object.fromEntries([...response.headers].filter(([key])=>!['set-cookie','authorization','proxy-authenticate'].includes(key.toLowerCase())));
      return{url:response.url,status:response.status,ok:response.ok,headers,durationMs:Date.now()-started,
        contentType:response.headers.get('content-type'),body:limited(bytes.toString('utf8'),sizeLimit),truncated};
+   }catch(error){
+     const cause=error instanceof Error?(error as Error & {cause?:{code?:string}}).cause:undefined;
+     const code=cause?.code??(error instanceof Error?error.name:'HTTP_REQUEST_FAILED');
+     throw Object.assign(new Error('HTTP_REQUEST_FAILED: '+code+' '+(error instanceof Error?error.message:String(error))),{code});
    }finally{clearTimeout(timer);}
  }
  throw Error('NETWORK_TOOL_NOT_IMPLEMENTED: '+name);

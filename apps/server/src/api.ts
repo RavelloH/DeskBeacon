@@ -107,7 +107,7 @@ export function makeMcpServer(env: Env, grantId: string, actorName?: string): Mc
 const descriptions: Record<string,string> = {
   device_list: "Find paired devices and their current live online/offline state. Call first when deviceId is unknown; records may remain listed while computers are powered off. Do not interpret lastSeenAt as continuous availability.",
   device_info: "Get a live device capability snapshot, current OS, supported shells, and default working directory. Requires an online device.",
-  workspace_open: "Create an Agent-scoped working directory context for subsequent file and command tools. Returns workspaceId; shell cd commands do NOT update this context.",
+  workspace_open: "Create or reopen a workspace. An explicit workspaceId is honored, and reopening keeps the original cwd. Shell cd commands do NOT update this context.",
   workspace_info: "Read Agent-scoped workspace cwd, shell profile and version. Requires workspaceId returned from workspace_open.",
   workspace_cd: "Change Agent-scoped workspace cwd with optional expectedVersion compare-and-swap. This affects subsequent workspace-aware operations, not the computer's global cwd.",
   fs_list: "List a bounded directory tree with depth/limit/cursor, sorting and hidden-file options. Prefer it over shell ls for ordinary filesystem discovery.",
@@ -118,7 +118,7 @@ const descriptions: Record<string,string> = {
   fs_edit: "Edit one file atomically. mode=replace: oldText/newText, expectedReplacements defaults to 1; mode=replace_many: replacements array (1-64), validated together before writing; mode=patch: unified diff patch. LF/CRLF-compatible matching preserves the file\u0027s newline style. Use expectedHash to reject stale edits and dryRun to validate without writing. Mismatch errors include counts and candidate line numbers; edits never use fuzzy matching.",
   fs_manage: "Create directories, copy, move, rename or remove files; destructive actions are explicit. Do not use for archive extraction.",
   fs_archive: "Create, list or extract ZIP/TAR archives on the selected device. Specify paths and operation explicitly; archive data remains on that device.",
-  exec_foreground: "Run a finite command and WAIT for its final exit, stdout, stderr and exit code in the SAME MCP call. Description is mandatory; use program+args to avoid shell escaping. Timeout is separate from front-end wait. No automatic background.",
+  exec_foreground: "Run a finite command and WAIT for exit and output in the SAME MCP call. stdin closes by default; command.stdin supplies input before EOF. Prefer top-level timeoutMs (takes precedence over deprecated command.timeoutMs). No automatic background.",
   batch: "Compose multiple DeskBeacon tools on ONE device in serial or parallel stages. Independent parallel foreground commands share the device's four execution slots with all Agents; a batch itself occupies no slot. Each nested input matches the standalone tool schema WITHOUT deviceId. failFast stops later stages, not already running parallel calls. Results are bounded and not passed to subsequent stages.",
   exec_background: "EXPLICITLY start a long-running process, get backgroundTaskId, then poll its output using cursor and stop when done. Never use for ordinary short commands.",
   background_list: "List local background process records and statuses, including exited tasks.",
@@ -128,8 +128,9 @@ const descriptions: Record<string,string> = {
   background_stop: "Stop one specific background task/process tree. Safe to retry; requires backgroundTaskId.",
   operation_get: "Read metadata and result of a prior foreground operation from bounded durable history; requires operationId.",
   operation_output: "Page text stdout/stderr from a prior foreground operation by offset. Use when outputPreview is truncated or more detail is needed.",
+  batch_output: "Page local persisted stdout, stderr or result from a batch child call by parentOperationId and callId. Supports truncated outputs; authorization is scoped to the parent grant.",
   transfer_upload: "Transfer actual bytes supplied by the MCP host from Agent to device. Small inline transfers only unless the Host supports streaming; this tool does NOT fetch arbitrary URLs.",
-  transfer_download: "Return actual device file bytes to requesting Agent; inline transfers are bounded. A URL string alone is not a downloaded file.",
+  transfer_download: "Download device file content in offset/maxBytes pages (up to 128 KiB each); returns totalBytes, nextOffset, hasMore and page sha256.",
   transfer_status: "Get status of a specific transferId. Inline transfers may have completed immediately.",
   transfer_cancel: "Cancel a currently active transfer when supported. Returns a clear reason if no active stream exists.",
   net_ports: "Inspect local listening ports or connections and owning PIDs on the selected device.",
@@ -138,7 +139,7 @@ const descriptions: Record<string,string> = {
   system_snapshot: "Read CPU, memory, filesystem, and network system information without mutating the device.",
   system_processes: "List matching system processes by name or PID; read-only, not a process kill tool.",
   screen_capture: "Capture the current screen and return image content when desktop permissions permit. Use sparingly and avoid sensitive screens.",
-  fs_find: "High performance filename and glob search via device-integrated ripgrep. Prefer this over shell-based recursive filesystem scans.",
+  fs_find: "Filename search via ripgrep. includeDirectories additionally discovers parent directories of searchable files (empty directories omitted). .gitignore works only within Git repositories; use respectIgnore=false to disable ignoring.",
   fs_grep: "Fast content grep via ripgrep with bounded structured results and truncation metadata.",
 };
 

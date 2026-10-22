@@ -119,7 +119,7 @@ node apps/client/dist/index.js service logs
 node apps/client/dist/index.js service stop
 ```
 
-后台服务运行时，根命令只打开 TUI，不再创建第二条连接；关闭 TUI 也不会停止后台服务。未运行后台服务时，主窗口关闭即停止远程连接。
+后台服务运行时，根命令只打开 TUI，不会创建第二条设备连接，退出 TUI 也不会停止已有服务。未运行后台服务时，根命令会启动独立 Supervisor 和 Runtime，再打开 TUI；正常使用 `q`、`/quit` 或连续两次 Ctrl+C 退出时，会停止本次创建的 Runtime。若 TUI 进程意外退出或被强制终止，Supervisor 将继续维持设备在线；重新运行 `deskbeacon` 可恢复界面，也可用 `deskbeacon service stop` 断开。
 
 0.2.0 的后台服务新增独立监督进程：若 Runtime 意外崩溃，会记录错误并自动重启、恢复本地 IPC 和设备连接；执行 `service stop` 则会同时正常停止监督进程，不会意外拉起。诊断日志使用 rlog-js，按七个领域写入 `.deskbeacon/logs/*.jsonl` 并独立轮转；可运行 `deskbeacon service logs [service|runtime|connection|execution|migration|security|tui]` 查看。TUI 在本地 IPC 断开时会持续显示断开原因和恢复状态，成功重连后自动清除。
 

@@ -18,6 +18,7 @@ const CommandSchema = z.discriminatedUnion('mode', [
     workspaceId: WorkspaceId.optional(),
     env: Environment,
     timeoutMs: z.number().int().min(1).max(LIMITS.maxForegroundTimeoutMs).optional(),
+    stdin: z.string().max(1_048_576).optional(),
   }).strict(),
   z.object({
     mode: z.literal('shell'),
@@ -27,6 +28,7 @@ const CommandSchema = z.discriminatedUnion('mode', [
     workspaceId: WorkspaceId.optional(),
     env: Environment,
     timeoutMs: z.number().int().min(1).max(LIMITS.maxForegroundTimeoutMs).optional(),
+    stdin: z.string().max(1_048_576).optional(),
   }).strict(),
 ]);
 
@@ -59,9 +61,9 @@ export const toolInputSchemas = {
     maxTotalBytes: z.number().int().min(1_024).max(65_536).default(32_768),
     includeHash: z.boolean().default(false),
   }).strict(),
-  fs_find: z.object({ ...CommonDevice, path: Path, pattern: z.string().max(2_048).optional(), glob: z.array(z.string().max(512)).max(64).default([]), includeHidden: z.boolean().default(false), respectIgnore: z.boolean().default(true), maxResults: z.number().int().min(1).max(20_000).default(1_000), cursor: Cursor, workspaceId: WorkspaceId.optional() }).strict(),
+  fs_find: z.object({ ...CommonDevice, path: Path, pattern: z.string().max(2_048).optional(), includeDirectories: z.boolean().default(false), glob: z.array(z.string().max(512)).max(64).default([]), includeHidden: z.boolean().default(false), respectIgnore: z.boolean().default(true), maxResults: z.number().int().min(1).max(20_000).default(1_000), cursor: Cursor, workspaceId: WorkspaceId.optional() }).strict(),
   fs_grep: z.object({ ...CommonDevice, path: Path, pattern: z.string().min(1).max(16_384), literal: z.boolean().default(false), caseSensitive: z.boolean().default(false), glob: z.array(z.string().max(512)).max(64).default([]), contextLines: z.number().int().min(0).max(20).default(0), maxResults: z.number().int().min(1).max(10_000).default(500), maxBytes: z.number().int().min(1).max(8_388_608).default(1_048_576), timeoutMs: z.number().int().min(1).max(120_000).default(30_000), cursor: Cursor, workspaceId: WorkspaceId.optional() }).strict(),
-  fs_write: z.object({ ...CommonDevice, path: Path, mode: z.enum(['create', 'rewrite', 'append']), content: z.string().max(1_048_576), encoding: z.enum(['utf8', 'base64']).default('utf8'), expectedHash: z.string().regex(/^[a-f0-9]{64}$/i).optional(), overwrite: z.boolean().default(false), workspaceId: WorkspaceId.optional() }).strict(),
+  fs_write: z.object({ ...CommonDevice, path: Path, mode: z.enum(['create', 'rewrite', 'append']), content: z.string().max(1_048_576), encoding: z.enum(['utf8', 'base64']).default('utf8'), expectedHash: z.string().regex(/^[a-f0-9]{64}$/i).optional(), overwrite: z.boolean().default(false), createParents: z.boolean().default(false), workspaceId: WorkspaceId.optional() }).strict(),
   // A flat schema produces named MCP arguments instead of a generic union.
   fs_edit: z.object({
     ...CommonDevice, path: Path, workspaceId: WorkspaceId.optional(),
@@ -90,8 +92,12 @@ export const toolInputSchemas = {
         ctx.addIssue({code:'custom',path:[key],message:key+' is not supported for '+value.mode});
   }),
   fs_manage: z.object({ ...CommonDevice, action: z.enum(['mkdir', 'copy', 'move', 'rename', 'remove']), path: Path, destination: Path.optional(), recursive: z.boolean().default(false), overwrite: z.boolean().default(false), workspaceId: WorkspaceId.optional() }).strict(),
-  exec_foreground: z.object({ ...CommonDevice, description: Description, command: CommandSchema, timeoutMs: z.number().int().min(1).max(LIMITS.maxForegroundTimeoutMs).default(LIMITS.defaultForegroundTimeoutMs), idempotencyKey: z.string().min(1).max(128).optional() }).strict(),
+  exec_foreground: z.object({ ...CommonDevice, description: Description, command: CommandSchema, timeoutMs: z.number().int().min(1).max(LIMITS.maxForegroundTimeoutMs).optional(), idempotencyKey: z.string().min(1).max(128).optional() }).strict(),
   batch: batchInputSchema,
+  batch_output: z.object({ ...CommonDevice, parentOperationId: z.string().min(1).max(128),
+    callId: z.string().min(1).max(64), stream: z.enum(['stdout','stderr','result']).default('stdout'),
+    byteOffset: z.number().int().nonnegative().default(0),
+    maxBytes: z.number().int().min(1).max(1_048_576).default(65_536) }).strict(),
   exec_background: z.object({ ...CommonDevice, description: Description, command: CommandSchema, terminal: z.enum(['pipe', 'pty']).default('pipe'), idempotencyKey: z.string().min(1).max(128).optional() }).strict(),
   background_list: z.object({ ...CommonDevice, state: z.enum(['running', 'exited', 'detached', 'all']).default('all'), limit: z.number().int().min(1).max(500).default(100), cursor: Cursor }).strict(),
   background_get: z.object({ ...CommonDevice, backgroundTaskId: z.string().min(1).max(128) }).strict(),
@@ -101,7 +107,7 @@ export const toolInputSchemas = {
   operation_get: z.object({ ...CommonDevice, operationId: z.string().min(1).max(128) }).strict(),
   operation_output: z.object({ ...CommonDevice, operationId: z.string().min(1).max(128), stream: z.enum(['stdout', 'stderr', 'both']).default('both'), byteOffset: z.number().int().nonnegative().default(0), maxBytes: z.number().int().min(1).max(1_048_576).default(65_536), lineOffset: z.number().int().nonnegative().optional(), maxLines: z.number().int().min(1).max(10_000).optional(), literalContains: z.string().max(4_096).optional() }).strict(),
   transfer_upload: z.object({ ...CommonDevice, description: Description, targetPath: Path, dataBase64: z.string().max(LIMITS.transferInlineBase64Chars).optional(), expectedBytes: z.number().int().nonnegative().max(LIMITS.transferInlineBytes).optional(), sha256: z.string().regex(/^[a-f0-9]{64}$/i).optional(), overwrite: z.boolean().default(false), idempotencyKey: z.string().min(1).max(128).optional() }).strict(),
-  transfer_download: z.object({ ...CommonDevice, description: Description, sourcePath: Path, maxBytes: z.number().int().min(1).max(LIMITS.transferInlineBytes).default(LIMITS.transferInlineBytes) }).strict(),
+  transfer_download: z.object({ ...CommonDevice, description: Description, sourcePath: Path, offset: z.number().int().nonnegative().default(0), maxBytes: z.number().int().min(1).max(LIMITS.transferInlineBytes).default(LIMITS.transferInlineBytes) }).strict(),
   transfer_status: z.object({ ...CommonDevice, transferId: z.string().min(1).max(128) }).strict(),
   transfer_cancel: z.object({ ...CommonDevice, transferId: z.string().min(1).max(128) }).strict(),
   fs_archive: z.discriminatedUnion('action', [

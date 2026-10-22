@@ -14,8 +14,9 @@ type Row = Record<string, any>;
 const FG = new Set(["exec_foreground"]);
 const HISTORY = new Set(["operation_get", "operation_output"]);
 
-function failure(code: string, message: string, operationId?: string): Record<string, unknown> {
-  return { isError: true, code, message, ...(operationId ? { operationId } : {}) };
+function failure(code: string, message: string, operationId?: string, partialResult?:unknown): Record<string, unknown> {
+  return { isError: true, code, message, ...(operationId ? { operationId } : {}),
+    ...(partialResult!==undefined?{partialResult}:{}) };
 }
 function json(value: unknown, status=200) {
   return Response.json(value, { status, headers: { "cache-control": "no-store" } });
@@ -214,7 +215,7 @@ export class DeviceSession extends DurableObject<Env> {
     if(!this.currentSocket()&&!await this.waitForSocket(LIMITS.shortDisconnectGraceMs))
       return failure("DEVICE_OFFLINE","Device did not reconnect within the 60s dispatch window; command was not sent",body.operationId);
     const opId=body.operationId;
-    const timeout=Math.min(LIMITS.maxForegroundTimeoutMs,Math.max(1000,Number(body.input.timeoutMs??(body.name==='batch'?LIMITS.maxForegroundTimeoutMs:isFg?LIMITS.defaultForegroundTimeoutMs:30_000))));
+    const timeout=Math.min(LIMITS.maxForegroundTimeoutMs,Math.max(1000,Number(body.input.timeoutMs??((body.input.command as Record<string,unknown>|undefined)?.timeoutMs)??(body.name==='batch'?LIMITS.maxForegroundTimeoutMs:isFg?LIMITS.defaultForegroundTimeoutMs:30_000))));
     const totalWaitMs=timeout+(canCancel?LIMITS.localQueueWaitMs:0);
     // The device must also accept a delivery postponed by the bounded outage allowance.
     const expires=Date.now()+totalWaitMs+LIMITS.shortDisconnectGraceMs+10_000;
@@ -369,19 +370,33 @@ export class DeviceSession extends DurableObject<Env> {
         this.finish(msg.operationId,failure("RESULT_INVALID","Missing foreground text begin"),"failed");return;
       }
       const data=msg.payload.result;
-      const previewRows=this.ctx.storage.sql.exec("SELECT content FROM chunks WHERE op_id=? ORDER BY stream,idx LIMIT 20",msg.operationId).toArray() as Row[];
-      let preview="";
-      for(const r of previewRows){if(utf8size(preview)>=LIMITS.resultPreviewBytes)break;preview+=String(r.content).slice(0,LIMITS.resultPreviewBytes);}
-      const previewBytes= new TextEncoder().encode(preview).slice(0,LIMITS.resultPreviewBytes);
-      const outputPreview=new TextDecoder().decode(previewBytes);
+      // Preserve the head AND the tail, where build failures commonly appear.
+      const totalOutputBytes=Number(row.stdout_bytes??0)+Number(row.stderr_bytes??0);
+      const clipped=totalOutputBytes>LIMITS.resultPreviewBytes;
+      let outputPreview:string;
+      if(!clipped){
+        const all=this.ctx.storage.sql.exec("SELECT content FROM chunks WHERE op_id=? ORDER BY stream,idx",msg.operationId).toArray() as Row[];
+        outputPreview=all.map(r=>String(r.content)).join("");
+      }else{
+        const first=this.ctx.storage.sql.exec("SELECT content FROM chunks WHERE op_id=? ORDER BY stream,idx LIMIT 8",msg.operationId).toArray() as Row[];
+        const last=this.ctx.storage.sql.exec("SELECT content FROM chunks WHERE op_id=? ORDER BY stream DESC,idx DESC LIMIT 8",msg.operationId).toArray() as Row[];
+        const budget=Math.floor((LIMITS.resultPreviewBytes-128)/2);
+        const head=new TextDecoder().decode(new TextEncoder().encode(first.map(r=>String(r.content)).join("")).slice(0,budget));
+        const tailBytes=new TextEncoder().encode(last.reverse().map(r=>String(r.content)).join(""));
+        let start=Math.max(0,tailBytes.byteLength-budget);
+        while(start<tailBytes.length&&(tailBytes[start]!&0xc0)===0x80)start++;
+        const tail=new TextDecoder().decode(tailBytes.slice(start));
+        outputPreview=head+"\n... [output truncated; use operation_output] ...\n"+tail;
+      }
       this.finish(msg.operationId,{status:"completed",data,...(FG.has(row.tool)?{
-        outputPreview,previewTruncated:(row.stdout_bytes+row.stderr_bytes)>LIMITS.resultPreviewBytes,
+        outputPreview,previewTruncated:clipped,
+        stdoutBytes:Number(row.stdout_bytes??0),stderrBytes:Number(row.stderr_bytes??0),totalOutputBytes,
         historyAvailable:true
       }: {})},"completed");
       this.ackCommit(ws,msg.messageId,msg.operationId);
       return;
     }
-    if(msg.type==="operation.failed") this.finish(msg.operationId,failure(msg.payload.code,msg.payload.message,msg.operationId),"failed");
+    if(msg.type==="operation.failed") this.finish(msg.operationId,failure(msg.payload.code,msg.payload.message,msg.operationId,msg.payload.partialResult),"failed");
     if(msg.type==="operation.cancelled") this.finish(msg.operationId,failure("CANCELLED",msg.payload.reason??"Cancelled",msg.operationId),"cancelled");
   }
   private ackCommit(ws:WebSocket,messageId:string,operationId:string){

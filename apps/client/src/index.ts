@@ -30,10 +30,10 @@ const [
 
 // React's development reconciler records unbounded performance.measure entries
 // in long-lived Node TUI processes. Select production before loading Ink/React.
-async function showTui(scenario?:DemoScenario,title?:string):Promise<void>{
+async function showTui(scenario?:DemoScenario,title?:string,onIntentionalExit?:(reason:string)=>void):Promise<void>{
  if(!process.env.NODE_ENV)process.env.NODE_ENV='production';
  const {showTui:launch}=await import('./tui.js');
- await launch(scenario,title);
+ await launch(scenario,title,onIntentionalExit);
 }
 
 const sleep=(ms:number)=>new Promise(resolve=>setTimeout(resolve,ms));
@@ -107,12 +107,13 @@ async function ownerRuntime(background:boolean,title?:string):Promise<void>{
   try{await showTui(undefined,title);}
   finally{await shutdown();}
 }
-async function serviceStart(){
+async function serviceStart(quiet=false):Promise<boolean>{
+  let spawned=false;
   const running=await currentRuntime();
   if(running){
-    console.log('DeskBeacon is already running in '+(running.runtimeMode??'legacy')+' mode ('+running.deviceName+').');
-    if(migrationRequired())console.log('Storage upgrade pending: stop this Runtime before running deskbeacon migrate or service restart.');
-    return;
+    if(!quiet)console.log('DeskBeacon is already running in '+(running.runtimeMode??'legacy')+' mode ('+running.deviceName+').');
+    if(migrationRequired()&&!quiet)console.log('Storage upgrade pending: stop this Runtime before running deskbeacon migrate or service restart.');
+    return false;
   }
   if(supervisorRunning()&&migrationRequired())throw Error('Stop the existing service supervisor before migrating; run deskbeacon service stop.');
   if(!supervisorRunning()){
@@ -131,18 +132,19 @@ async function serviceStart(){
       detached:true,stdio:'ignore',windowsHide:true,cwd:process.cwd(),env:process.env
     });
     child.unref();
+    spawned=true;
   }
   for(let i=0;i<40;i++){
     await sleep(200);
     const running=await currentRuntime(600);
-    if(running){console.log('DeskBeacon background service started.');return;}
+    if(running){if(!quiet)console.log('DeskBeacon background service started.');return spawned;}
   }
   throw Error('Service did not start. See deskbeacon service logs and run deskbeacon doctor.');
 }
-async function serviceStop(){
+async function serviceStop(quiet=false){
   const active=await currentRuntime();
   if(active?.runtimeMode==='foreground'){
-    console.log('The app owns this Runtime. Close its terminal or press q instead.');return;
+    if(!quiet)console.log('The app owns this Runtime. Close its terminal or press q instead.');return;
   }
   const supervised=supervisorRunning();
   if(supervised)requestSupervisorStop(!active);
@@ -152,14 +154,14 @@ async function serviceStop(){
     // Stop marker is already visible to the supervisor, which can terminate a stuck worker.
     if(!supervised)throw error;
   }
-  else if(!supervised){console.log('DeskBeacon is not running.');return;}
+  else if(!supervised){if(!quiet)console.log('DeskBeacon is not running.');return;}
   // A supervisor may need its 7.5s task-drain interval and force-stop fallback.
   // Use a real deadline, not an arbitrary number of slow IPC probes.
   const deadline=Date.now()+25_000;
   while(Date.now()<deadline){
     if(!supervisorRunning()){
       const running=await currentRuntime(350);
-      if(!running){console.log('DeskBeacon service stopped.');return;}
+      if(!running){if(!quiet)console.log('DeskBeacon service stopped.');return;}
     }
     await sleep(175);
   }
@@ -178,7 +180,7 @@ const usage=()=>{
   '用法：deskbeacon [命令] [选项]',
   '',
   '交互界面',
-  row('(无命令)','启动全屏终端界面；已有后台服务时直接连接'),
+  row('(无命令)','启动全屏终端界面；Runtime 由独立 Supervisor 保护'),
   '',
   '设备与配置',
   row('setup [--url <地址>]','通过 OAuth 授权连接设备，可交互输入服务器地址'),
@@ -320,7 +322,24 @@ async function main(){
      const {runStorageMigrations}=await import('./storage-migrations.js');
      await runStorageMigrations();await closeLogs();
    }
-   await ownerRuntime(false,title);return;
+   // The TUI must not own the Runtime process: sudden terminal or Ink crashes
+   // must leave a supervised device connection online. A deliberate q/quit
+   // retains the previous foreground behavior and stops only our new service.
+   const created=await serviceStart(true);
+   let exitIntent:string|null=null;
+   try{
+    await showTui(undefined,title,reason=>{exitIntent=reason;});
+   }finally{
+    if(created&&exitIntent){
+     logEvent('tui','foreground.intentional_stop','info',{reason:exitIntent});
+     await serviceStop(true);
+    }else if(created){
+     logEvent('tui','foreground.detached_unexpectedly','error',{reason:'no_explicit_exit',supervisorRetained:true});
+     console.error('DeskBeacon：终端界面意外结束，设备 Runtime 已交由后台 Supervisor 继续运行。可重新运行 deskbeacon 连接，或执行 deskbeacon service stop 断开。');
+    }
+    await flushLogs();
+   }
+   return;
  }
  throw Error('Unknown command '+action+'. Use deskbeacon help.');
 }
