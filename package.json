@@ -7,6 +7,7 @@
     "node": ">=24"
   },
   "scripts": {
+    "deploy": "pnpm --filter @deskbeacon/server exec wrangler deploy --config ../../wrangler.jsonc",
     "build": "pnpm --filter @deskbeacon/protocol build && pnpm --filter deskbeacon build && pnpm --filter @deskbeacon/server build",
     "check": "pnpm --filter @deskbeacon/protocol check && pnpm --filter deskbeacon check && pnpm --filter @deskbeacon/server check",
     "test": "pnpm --filter @deskbeacon/protocol build && pnpm --filter @deskbeacon/protocol test && pnpm --filter deskbeacon build && node --test apps/client/test/foreground-pool.test.mjs && node apps/client/test/tui-terminal-guard.mjs && node apps/client/test/ansi-render-regression.mjs && pnpm --filter @deskbeacon/server test",
@@ -17,5 +18,15 @@
   },
   "devDependencies": {
     "typescript": "^6.0.0"
+  },
+  "cloudflare": {
+    "bindings": {
+      "MCP_AUTH_SECRET": {
+        "description": "设置你自己的授权密码。连接电脑和 AI 客户端时都需要输入，请勿使用示例值。"
+      },
+      "MCP_BASE_URL": {
+        "description": "通常留空，自动使用部署地址。绑定自定义域名时填写完整的 HTTPS 地址，不含 /mcp。"
+      }
+    }
   }
 }

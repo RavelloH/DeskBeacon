@@ -1,0 +1,2 @@
+# Set your own authorization password in the Cloudflare deployment form.
+MCP_AUTH_SECRET="replace-with-your-own-password"
