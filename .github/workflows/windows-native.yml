@@ -13,7 +13,6 @@ on:
       - 'pnpm-workspace.yaml'
       - 'scripts/**'
       - 'README.md'
-      - 'CHANGELOG.md'
   pull_request:
     paths:
       - 'apps/client/**'
@@ -22,7 +21,6 @@ on:
       - '.github/workflows/windows-native.yml'
       - 'scripts/**'
       - 'README.md'
-      - 'CHANGELOG.md'
 
 jobs:
   cross-build:
