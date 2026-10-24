@@ -10,7 +10,13 @@
     "command": "pnpm --filter @deskbeacon/protocol build"
   },
   "observability": {
-    "enabled": false
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+      "invocation_logs": true,
+      "persist": true
+    }
   },
   "vars": {
     "MCP_BASE_URL": ""
