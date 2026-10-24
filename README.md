@@ -33,8 +33,8 @@ DeskBeacon 是一个开源、自托管的远程设备 MCP 服务。你可以通�
 | 设置 | 填写内容 |
 | --- | --- |
 | 根目录 | 仓库根目录 `/` |
-| 构建命令 | `pnpm --filter @deskbeacon/protocol build` |
-| 部署命令 | `pnpm run deploy` |
+| 构建命令 | `pnpm build` |
+| 部署命令 | `pnpm deploy` |
 | 构建环境变量 `NODE_VERSION` | `24` |
 | 构建环境变量 `PNPM_VERSION` | `11.1.3` |
 
@@ -53,10 +53,10 @@ DeskBeacon 是一个开源、自托管的远程设备 MCP 服务。你可以通�
 git clone https://github.com/RavelloH/DeskBeacon.git
 cd DeskBeacon
 pnpm install --frozen-lockfile
-pnpm --filter @deskbeacon/protocol build
-pnpm --filter @deskbeacon/server exec wrangler login --config ../../wrangler.jsonc
+pnpm build
+pnpm --filter @deskbeacon/server exec wrangler login
 # 如已创建 KV，先设 DESKBEACON_OAUTH_KV_ID；新部署不设置即可自动预配。
-pnpm run deploy
+pnpm deploy
 ```
 
 在 Cloudflare Dashboard 的 **Settings → Variables and Secrets** 配置 `MCP_AUTH_SECRET`（Secret）。既有实例应在部署前设置构建环境变量 `DESKBEACON_OAUTH_KV_ID` 为原有 KV ID；无须再编辑任何 JSONC。部署完成后记下输出的 HTTPS 地址。

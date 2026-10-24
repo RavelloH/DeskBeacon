@@ -9,8 +9,8 @@
 | 配置 | 值 |
 | --- | --- |
 | Root directory | `/` |
-| Build command | `pnpm --filter @deskbeacon/protocol build` |
-| Deploy command | `pnpm run deploy` |
+| Build command | `pnpm build` |
+| Deploy command | `pnpm deploy` |
 | `NODE_VERSION` | `24` |
 | `PNPM_VERSION` | `11.1.3` |
 
@@ -20,7 +20,7 @@
 
 如果 fork 用户已经手动在根 `wrangler.jsonc` 中填写非零 ID，不设置环境变量时该 ID 会保持不变；设置了 `DESKBEACON_OAUTH_KV_ID` 时则以环境变量为准。
 
-不要使用 Cloudflare Workers Builds 默认的 `npx wrangler deploy` 直接代替 `pnpm run deploy`，否则会绕过配置转换逻辑。
+不要使用 Cloudflare Workers Builds 默认的 `npx wrangler deploy` 直接代替 `pnpm deploy`，否则会绕过配置转换逻辑。
 
 ## 本地部署
 
@@ -28,21 +28,21 @@ PowerShell：
 
 ```powershell
 $env:DESKBEACON_OAUTH_KV_ID = '<existing-namespace-id>'
-pnpm run deploy
+pnpm deploy
 ```
 
 Bash：
 
 ```bash
 export DESKBEACON_OAUTH_KV_ID='<existing-namespace-id>'
-pnpm run deploy
+pnpm deploy
 ```
 
 可选 `DESKBEACON_WORKER_NAME` 覆盖 Worker 名称。首次全新部署可省略环境变量，由 Wrangler 自动预配 KV。
 
 ## 实现方式
 
-`pnpm run deploy`、`pnpm run dev:server` 和服务器的 `build` 使用 `scripts/wrangler-run.mjs`：
+`pnpm deploy`、`pnpm run dev:server` 和服务器的 `build` 使用 `scripts/wrangler-run.mjs`：
 
 1. 读取根目录用户维护的 `wrangler.jsonc`（支持注释及尾随逗号）。
 2. 校验 `DESKBEACON_OAUTH_KV_ID`，如果它非空则覆盖临时配置中的 `OAUTH_KV.id`。
@@ -56,7 +56,7 @@ pnpm run deploy
 
 ```bash
 node --test scripts/wrangler-config.test.mjs
-pnpm run build
+pnpm build
 ```
 
 这些测试覆盖 fork ID 保留、环境变量优先、占位 ID 自动预配、错误 ID 拒绝与根配置不变。生产部署前仍须核对原有 KV Namespace ID。
