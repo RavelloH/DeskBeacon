@@ -5,6 +5,7 @@ import {hostname} from 'node:os';
 import {saveConfig} from './daemon.js';
 import {logEvent} from './diagnostics.js';
 import {networkFetch} from './outbound-network.js';
+import {browserOpenCommand} from './platform-compat.js';
 import {existsSync} from 'node:fs';
 import {configPath,loadConfig} from './daemon.js';
 
@@ -28,9 +29,8 @@ export function validateSetupUrl(value:string):string{
  return url.origin;
 }
 function defaultOpenBrowser(url:string):void{
- const child=process.platform==='win32'
-  ?spawn('rundll32.exe',['url.dll,FileProtocolHandler',url],{detached:true,stdio:'ignore'})
-  :spawn(process.platform==='darwin'?'open':'xdg-open',[url],{detached:true,stdio:'ignore'});
+ const command=browserOpenCommand(url);
+ const child=spawn(command.program,command.args,{detached:true,stdio:'ignore'});
  child.on('error',error=>logEvent('security','oauth.browser_launch_failed','warn',{error}));
  child.unref();
 }

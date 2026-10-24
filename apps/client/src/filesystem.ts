@@ -4,7 +4,7 @@ import {createInterface} from 'node:readline';
 import { createHash } from 'node:crypto';
 import { resolve, dirname, basename, join, relative, isAbsolute, sep } from 'node:path';
 import { spawn } from 'node:child_process';
-import { rgPath } from '@vscode/ripgrep';
+import {ripgrepExecutable} from './ripgrep.js';
 import { editText, type EditTextRequest } from './edit-text.js';
 import { diffLines } from 'diff';
 import AdmZip from 'adm-zip';
@@ -126,8 +126,9 @@ async function search(name:string,input:Input,path:string){
  if(input.respectIgnore===false)args.push('--no-ignore');
  for(const g of input.glob??[])args.push('-g',g);
  args.push('--',path);
+ const executable=await ripgrepExecutable();
  return await new Promise<any>((accept,reject)=>{
-   const child=spawn(rgPath,args,{windowsHide:true,stdio:['ignore','pipe','pipe']});
+   const child=spawn(executable,args,{windowsHide:true,stdio:['ignore','pipe','pipe']});
    let stdout='',stderr='',exceeded=false;
    const max=Math.min(input.maxBytes??2*1024*1024,8*1024*1024);
    const timer=setTimeout(()=>{exceeded=true;child.kill();},input.timeoutMs??30000);

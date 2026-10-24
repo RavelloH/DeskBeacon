@@ -2,13 +2,14 @@ import { DatabaseSync } from 'node:sqlite';
 import { EventEmitter } from 'node:events';
 import { mkdirSync, existsSync, readFileSync, writeFileSync, chmodSync, promises as fs } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
-import { hostname, homedir, platform, arch, totalmem, freemem, cpus } from 'node:os';
+import { hostname, homedir, platform, arch, totalmem, freemem } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync,spawn } from 'node:child_process';
 import { relative,sep } from 'node:path';
-import {rgPath} from '@vscode/ripgrep';
+import {ripgrepExecutable} from './ripgrep.js';
 import { WebSocket } from 'ws';
 import {networkFetch,networkWebSocket} from './outbound-network.js';
+import {availableShells,cpuCount} from './platform-compat.js';
 import si from 'systeminformation';
 import { PROTOCOL_VERSION, LIMITS, ProtocolMessageSchema, toolInputSchemas, executeToolBatch, normalizeToolError, type ProtocolMessage, type BatchInput } from '@deskbeacon/protocol';
 import { RecordJournal } from './record-journal.js';
@@ -40,12 +41,6 @@ export function loadConfig():Config{
   proxyUrl:typeof config.proxyUrl==='string'&&config.proxyUrl.trim()?config.proxyUrl:null};
 }
 const now=()=>new Date().toISOString();
-function availableShells(){
- const names=process.platform==='win32'?['pwsh.exe','powershell.exe','cmd.exe','bash.exe','wsl.exe']:
-  ['bash','zsh','sh','pwsh'];
- const cmd=process.platform==='win32'?'where.exe':'which';
- return names.filter(name=>spawnSync(cmd,[name],{windowsHide:true,timeout:2000}).status===0);
-}
 const sha=(value:string)=>createHash('sha256').update(value).digest('hex');
 const err=(e:unknown)=>e instanceof Error?e.message:String(e);
 function safeActorName(value:unknown):string|null{
@@ -221,9 +216,10 @@ export class ClientDaemon extends EventEmitter {
     const query=(options.query??'').trim();
     if(!query||!existsSync(join(dataDir,'records')))return this.activityList(options);
     const root=join(dataDir,'records');
+    const executable=await ripgrepExecutable();
     const paths=await new Promise<string[]>(resolve=>{
       let child:ReturnType<typeof spawn>;
-      try{child=spawn(rgPath,['--files-with-matches','--fixed-strings','--ignore-case','--hidden',
+      try{child=spawn(executable,['--files-with-matches','--fixed-strings','--ignore-case','--hidden',
         '--no-messages','--glob','*.jsonl','--',query,root],{windowsHide:true,stdio:['ignore','pipe','ignore']});}
       catch{return resolve([]);}
       let output='',bytes=0,done=false;
@@ -659,7 +655,7 @@ export class ClientDaemon extends EventEmitter {
       return {parentOperationId:input.parentOperationId,childOperationId:childId,callId:input.callId,...page};
     }
     if(tool==='device_info')return{deviceId:this.config.deviceId,name:this.config.deviceName,platform:platform(),
-      architecture:arch(),hostname:hostname(),cpuCount:cpus().length,freeMemoryBytes:freemem(),
+      architecture:arch(),hostname:hostname(),cpuCount:cpuCount(),freeMemoryBytes:freemem(),
       totalMemoryBytes:totalmem(),defaultCwd:process.cwd(),nodeVersion:process.version,
       availableShells:availableShells(),defaultShell:process.platform==='win32'?(availableShells().includes('pwsh.exe')?'pwsh':'powershell'):process.platform==='darwin'?'zsh':'bash'};
     if(tool==='workspace_open'){
