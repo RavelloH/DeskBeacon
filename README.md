@@ -38,6 +38,8 @@ DeskBeacon 是一个开源、自托管的远程设备 MCP 服务。你可以通�
 | 构建环境变量 `NODE_VERSION` | `24` |
 | 构建环境变量 `PNPM_VERSION` | `11.1.3` |
 
+**已有实例升级前**，先在 Cloudflare Workers Builds 的构建环境变量中设置 `DESKBEACON_OAUTH_KV_ID` 为原有 KV Namespace ID，确保不会重新绑定到空 KV。新的 fork 无需设置：占位 ID 会在临时部署配置中自动省略，以便 Wrangler 自动创建 KV。根目录 `wrangler.jsonc` 始终保持不变。详见 [部署配置和环境变量覆盖](docs/deployment-config.md)。
+
 构建版本设置可参考 [Cloudflare 构建环境说明](https://developers.cloudflare.com/workers/ci-cd/builds/build-image/)。如果部署时没有出现密码输入框，可在该 Worker 的 **Settings → Variables and Secrets** 中新增名为 `MCP_AUTH_SECRET` 的 **Secret**，填入密码并保存部署，再连接设备。
 
 后文以 `https://deskbeacon.your-account.workers.dev` 为例，请替换为你自己的地址。电脑配对使用这个地址，AI 客户端（ChatGPT、Claude 等）使用时末尾加上 `/mcp` 的地址。
@@ -52,19 +54,12 @@ git clone https://github.com/RavelloH/DeskBeacon.git
 cd DeskBeacon
 pnpm install --frozen-lockfile
 pnpm --filter @deskbeacon/protocol build
-cd apps/server
-pnpm exec wrangler login
-pnpm exec wrangler kv namespace create OAUTH_KV
+pnpm --filter @deskbeacon/server exec wrangler login --config ../../wrangler.jsonc
+# 如已创建 KV，先设 DESKBEACON_OAUTH_KV_ID；新部署不设置即可自动预配。
+pnpm run deploy
 ```
 
-把最后一条命令返回的 ID 填入当前目录 `wrangler.jsonc` 中 `OAUTH_KV` 的 `id`，再设置授权密码并部署：
-
-```bash
-pnpm exec wrangler secret put MCP_AUTH_SECRET
-pnpm exec wrangler deploy
-```
-
-密码在命令提示时输入。部署结束后，记下输出的 HTTPS 地址。
+在 Cloudflare Dashboard 的 **Settings → Variables and Secrets** 配置 `MCP_AUTH_SECRET`（Secret）。既有实例应在部署前设置构建环境变量 `DESKBEACON_OAUTH_KV_ID` 为原有 KV ID；无须再编辑任何 JSONC。部署完成后记下输出的 HTTPS 地址。
 
 </details>
 
