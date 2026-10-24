@@ -1,6 +1,7 @@
 import React,{useEffect,useRef,useState} from 'react';
 import {Box,Text,render,useInput,useStdout} from 'ink';
 import {runSetupFlow,validateSetupUrl,SETUP_PHASES,type SetupProgress} from './setup-flow.js';
+import {DEVICE_SETUP_PHASES,runDeviceSetupFlow} from './device-pairing.js';
 
 const accent='#FDE68A';
 export const SETUP_URL_PLACEHOLDER='https://beacon.example.com';
@@ -14,6 +15,7 @@ export function SetupScreen({progress,editing=false,url='',done=false,error='',d
  const [frame,setFrame]=useState(0),[now,setNow]=useState(Date.now());
  const history=useRef({last:-1,since:Date.now(),durations:new Map<number,number>()});
  const compact=done||Boolean(error)||Boolean(finalMessage),active=progress?.index??0;
+ const phases=progress?.mode==='device'?DEVICE_SETUP_PHASES:SETUP_PHASES;
  if(!compact&&!editing&&active!==history.current.last){
   if(history.current.last>=0&&active>history.current.last)
    history.current.durations.set(history.current.last,Date.now()-history.current.since);
@@ -42,7 +44,7 @@ export function SetupScreen({progress,editing=false,url='',done=false,error='',d
    <Text color="gray">{demo?'授权流程演示：不会发起网络请求，也不会写入真实设备配置。':'通过 OAuth 安全连接当前设备与 DeskBeacon 服务器。'}</Text>
    <Box marginTop={1} flexDirection="column">
     <Text bold>授权流程</Text>
-    {SETUP_PHASES.map((step,i)=>{
+    {phases.map((step,i)=>{
      const finished=Boolean(progress)&&!editing&&i<active;
      const running=Boolean(progress)&&!editing&&i===active;
      const icon=finished?'✓':running?frames[frame]:'-';
@@ -66,6 +68,13 @@ export function SetupScreen({progress,editing=false,url='',done=false,error='',d
      {inputError?<Text color="red">{inputError}</Text>:null}
     </Box>:
      <Text color="gray">服务器：{progress?.server??url}</Text>}
+    {progress?.userCode&&progress.verificationUri?<Box marginTop={1} flexDirection="column">
+     <Text color="cyan">在手机或其他电脑上访问以下网址：</Text>
+     <Text wrap="wrap">{progress.verificationUri}</Text>
+     <Text color="yellow" bold>配对验证码：{progress.userCode}</Text>
+     <Text color="gray">请在浏览器输入验证码和管理密钥 · 最长等待 5 分钟</Text>
+     <Text color="gray">按 Esc 取消设备授权 · 已等待 {duration(now-history.current.since)}</Text>
+    </Box>:null}
     {progress?.authorizeUrl?<Box marginTop={1} flexDirection="column">
      <Text color="cyan">{demo?'以下为模拟授权网址，不需要打开：':'请在浏览器完成授权；如未自动打开，请复制下列网址：'}</Text>
      <Text wrap="wrap">{progress.authorizeUrl}</Text>
@@ -76,7 +85,7 @@ export function SetupScreen({progress,editing=false,url='',done=false,error='',d
   </Box>
  </Box>;
 }
-export async function setupTui(initialUrl?:string):Promise<{deviceId:string;server:string}>{
+export async function setupTui(initialUrl?:string,method:'browser'|'device'='browser'):Promise<{deviceId:string;server:string}>{
  if(!process.env.NODE_ENV)process.env.NODE_ENV='production';
  let accept!:(url:string)=>void,rejectInput!:(error:Error)=>void;
  const selected=new Promise<string>((resolve,reject)=>{accept=resolve;rejectInput=reject;});
@@ -120,7 +129,8 @@ export async function setupTui(initialUrl?:string):Promise<{deviceId:string;serv
  try{
   await new Promise<void>(resolve=>setImmediate(resolve));
   const url=initialUrl??await selected;
-  const result=await runSetupFlow(url,{onProgress:p=>updateProgress(p),signal:abort.signal});
+  const run=method==='device'?runDeviceSetupFlow:runSetupFlow;
+  const result=await run(url,{onProgress:p=>updateProgress(p),signal:abort.signal});
   finish(result.deviceId);
   await new Promise(resolve=>setTimeout(resolve,850));
   return result;

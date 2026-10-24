@@ -37,16 +37,19 @@ async function showTui(scenario?:DemoScenario,title?:string,onIntentionalExit?:(
 }
 
 const sleep=(ms:number)=>new Promise(resolve=>setTimeout(resolve,ms));
-async function setup(base?:string):Promise<void>{
+async function setup(base?:string,requested:'auto'|'browser'|'device'='auto'):Promise<void>{
+ const mode=requested==='auto'?((process.platform==='linux'&&!process.env.DISPLAY&&!process.env.WAYLAND_DISPLAY)||process.platform==='android'||!process.stdout.isTTY?'device':'browser'):requested;
  try{
  if(process.stdin.isTTY&&process.stdout.isTTY){
   const {setupTui}=await import('./setup-tui.js');
-  await setupTui(base);return;
+  await setupTui(base,mode);return;
  }
  if(!base)throw Error('非交互环境请使用 deskbeacon setup --url https://服务器地址');
- const {runSetupFlow}=await import('./setup-flow.js');
- const result=await runSetupFlow(base,{onProgress:p=>{
-  if(p.authorizeUrl)console.log('请在浏览器完成 OAuth 授权，如未自动打开请访问：\n'+p.authorizeUrl);
+ const run=mode==='device'?(await import('./device-pairing.js')).runDeviceSetupFlow:
+   (await import('./setup-flow.js')).runSetupFlow;
+ const result=await run(base,{onProgress:p=>{
+  if(p.userCode&&p.verificationUri)console.log('请在另一台设备访问：'+p.verificationUri+'\n输入验证码：'+p.userCode+'（请勿分享配对密钥）');
+  else if(p.authorizeUrl)console.log('请在浏览器完成 OAuth 授权，如未自动打开请访问：\n'+p.authorizeUrl);
   else console.log('设备授权：'+p.stage);
  }});
  console.log('设备授权已完成：'+result.deviceId);
@@ -183,7 +186,7 @@ const usage=()=>{
   row('(无命令)','启动全屏终端界面；Runtime 由独立 Supervisor 保护'),
   '',
   '设备与配置',
-  row('setup [--url <地址>]','通过 OAuth 授权连接设备，可交互输入服务器地址'),
+  row('setup [--url <地址>]','设备 OAuth 授权，支持 --device / --browser'),
   row('config <name|url> [值]','查看或修改设备名称、服务器地址'),
   '',
   '服务管理',
@@ -274,7 +277,12 @@ async function main(){
  }
  if(action==='setup'){
    const index=args.indexOf('--url');
-   await setup(index>=0&&args[index+1]?args[index+1]!:undefined);
+   if(args.includes('--device')&&args.includes('--browser'))throw Error('--device 与 --browser 不能同时使用');
+   const known=['--device','--browser','--url'];
+   if(args.some((arg,i)=>!known.includes(arg)&&!(i===index+1&&index>=0)))throw Error('setup 参数无效，请使用 --url、--device 或 --browser');
+   if(index>=0&&!args[index+1])throw Error('--url 后缺少服务器地址');
+   await setup(index>=0&&args[index+1]?args[index+1]!:undefined,
+    args.includes('--device')?'device':args.includes('--browser')?'browser':'auto');
    return;
  }
  if(action==='status'||(action==='service'&&args[0]==='status')){

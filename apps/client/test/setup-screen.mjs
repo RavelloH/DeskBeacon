@@ -4,6 +4,7 @@ import React from 'react';
 import {render} from 'ink';
 import {SetupScreen} from '../dist/setup-tui.js';
 import {SETUP_PHASES} from '../dist/setup-flow.js';
+import {DEVICE_SETUP_PHASES} from '../dist/device-pairing.js';
 
 const stdout=new PassThrough();stdout.isTTY=true;stdout.columns=105;stdout.rows=30;stdout.getColorDepth=()=>24;
 const stdin=new PassThrough();stdin.isTTY=true;stdin.setRawMode=()=>stdin;stdin.ref=()=>stdin;stdin.unref=()=>stdin;
@@ -30,6 +31,14 @@ try{
  assert.match(plain,/    ✓ 注册 OAuth 客户端/);
  assert.match(plain,/    - 交换访问令牌/);
 
+ const codeStep={stage:DEVICE_SETUP_PHASES[3],index:3,startedAt:Date.now()-1500,
+  server:'https://example.com',mode:'device',verificationUri:'https://example.com/activate',userCode:'ABCD-2345'};
+ app.rerender(React.createElement(SetupScreen,{progress:codeStep}));
+ await wait(130);
+ const paired=chunks.join('');
+ assert.match(paired,/配对验证码：ABCD-2345/);
+ assert.match(paired,/https:\/\/example.com\/activate/);
+ for(const phase of DEVICE_SETUP_PHASES)assert.ok(paired.includes(phase),'missing device stage '+phase);
  let from=chunks.length;
  app.rerender(React.createElement(SetupScreen,{progress:null,editing:true,url:'https://localhost'}));
  await wait(100);

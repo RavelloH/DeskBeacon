@@ -1,5 +1,6 @@
 import { OAuthAuthorizationServer, OAuthResourceServer } from "@cloudflare/workers-oauth-provider";
 import { handleAuthorize } from "./auth.js";
+import { handlePairRequest } from "./pairing.js";
 import { handleApiRequest } from "./api.js";
 import { DeviceSession } from "./device-session.js";
 import type { Env, GrantProps } from "./env.js";
@@ -82,6 +83,9 @@ export default {
 
     if (url.pathname === "/health" && request.method === "GET") {
       return Response.json({ status: "ok", service: "deskbeacon-server" });
+    }
+    if (url.pathname === "/activate" || url.pathname.startsWith("/pair/")) {
+      return handlePairRequest(request, env, authorizationServer.getOAuthApi(env), origin);
     }
     if (url.pathname === "/authorize") {
       return handleAuthorize(request, env, authorizationServer.getOAuthApi(env));

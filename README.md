@@ -149,6 +149,20 @@ deskbeacon config name "我的开发电脑"
 deskbeacon setup --url https://你的新服务器地址
 ```
 
+### 无浏览器设备授权
+
+SSH、无图形界面的 Linux 和远程 VPS 可以通过另一台设备的浏览器完成 OAuth 授权：
+
+```bash
+deskbeacon setup --device --url https://beacon.example.com
+```
+
+CLI 会显示一个短期验证码与 `https://beacon.example.com/activate` 地址。在手机或其他电脑打开该地址，输入验证码，核对目标设备名称，再使用已有的管理密钥确认授权。CLI 会自行轮询、使用 PKCE 交换 OAuth Token 并保存配置，目标设备无需监听端口。
+
+通常在桌面环境中运行 `deskbeacon setup` 会使用已有的本地浏览器授权；SSH/无头 Linux 自动选择设备配对模式。也可显式指定 `--browser` 使用旧流程，或指定 `--device` 强制跨设备授权。
+
+详细协议和安全设计参见 [无浏览器设备授权](docs/headless-pairing.md)。
+
 ### 代理设置
 
 默认不启用应用层代理。可以在安装后的终端开启自动发现，或直接指定手动代理：
