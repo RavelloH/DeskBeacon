@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .wrangler/
+.wrangler.generated.*.json
 .dev.vars
 .env
 .env.*

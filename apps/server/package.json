@@ -3,12 +3,12 @@
   "version": "0.1.0",
   "description": "DeskBeacon Cloudflare MCP server",
   "type": "module",
-  "files": ["dist", "wrangler.jsonc"],
+  "files": ["dist"],
   "scripts": {
-    "build": "wrangler deploy --dry-run --outdir=dist",
+    "build": "node ../../scripts/wrangler-run.mjs build",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "dev": "wrangler dev"
+    "dev": "node ../../scripts/wrangler-run.mjs dev"
   },
   "dependencies": {
     "@cloudflare/workers-oauth-provider": "^1.2.3",
