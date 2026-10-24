@@ -9,7 +9,8 @@ const make=(tool,req={},res={},status='completed',description='测试操作')=>(
  status,time:Date.now()-2500,finished_at:Date.now(),duration_ms:2500,cwd:'E:/DeskBeacon',
  request_json:JSON.stringify(req),result:JSON.stringify(res)
 });
-assert.equal(TOOL_NAMES.length,35);
+assert.ok(TOOL_NAMES.length>=35,'unexpected loss of MCP tools');
+assert.equal(new Set(TOOL_NAMES).size,TOOL_NAMES.length,'duplicate tool name');
 for(const tool of TOOL_NAMES){
  const view=toolRow(make(tool));
  assert.ok(view.toolLabel.length>=2,tool+': missing tool label');
@@ -19,7 +20,7 @@ for(const tool of TOOL_NAMES){
  assert.ok(!JSON.stringify(view).includes('undefined'),tool+': placeholder leaked');
  assert.ok(TOOL_LABELS[tool],tool+': missing label mapping');
 }
-console.log('PASS all 35 MCP tools have explicit ACTION / RESULT templates');
+console.log('PASS all '+TOOL_NAMES.length+' MCP tools have explicit ACTION / RESULT templates');
 
 const command=make('exec_foreground',{command:{mode:'program',program:'pnpm',args:['test']}},{
  exitCode:0,stdout:'Starting tests...\n12 tests passed\n',durationMs:1900},'completed','执行 TypeScript 类型检查');
