@@ -8,6 +8,7 @@ import { spawnSync,spawn } from 'node:child_process';
 import { relative,sep } from 'node:path';
 import {rgPath} from '@vscode/ripgrep';
 import { WebSocket } from 'ws';
+import {networkFetch,networkWebSocket} from './outbound-network.js';
 import si from 'systeminformation';
 import { PROTOCOL_VERSION, LIMITS, ProtocolMessageSchema, toolInputSchemas, executeToolBatch, normalizeToolError, type ProtocolMessage, type BatchInput } from '@deskbeacon/protocol';
 import { RecordJournal } from './record-journal.js';
@@ -21,11 +22,23 @@ import {codeVersion} from './version.js';
 
 
 
-export type Config={url:string;deviceId:string;accessToken:string;refreshToken?:string;accessTokenExpiresAt?:number;clientId:string;deviceName:string;pendingUrl?:string|undefined};
+export type Config={url:string;deviceId:string;accessToken:string;refreshToken?:string;accessTokenExpiresAt?:number;clientId:string;deviceName:string;pendingUrl?:string|undefined;proxyAuto?:boolean|undefined;proxyUrl?:string|null|undefined};
 export const dataDir=process.env.DESKBEACON_DATA_DIR ?? join(homedir(),'.deskbeacon');
 export const configPath=join(dataDir,'config.json');
-export function saveConfig(config:Config){mkdirSync(dataDir,{recursive:true});writeFileSync(configPath,JSON.stringify(config,null,2),{mode:0o600});if(process.platform!=='win32')chmodSync(configPath,0o600);}
-export function loadConfig():Config{if(!existsSync(configPath))throw Error('DEVICE_NOT_CONFIGURED: run deskbeacon setup --url https://your-worker.example');return JSON.parse(readFileSync(configPath,'utf8')) as Config;}
+/** Persist the two proxy settings with stable JSON types, including for legacy configs. */
+export function saveConfig(config:Config){
+ const stored={...config,proxyAuto:config.proxyAuto===true,
+  proxyUrl:typeof config.proxyUrl==='string'&&config.proxyUrl.trim()?config.proxyUrl:null};
+ mkdirSync(dataDir,{recursive:true});
+ writeFileSync(configPath,JSON.stringify(stored,null,2),{mode:0o600});
+ if(process.platform!=='win32')chmodSync(configPath,0o600);
+}
+export function loadConfig():Config{
+ if(!existsSync(configPath))throw Error('DEVICE_NOT_CONFIGURED: run deskbeacon setup --url https://your-worker.example');
+ const config=JSON.parse(readFileSync(configPath,'utf8')) as Config;
+ return {...config,proxyAuto:config.proxyAuto===true,
+  proxyUrl:typeof config.proxyUrl==='string'&&config.proxyUrl.trim()?config.proxyUrl:null};
+}
 const now=()=>new Date().toISOString();
 function availableShells(){
  const names=process.platform==='win32'?['pwsh.exe','powershell.exe','cmd.exe','bash.exe','wsl.exe']:
@@ -96,14 +109,14 @@ export class ClientDaemon extends EventEmitter {
   private async refreshAccessToken(){
     if(!this.config.refreshToken)return;
     if(!this.forceRefresh&&this.config.accessTokenExpiresAt&&Date.now()<this.config.accessTokenExpiresAt-60_000)return;
-    const response=await fetch(this.config.url+"/oauth/token",{method:"POST",headers:{"content-type":"application/x-www-form-urlencoded"},body:new URLSearchParams({grant_type:"refresh_token",refresh_token:this.config.refreshToken,client_id:this.config.clientId}),signal:AbortSignal.timeout(10_000)});
+    const response=await networkFetch(this.config.url+"/oauth/token",{method:"POST",headers:{"content-type":"application/x-www-form-urlencoded"},body:new URLSearchParams({grant_type:"refresh_token",refresh_token:this.config.refreshToken,client_id:this.config.clientId}),signal:AbortSignal.timeout(10_000)});
     if(!response.ok)throw Error("DEVICE_TOKEN_REFRESH_FAILED "+response.status);
     const token=await response.json() as {access_token:string;refresh_token?:string;expires_in?:number};
     this.config.accessToken=token.access_token;
     if(token.refresh_token)this.config.refreshToken=token.refresh_token;
     if(token.expires_in)this.config.accessTokenExpiresAt=Date.now()+token.expires_in*1000;
     this.forceRefresh=false;
-    if(existsSync(configPath))try{const saved=loadConfig();if(saved.clientId===this.config.clientId)saveConfig({...saved,...this.config,pendingUrl:saved.pendingUrl});}catch{}
+    if(existsSync(configPath))try{const saved=loadConfig();if(saved.clientId===this.config.clientId)saveConfig({...saved,...this.config,pendingUrl:saved.pendingUrl,proxyAuto:saved.proxyAuto,proxyUrl:saved.proxyUrl});}catch{}
   }
 
   private transfers=new Map<string,{status:string;bytes:number;path:string}>();
@@ -308,7 +321,7 @@ export class ClientDaemon extends EventEmitter {
     }
     this.connecting=false;
     const target=this.config.url.replace(/^http:/,'ws:').replace(/^https:/,'wss:').replace(/\/$/,'')+'/device/connect';
-    const socket=new WebSocket(target,{headers:{Authorization:'Bearer '+this.config.accessToken}});
+    const socket=networkWebSocket(target,{headers:{Authorization:'Bearer '+this.config.accessToken}});
     this.ws=socket;this.ready=false;
     this.socketOpenedAt=Date.now();
     // A stalled TCP/TLS/WebSocket handshake must not leave the daemon stuck in connecting.
@@ -376,6 +389,8 @@ export class ClientDaemon extends EventEmitter {
       this.state='error: '+err(e);
     });
   }
+  /** Reloads network routing on the next connection attempt without restarting the service. */
+  reconnectForProxyChange(){if(!this.stopped)this.ws?.terminate();}
   stop(){
     if(this.stopped)return;
     this.cancelRenames('DEVICE_STOPPED');

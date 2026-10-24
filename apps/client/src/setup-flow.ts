@@ -4,6 +4,9 @@ import {spawn} from 'node:child_process';
 import {hostname} from 'node:os';
 import {saveConfig} from './daemon.js';
 import {logEvent} from './diagnostics.js';
+import {networkFetch} from './outbound-network.js';
+import {existsSync} from 'node:fs';
+import {configPath,loadConfig} from './daemon.js';
 
 const url64=(value:Buffer)=>value.toString('base64url');
 export const SETUP_PHASES=[
@@ -73,7 +76,7 @@ export async function runSetupFlow(rawUrl:string,options:{
   const addr=callback.address();if(!addr||typeof addr==='string')throw Error('无法启动本地 OAuth 回调服务');
   const redirect='http://127.0.0.1:'+addr.port+'/callback';
   notify(SETUP_PHASES[2]);
-  const register=await fetch(server+'/oauth/register',{method:'POST',headers:{'content-type':'application/json'},
+  const register=await networkFetch(server+'/oauth/register',{method:'POST',headers:{'content-type':'application/json'},
    body:JSON.stringify({client_name:'DeskBeacon Device '+hostname(),redirect_uris:[redirect],
     token_endpoint_auth_method:'none',grant_types:['authorization_code','refresh_token'],response_types:['code']}),signal:options.signal??null});
   if(!register.ok)throw Error('OAuth 客户端注册失败：HTTP '+register.status);
@@ -108,7 +111,7 @@ export async function runSetupFlow(rawUrl:string,options:{
    if(onAbort)options.signal?.removeEventListener('abort',onAbort);
   }
   notify(SETUP_PHASES[4]);
-  const token=await fetch(server+'/oauth/token',{method:'POST',signal:options.signal??null,
+  const token=await networkFetch(server+'/oauth/token',{method:'POST',signal:options.signal??null,
    headers:{'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({
     grant_type:'authorization_code',client_id:client.client_id,code,redirect_uri:redirect,code_verifier:codeVerifier,
    })});
@@ -117,7 +120,8 @@ export async function runSetupFlow(rawUrl:string,options:{
   if(!credentials.access_token)throw Error('OAuth 未返回访问令牌');
   options.signal?.throwIfAborted();
   notify(SETUP_PHASES[5]);
-  saveConfig({url:server,clientId:client.client_id,deviceId:client.client_id,accessToken:credentials.access_token,
+  const prior=existsSync(configPath)?loadConfig():null;
+  saveConfig({...(prior?{proxyAuto:prior.proxyAuto,proxyUrl:prior.proxyUrl}:{}),url:server,clientId:client.client_id,deviceId:client.client_id,accessToken:credentials.access_token,
    ...(credentials.refresh_token?{refreshToken:credentials.refresh_token}:{}),
    ...(credentials.expires_in?{accessTokenExpiresAt:Date.now()+credentials.expires_in*1000}:{}),
    deviceName:hostname()});

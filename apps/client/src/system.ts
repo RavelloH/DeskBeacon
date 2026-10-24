@@ -47,6 +47,7 @@ import { connect as tcpConnect, isIP } from 'node:net';
 import { connect as tlsConnect } from 'node:tls';
 import screen from 'screenshot-desktop';
 import sharp from 'sharp';
+import {networkFetch} from './outbound-network.js';
 type I=Record<string,any>;
 const limited=(s:string,max:number)=>s.length>max?s.slice(0,max):s;
 export async function systemTool(name:string,i:I){
@@ -157,14 +158,16 @@ export async function networkTool(name:string,i:I){
    const started=Date.now(),controller=new AbortController();
    const timer=setTimeout(()=>controller.abort(),i.timeoutMs??5000);
    try{
-     const response=await fetch(i.url,{method:i.method??'GET',headers:i.headers??{},
+     const response=await networkFetch(i.url,{method:i.method??'GET',headers:i.headers??{},
        body:i.body,redirect:i.redirect??'follow',signal:controller.signal});
-     const reader=response.body?.getReader();
      const sizeLimit=i.maxResponseBytes??65536;
-     const chunks:Uint8Array[]=[];let total=0,truncated=false;
-     if(reader)while(true){
-       const {done,value}=await reader.read();if(done)break;
-       if(total+value.byteLength>sizeLimit){chunks.push(value.slice(0,Math.max(0,sizeLimit-total)));truncated=true;await reader.cancel();break;}
+     const chunks:Buffer[]=[];let total=0,truncated=false;
+     if(response.body)for await(const part of response.body){
+       const value=Buffer.isBuffer(part)?part:Buffer.from(part);
+       if(total+value.byteLength>sizeLimit){
+         chunks.push(value.subarray(0,Math.max(0,sizeLimit-total)));
+         truncated=true;(response.body as import('node:stream').Readable).destroy();break;
+       }
        chunks.push(value);total+=value.byteLength;
      }
      const bytes=Buffer.concat(chunks.map(x=>Buffer.from(x)));

@@ -149,6 +149,19 @@ deskbeacon config name "我的开发电脑"
 deskbeacon setup --url https://你的新服务器地址
 ```
 
+### 代理设置
+
+默认不启用应用层代理。可以在安装后的终端开启自动发现，或直接指定手动代理：
+
+```bash
+deskbeacon config proxy-auto true
+deskbeacon config proxy-url http://127.0.0.1:7890
+deskbeacon config proxy-url null
+deskbeacon doctor
+```
+
+在 config.json 中，proxyAuto 为 boolean，proxyUrl 为 string 或 null。当手动代理地址非空时，它总是优先于自动发现；清除后由 `proxy-auto` 决定是否自动使用环境变量和当前用户的系统代理设置。TUI 也可以通过 `/config proxy-auto true`、`/config proxy-url ...` 修改。首次设备授权之前可临时设置环境变量 `DESKBEACON_PROXY_URL`，用于代理 OAuth 请求。Windows/macOS、Linux、Termux 支持范围和注意事项参见 [代理设置说明](docs/network-proxy.md)。
+
 ### 更新与排查
 
 使用全局安装的客户端时，先退出界面并停止后台服务，再更新：

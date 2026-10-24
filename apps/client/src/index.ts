@@ -288,6 +288,10 @@ async function main(){
    console.log('DeskBeacon',pkg.version,'Node',process.version,'Platform',process.platform);
    console.log('Configuration',existsSync(configPath)?'available':'missing');
    if(existsSync(configPath)){const c=loadConfig();console.log('Server',c.url,'Device',c.deviceId);}
+   if(existsSync(configPath)){const {resolveProxy,redactProxy}=await import('./outbound-network.js');
+    const c=loadConfig();const p=await resolveProxy(c.url);
+    console.log('Proxy auto',String(c.proxyAuto===true),'Manual',redactProxy(c.proxyUrl??''));
+    console.log('Proxy route',p.source,redactProxy(p.proxy));}
    const status=await currentRuntime();console.log('Runtime',status?.state??'stopped');
    return;
  }
