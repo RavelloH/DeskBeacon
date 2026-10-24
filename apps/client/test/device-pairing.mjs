@@ -10,7 +10,7 @@ const tmp=mkdtempSync(join(tmpdir(),'deskbeacon-headless-setup-'));
 process.env.DESKBEACON_DATA_DIR=tmp;
 const {runDeviceSetupFlow,DEVICE_SETUP_PHASES}=await import('../dist/device-pairing.js');
 const {closeLogs}=await import('../dist/diagnostics.js');
-let server,stop=false,requests=[],challenge='',polls=0;
+let server,stop=false,failNextPoll=false,requests=[],challenge='',polls=0;
 const http=createServer(async(req,res)=>{
  const parts=[];for await(const buf of req)parts.push(buf);
  const raw=Buffer.concat(parts).toString('utf8');
@@ -36,6 +36,7 @@ const http=createServer(async(req,res)=>{
  }
  if(url==='/pair/poll'){
   assert.equal(JSON.parse(raw).device_code,'q'.repeat(43));polls++;
+  if(failNextPoll){failNextPoll=false;res.destroy();return;}
   if(stop){out(202,{status:'pending',interval:3});return;}
   // first success without sleeping; the sleep behavior is covered by cancellation test.
   out(200,{status:'authorized',code:'real-authorization-code-123'});return;
@@ -68,6 +69,11 @@ try{
  assert.equal(cfg.refreshToken,'refresh-from-upstream');
  assert.equal(cfg.deviceId,cfg.clientId);
  assert.equal(cfg.proxyAuto,false);assert.equal(cfg.proxyUrl,null);
+ // A single failed network poll should recover without losing the OAuth pairing.
+ failNextPoll=true;
+ const pollsBeforeRetry=polls;
+ await runDeviceSetupFlow(server,{timeoutMs:9000});
+ assert.equal(polls,pollsBeforeRetry+2,'transient network failure should trigger retry');
  const before=readFileSync(join(tmp,'config.json'),'utf8');
  stop=true;
  const abort=new AbortController();
@@ -75,7 +81,7 @@ try{
   signal:abort.signal,timeoutMs:7000,onProgress:p=>{if(p.userCode)abort.abort();}
  }),/取消/);
  assert.equal(readFileSync(join(tmp,'config.json'),'utf8'),before,'cancel must preserve existing tokens');
- console.log('PASS headless pairing: OAuth registration, PKCE, authorization-code relay, token persistence and cancellation');
+ console.log('PASS headless pairing: OAuth registration, PKCE, token persistence, transient polling retry and cancellation');
 }finally{
  await closeLogs();
  await new Promise(resolve=>http.close(resolve));

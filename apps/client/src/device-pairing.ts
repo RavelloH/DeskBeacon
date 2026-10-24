@@ -50,9 +50,23 @@ export async function runDeviceSetupFlow(rawUrl:string,options:{
   let code:string|undefined;
   while(Date.now()<end){
    options.signal?.throwIfAborted();
-   const response=await networkFetch(server+'/pair/poll',{method:'POST',
-    headers:{'content-type':'application/json'},body:JSON.stringify({device_code:pair.device_code}),
-    signal:AbortSignal.any([options.signal??new AbortController().signal,AbortSignal.timeout(15000)])});
+   let response:Awaited<ReturnType<typeof networkFetch>>;
+   try{
+    response=await networkFetch(server+'/pair/poll',{method:'POST',
+     headers:{'content-type':'application/json'},body:JSON.stringify({device_code:pair.device_code}),
+     signal:AbortSignal.any([options.signal??new AbortController().signal,AbortSignal.timeout(15000)])});
+   }catch(error){
+    // Transient network/proxy timeouts must not destroy an already approved session.
+    // Never retry a user cancellation; bound all retries by the original expiration.
+    options.signal?.throwIfAborted();
+    logEvent('connection','oauth.device_pair_poll_retry','warn',{error});
+    await sleep(Math.min(intervalMs,Math.max(0,end-Date.now())),options.signal);
+    continue;
+   }
+   if(response.status===408||response.status>=500){
+    await sleep(Math.min(intervalMs,Math.max(0,end-Date.now())),options.signal);
+    continue;
+   }
    const result=await response.json().catch(()=>({})) as {status?:string;code?:string;error?:string;interval?:number};
    if(response.status===202&&result.status==='pending'){
     intervalMs=Math.max(intervalMs,Math.min(Math.max(3,Number.isFinite(result.interval)?result.interval!:5)*1000,30_000));
