@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import {createDetailSections} from '../dist/detail-preview.js';
 import {previewFromEdges} from '@deskbeacon/protocol';
-import {numberedPreviewBlock,wrapDetail} from '../dist/detail-presentation.js';
+import {numberedPreviewBlock,wrapDetail,sourceLineGutter} from '../dist/detail-presentation.js';
 
 test('multiple source files in the same 4 KiB DETAIL retain their own language palettes and line ranges',()=>{
  const blocks=[
@@ -47,4 +47,36 @@ test('front-only or tail-only omissions remain edge ellipses',()=>{
   assert.equal(rows.filter(r=>r.text==='…').length,1);
   assert.equal(rows.some(r=>r.gutterLabel==='...'),false);
  }
+});
+
+test('two-digit source lines and the three-dot omission share exactly the same gutter separator column',()=>{
+ const source=Array.from({length:60},(_,i)=>'value '+(i+1)+' '+'.'.repeat(24)).join('\n');
+ const [group]=createDetailSections([{kind:'output',title:'OUTPUT',text:source,startLine:1}],256);
+ const rows=numberedPreviewBlock(group.preview,undefined,1,group.lineMap,group.sourceText);
+ const marker=rows.find(x=>x.gutterLabel==='...');
+ assert.ok(marker);
+ assert.equal(marker.lineDigits,3);
+ const numbered=rows.filter(x=>typeof x.sourceLine==='number');
+ assert.ok(numbered.length>0);
+ assert.ok(numbered.every(x=>x.lineDigits===3));
+ const markerGutter=sourceLineGutter(marker);
+ const codeGutters=numbered.map(sourceLineGutter);
+ assert.equal(markerGutter,' ... │ ');
+ assert.ok(codeGutters.every(g=>g.indexOf('│')===markerGutter.indexOf('│')));
+ assert.ok(codeGutters.every(g=>g.length===markerGutter.length));
+ const wrapped=wrapDetail(rows,23);
+ const wrappedMarker=wrapped.filter(x=>x.gutterLabel==='...');
+ assert.ok(wrappedMarker.length>=1);
+ assert.ok(wrappedMarker.every(x=>sourceLineGutter(x).length===markerGutter.length));
+});
+test('four-digit source numbers keep four-column gutters and still align with the three-dot marker',()=>{
+ const source=Array.from({length:1250},(_,i)=>'value '+(i+1)).join('\n');
+ const [group]=createDetailSections([{kind:'output',title:'OUTPUT',text:source,startLine:1}],512);
+ const rows=numberedPreviewBlock(group.preview,undefined,1,group.lineMap,group.sourceText);
+ const marker=rows.find(x=>x.gutterLabel==='...');
+ assert.ok(marker);
+ assert.equal(marker.lineDigits,4);
+ assert.equal(sourceLineGutter(marker),'  ... │ ');
+ assert.ok(rows.filter(x=>typeof x.sourceLine==='number').every(x=>
+  sourceLineGutter(x).indexOf('│')===sourceLineGutter(marker).indexOf('│')));
 });

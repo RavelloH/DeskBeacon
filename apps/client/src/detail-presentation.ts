@@ -13,6 +13,13 @@ type Fields=Record<string,any>;
 const line=(text:string,tone:Tone='default',bold=false,italic=false):DetailLine=>({text,tone,bold,italic});
 const label=(key:string,value:unknown,tone:Tone='default'):DetailLine=>({text:clean(String(value??'—'),1000),label:key,tone});
 const section=(title:string):DetailLine=>({text:title,section:title,tone:'muted',bold:true});
+/** Same source-line gutter string for layout width measurement and Ink rendering. */
+export function sourceLineGutter(item:Pick<DetailLine,'sourceLine'|'gutterLabel'|'lineDigits'|'continued'>):string{
+ if(item.sourceLine===undefined)return '';
+ const label=item.gutterLabel??String(item.sourceLine??'?');
+ const digits=Math.max(item.lineDigits??0,cellWidth(label));
+ return ' '+(item.continued?' '.repeat(digits):label.padStart(digits))+' │ ';
+}
 const combined=(segments:Segment[])=>segments.map(s=>s.text).join('');
 const parse=(raw?:string|null):Fields=>{try{const v=JSON.parse(raw??'{}');return v&&typeof v==='object'&&!Array.isArray(v)?v:{};}catch{return {};}};
 function clean(raw:string,max=300):string{
@@ -187,6 +194,12 @@ export function numberedPreviewBlock(preview:OutputPreview,language?:string,star
   ellipsis,
   ...fromRows(tail,tailStart,tailOffset,'tail')
  ];
+ if(middle){
+  // The literal "..." is THREE cells wide. With 1- or 2-digit source
+  // numbers, widen the entire clipped code block, not only the marker.
+  const digits=Math.max(3,...result.map(row=>row.lineDigits??0));
+  for(const row of result)if(row.sourceLine!==undefined)row.lineDigits=digits;
+ }
  return result;
 }
 function contentFor(a:ActivityEntry,i:Fields,r:Fields,liveLog=""):DetailLine[]{
@@ -392,7 +405,7 @@ export function wrapDetail(lines:DetailLine[],width:number):DetailLine[]{
   }
   // Source line numbers are attached before wrapping. Physical terminal wraps
   // get a continuation marker, never a counterfeit source line number.
-  const gutter=item.sourceLine!==undefined?(item.lineDigits??String(item.sourceLine??'?').length)+4:0;
+  const gutter=cellWidth(sourceLineGutter(item));
   if(item.syntax)return wrapSyntaxLine(item,Math.max(1,w-gutter));
   return wrapLines([item.text],Math.max(1,w-gutter))
    .map((v,index)=>({...item,text:v,continued:index>0}));

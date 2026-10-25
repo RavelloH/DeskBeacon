@@ -4,7 +4,7 @@ import {LiveIpcClient,type LiveEvent} from './ipc-live.js';
 import {backgroundWindow} from './background-window.js';
 import {activityPresentation, safeText, duration, elapsedText, type ActivityEntry} from './presenter.js';
 import {toolRow, type Segment, type Tone} from './tool-presentation.js';
-import {detailPresentation, wrapDetail, type DetailLine} from './detail-presentation.js';
+import {detailPresentation, wrapDetail, sourceLineGutter, type DetailLine} from './detail-presentation.js';
 import {inspectorInput,inspectorResult,inspectorOutput,inspectorCopyText,storedOutputLimited,type InspectorTab,type FullSource} from './detail-inspector.js';
 import {readEntireLocalStream} from './local-stream.js';
 import {AtomicInspectorSwitch} from './inspector-transition.js';
@@ -260,11 +260,7 @@ const DetailCell=React.memo(function DetailCell({item,width}:{item:DetailLine;wi
  if(item.sourceLine!==undefined){
   // Reserve exactly as many columns as the highest logical line number in
   // this block. A soft wrap leaves the number blank, never adds a glyph.
-  const digits=item.lineDigits??String(item.sourceLine??'?').length;
-  // Pane separator │ + one inset cell + logical number + │ + one space.
-  // Soft wraps retain the gutter but leave the number entirely blank.
-  const gutter=' '+(item.continued?' '.repeat(digits):
-    (item.gutterLabel??String(item.sourceLine??'?')).padStart(digits))+' │ ';
+  const gutter=sourceLineGutter(item);
   const room=Math.max(0,width-cellWidth(gutter));
   return <Box height={1} flexShrink={0} width={width}>
    <Text color={palette.line}>{gutter}</Text>
