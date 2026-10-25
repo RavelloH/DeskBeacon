@@ -334,6 +334,7 @@ export class DeviceSession extends DurableObject<Env> {
       const name=msg.payload.name.trim();
       const key="device:"+attachment.deviceId;
       const existing=await this.env.OAUTH_KV.get(key,"json") as DeviceRecord|null;
+      if(!existing){ws.close(4003,'device registration revoked');return;}
       const record:DeviceRecord={
         ...existing,deviceId:attachment.deviceId!,label:name,
         lastSeenAt:existing?.lastSeenAt??new Date().toISOString(),

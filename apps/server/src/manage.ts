@@ -1,6 +1,7 @@
 import type {OAuthHelpers} from "@cloudflare/workers-oauth-provider";
 import type {Env,DeviceRecord} from "./env.js";
 import {page} from "./auth-page.js";
+import {listOwnerGrants,activeDeviceClientIds} from "./device-authorizations.js";
 import {guardSecretRequest,checkSecret,issueManagementToken,isManager,boundedRequestBody,strictOrigin} from "./security.js";
 
 const json=(value:unknown,status=200)=>Response.json(value,{
@@ -55,19 +56,23 @@ export async function manageRoute(request:Request,env:Env,oauth:OAuthHelpers):Pr
  const revoke=/^\/manage\/api\/grants\/([a-zA-Z0-9_-]{1,128})$/.exec(path);
  if(revoke&&request.method==="DELETE"){
   const grantId=revoke[1]!;
-  let cursor:string|undefined;
-  let owned:Awaited<ReturnType<OAuthHelpers["listUserGrants"]>>["items"][number]|undefined;
-  for(let n=0;n<30;n++){
-   const result=await oauth.listUserGrants("owner",{limit:1000,...(cursor?{cursor}:{})});
-   owned=result.items.find(x=>x.id===grantId);
-   if(owned||!result.cursor)break;
-   cursor=result.cursor;
-  }
+  const grants=await listOwnerGrants(oauth);
+  const owned=grants.find(grant=>grant.id===grantId);
   if(!owned)return json({error:"grant_not_found"},404);
   await oauth.revokeGrant(grantId,"owner");
   if(owned.scope.includes("deskbeacon:device")){
-   await env.DEVICE_SESSIONS.get(env.DEVICE_SESSIONS.idFromName(owned.clientId))
+   // Closing the old connection is required even if a second grant exists.
+   // The device can reconnect with another still-valid OAuth grant.
+   const disconnected=await env.DEVICE_SESSIONS.get(env.DEVICE_SESSIONS.idFromName(owned.clientId))
      .fetch("https://device.internal/revoke",{method:"POST"});
+   if(!disconnected.ok)throw new Error("Device WebSocket revoke failed");
+   if(!activeDeviceClientIds(grants,grantId).has(owned.clientId)){
+    // Verify once more after revocation to avoid deleting a device record
+    // if a new grant was created during the revoke operation.
+    const remaining=await listOwnerGrants(oauth);
+    if(!activeDeviceClientIds(remaining,grantId).has(owned.clientId))
+     await env.OAUTH_KV.delete("device:"+owned.clientId);
+   }
   }
   return json({revoked:true});
  }

@@ -9,7 +9,7 @@ import type {OAuthHelpers} from "@cloudflare/workers-oauth-provider";
 const secret="valid test-only secret that is at least 32 bytes long";
 const origin="https://beacon.example.test";
 function fixture(){
- const used=new Set<string>(),rateKeys:string[]=[],revoked:string[]=[],kvWrites:string[]=[];
+ const used=new Set<string>(),rateKeys:string[]=[],revoked:string[]=[],kvWrites:string[]=[],deleted:string[]=[];
  const grants=[
   {id:"grant-agent",clientId:"agent-client",userId:"owner",scope:["deskbeacon:agent"],metadata:{label:"ChatGPT"},createdAt:Date.now()},
   {id:"grant-device",clientId:"device-client",userId:"owner",scope:["deskbeacon:device"],metadata:{label:"Termux"},createdAt:Date.now()}
@@ -19,7 +19,8 @@ function fixture(){
   SECURITY_RATE_LIMIT:{limit:async({key}:{key:string})=>{rateKeys.push(key);return{success:true};}},
   OAUTH_KV:{
    get:async()=>null,
-   put:async(key:string)=>{kvWrites.push(key);}
+   put:async(key:string)=>{kvWrites.push(key);},
+   delete:async(key:string)=>{deleted.push(key);}
   },
   DEVICE_SESSIONS:{
    idFromName:(name:string)=>name,
@@ -42,7 +43,7 @@ function fixture(){
   listUserGrants:async()=>({items:grants}),
   revokeGrant:async(id:string)=>{const index=grants.findIndex(x=>x.id===id);if(index>=0)grants.splice(index,1);}
  } as unknown as OAuthHelpers;
- return{env,oauth,used,rateKeys,kvWrites,revoked};
+ return{env,oauth,grants,used,rateKeys,kvWrites,revoked,deleted};
 }
 async function getSolvedTicket(env:Env){
  const derived=createHash("sha256").update("deskbeacon:cap-core:v1:"+secret).digest("hex");
@@ -113,7 +114,7 @@ describe("CapJS and state-free admin protection",()=>{
   }),env,oauth)).status).toBe(403);
  });
  it("revoke validates grant ownership and terminates device websocket",async()=>{
-  const {env,oauth,revoked}=fixture();
+  const {env,oauth,revoked,deleted}=fixture();
   const {token}=await issueManagementToken(env);
   const headers={"authorization":"Bearer "+token};
   const miss=await manageRoute(new Request(origin+"/manage/api/grants/unknown",{method:"DELETE",headers}),env,oauth);
@@ -121,5 +122,29 @@ describe("CapJS and state-free admin protection",()=>{
   const revoke=await manageRoute(new Request(origin+"/manage/api/grants/grant-device",{method:"DELETE",headers}),env,oauth);
   expect(revoke.status).toBe(200);
   expect(revoked).toEqual(["device-client"]);
+  expect(deleted).toEqual(["device:device-client"]);
+ });
+ it("keeps registration if another Device Grant is still active",async()=>{
+  const {env,oauth,grants,revoked,deleted}=fixture();
+  grants.push({id:"grant-device-two",clientId:"device-client",userId:"owner",
+    scope:["deskbeacon:device"],metadata:{label:"Termux"},createdAt:Date.now()});
+  const {token}=await issueManagementToken(env);
+  const response=await manageRoute(new Request(origin+"/manage/api/grants/grant-device",{
+    method:"DELETE",headers:{"authorization":"Bearer "+token}
+  }),env,oauth);
+  expect(response.status).toBe(200);
+  expect(deleted).toEqual([]);
+  expect(revoked).toEqual(["device-client"]);
+  expect(grants.find(x=>x.id==="grant-device-two")).toBeTruthy();
+ });
+ it("does not delete a device record when revoking an Agent Grant",async()=>{
+  const {env,oauth,deleted,revoked}=fixture();
+  const {token}=await issueManagementToken(env);
+  const response=await manageRoute(new Request(origin+"/manage/api/grants/grant-agent",{
+    method:"DELETE",headers:{"authorization":"Bearer "+token}
+  }),env,oauth);
+  expect(response.status).toBe(200);
+  expect(deleted).toEqual([]);
+  expect(revoked).toEqual([]);
  });
 });

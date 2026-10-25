@@ -6,18 +6,22 @@ import { executeToolBatch } from '@deskbeacon/protocol';
 import type { BatchInput } from "@deskbeacon/protocol";
 import { resolveActorName } from "./oauth-actor.js";
 import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
+import {listOwnerGrants,activeDeviceClientIds} from "./device-authorizations.js";
 
 type ApiCtx = ExecutionContext & { props?: GrantProps; auth?: { scope?: string[]; clientId?: string } };
 const scopeAgent = "deskbeacon:agent", scopeDevice = "deskbeacon:device";
 
-async function registry(env: Env): Promise<DeviceRecord[]> {
+async function registry(env: Env, oauth: Pick<OAuthHelpers,"listUserGrants">): Promise<DeviceRecord[]> {
+  const authorized=activeDeviceClientIds(await listOwnerGrants(oauth));
+  if(!authorized.size)return [];
   const devices: DeviceRecord[] = [];
   let cursor: string | undefined;
   do {
     const keys = await env.OAUTH_KV.list({ prefix: "device:", limit: 250, ...(cursor ? { cursor } : {}) });
     for (const key of keys.keys) {
+      if(!authorized.has(key.name.slice("device:".length)))continue;
       const record = await env.OAUTH_KV.get(key.name, "json") as DeviceRecord | null;
-      if (record && record.deviceId) devices.push(record);
+      if (record && record.deviceId && authorized.has(record.deviceId)) devices.push(record);
     }
     cursor = keys.list_complete ? undefined : keys.cursor;
   } while (cursor && devices.length < 2000);
@@ -28,7 +32,7 @@ function secureError(code: string, message: string, operationId?: string): Recor
   return { isError: true, code, message, ...(operationId ? { operationId } : {}) };
 }
 
-export async function dispatchTool(env: Env, name: ToolName, input: unknown, grantId: string, actorName?: string): Promise<Record<string,unknown>> {
+export async function dispatchTool(env: Env, name: ToolName, input: unknown, grantId: string, actorName?: string, oauth?: Pick<OAuthHelpers,"listUserGrants">): Promise<Record<string,unknown>> {
   const schema = toolInputSchemas[name];
   const validated = schema.safeParse(input);
   if (!validated.success) return secureError("INVALID_INPUT", validated.error.message.slice(0, 1500));
@@ -39,10 +43,11 @@ export async function dispatchTool(env: Env, name: ToolName, input: unknown, gra
     // batches retain the server orchestrator; commands still use the device pool.
     if(batch.stages.some(s=>s.calls.some(c=>c.tool==='operation_get'||c.tool==='operation_output')) ||
        new TextEncoder().encode(JSON.stringify(batch)).byteLength>LIMITS.controlFrameBytes-16_384)
-      return executeToolBatch(batch,(tool,subInput)=>dispatchTool(env,tool,subInput,grantId,actorName));
+      return executeToolBatch(batch,(tool,subInput)=>dispatchTool(env,tool,subInput,grantId,actorName,oauth));
   }
   if (name === "device_list") {
-    const records = await registry(env);
+    if(!oauth)return secureError("OAUTH_UNAVAILABLE","Cannot verify device grants");
+    const records = await registry(env,oauth);
     // Check live DO WebSocket state only on Agent demand, never by polling.
     // Limit concurrent DO calls to keep list operations bounded.
     const updated: DeviceRecord[] = [];
@@ -78,7 +83,7 @@ export async function dispatchTool(env: Env, name: ToolName, input: unknown, gra
   return body;
 }
 
-export function makeMcpServer(env: Env, grantId: string, actorName?: string): McpServer {
+export function makeMcpServer(env: Env, grantId: string, actorName?: string, oauth?: Pick<OAuthHelpers,"listUserGrants">): McpServer {
   const server = new McpServer({ name: "deskbeacon", version: "0.1.0" });
   for (const name of TOOL_NAMES) {
     const schema = toolInputSchemas[name];
@@ -86,7 +91,7 @@ export function makeMcpServer(env: Env, grantId: string, actorName?: string): Mc
       description: descriptions[name] ?? name.replaceAll("_", " "),
       inputSchema: schema as any,
     }, async (input: any) => {
-      const result = await dispatchTool(env, name, input, grantId, actorName);
+      const result = await dispatchTool(env, name, input, grantId, actorName,oauth);
       const error = result.isError === true;
       const content: any[] = [];
       if (!error && name === "screen_capture" && typeof result.data === "object" && result.data &&
@@ -143,7 +148,7 @@ const descriptions: Record<string,string> = {
   fs_grep: "Fast content grep via ripgrep with bounded structured results and truncation metadata.",
 };
 
-export async function handleApiRequest(request: Request, env: Env, ctx: ApiCtx, oauth: Pick<OAuthHelpers, "lookupClient">): Promise<Response> {
+export async function handleApiRequest(request: Request, env: Env, ctx: ApiCtx, oauth: Pick<OAuthHelpers, "lookupClient"|"listUserGrants">): Promise<Response> {
   const pathname = new URL(request.url).pathname;
   const props = ctx.props;
   const scopes = ctx.auth?.scope ?? [];
@@ -151,7 +156,7 @@ export async function handleApiRequest(request: Request, env: Env, ctx: ApiCtx, 
     if (props?.kind !== "agent" || !scopes.includes(scopeAgent)) return Response.json({ error: "FORBIDDEN" }, { status: 403 });
     const grantId = props.grantId;
     const actorName = await resolveActorName(oauth, props.actorName, ctx.auth?.clientId);
-    const handler = createMcpHandler(() => makeMcpServer(env, grantId, actorName), { legacy: "stateless" });
+    const handler = createMcpHandler(() => makeMcpServer(env, grantId, actorName,oauth), { legacy: "stateless" });
     return handler.fetch(request);
   }
   if (pathname === "/device/connect") {
