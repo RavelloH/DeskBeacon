@@ -1,5 +1,6 @@
 import hljs from 'highlight.js/lib/core';
 import bash from 'highlight.js/lib/languages/bash';
+import diff from 'highlight.js/lib/languages/diff';
 import dos from 'highlight.js/lib/languages/dos';
 import powershell from 'highlight.js/lib/languages/powershell';
 import javascript from 'highlight.js/lib/languages/javascript';
@@ -33,7 +34,7 @@ const colors:Record<string,string>={
  tag:'#B6C8DF',name:'#ABC5E1'
 };
 for(const [id,grammar] of Object.entries({
- bash,dos,powershell,javascript,typescript,python,rust,go,cpp,c,java,json,yaml,xml,css,sql,markdown,ruby,php
+ bash,diff,dos,powershell,javascript,typescript,python,rust,go,cpp,c,java,json,yaml,xml,css,sql,markdown,ruby,php
 }))hljs.registerLanguage(id,grammar);
 
 const ext:Record<string,string>={
@@ -42,7 +43,7 @@ const ext:Record<string,string>={
  ts:'typescript',cts:'typescript',mts:'typescript',tsx:'typescript',
  py:'python',pyw:'python',rs:'rust',go:'go',c:'c',h:'c',cc:'cpp',cpp:'cpp',cxx:'cpp',hpp:'cpp',
  java:'java',json:'json',jsonc:'json',yaml:'yaml',yml:'yaml',html:'xml',htm:'xml',xml:'xml',
- svg:'xml',css:'css',scss:'css',sql:'sql',md:'markdown',mdx:'markdown',rb:'ruby',php:'php'
+ svg:'xml',patch:'diff',diff:'diff',css:'css',scss:'css',sql:'sql',md:'markdown',mdx:'markdown',rb:'ruby',php:'php'
 };
 export function languageForPath(path:unknown):string|undefined{
  if(typeof path!=='string'||!path)return undefined;

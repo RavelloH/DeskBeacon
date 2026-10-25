@@ -34,7 +34,7 @@ test('journal tail preview labels truncated stdout without inventing first-line 
    request_json:journal.getPreview(path).input,result:JSON.stringify(preview)};
   const summary=detailPresentation(entry,entry.time);
   assert.ok(summary.some(v=>v.section==='OUTPUT'));
-  assert.ok(summary.some(v=>v.text==='…'), 'clipped output must contain one omission row');
+  assert.ok(summary.some(v=>v.gutterLabel==='...'&&v.text.includes('已隐藏')&&v.text.includes('按 o 展开')), 'middle-clipped output needs an inline omission row');
   const numbered=summary.filter(v=>typeof v.sourceLine==='number');
   assert.equal(numbered[0].sourceLine,1);
   assert.equal(numbered.at(-1).sourceLine,preview.outputPreviewMeta.totalLines);

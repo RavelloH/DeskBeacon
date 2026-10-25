@@ -1,5 +1,6 @@
 import {fullNumberedBlock,type DetailLine} from './detail-presentation.js';
 import {languageForCommand,languageForPath} from './syntax-highlight.js';
+import {detectOutputLanguage} from './terminal-highlight.js';
 import type {ActivityEntry} from './presenter.js';
 
 export type InspectorTab='summary'|'input'|'result'|'stdout'|'stderr';
@@ -24,7 +25,7 @@ export function inspectorInput(entry:ActivityEntry,source:FullSource|null):Detai
  }
  if(!input){
   rows.push(heading('INPUT'));
-  rows.push(...fullNumberedBlock(raw));
+  rows.push(...fullNumberedBlock(raw,detectOutputLanguage(raw)));
   return rows;
  }
  if('summary' in input&&typeof input.summary==='string')
@@ -50,7 +51,7 @@ export function inspectorInput(entry:ActivityEntry,source:FullSource|null):Detai
  if(typeof input.content==='string'&&input.content!=='[redacted]'){
   rows.push(heading('FILE CONTENT'));
   rows.push(...fullNumberedBlock(input.content,languageForPath(input.path),
-    input.mode==='append'?null:1));
+    1));
  }
  if(typeof input.patch==='string'){
   rows.push(heading('PATCH'));
@@ -104,7 +105,7 @@ export function inspectorResult(entry:ActivityEntry,source:FullSource|null):Deta
   rows.push(...fullNumberedBlock(format(result),'json'));
  }else{
   rows.push(heading('RESULT'));
-  rows.push(...fullNumberedBlock(raw));
+  rows.push(...fullNumberedBlock(raw,detectOutputLanguage(raw)));
  }
  return rows;
 }
@@ -114,13 +115,9 @@ export function inspectorOutput(source:FullSource|null,stream:'stdout'|'stderr',
  if(sourceLimited)rows.push(message('执行器已达到输出上限，源日志后续缺失字符数无法确定','warning'));
  if(!source.available)return [message('本机没有保存 '+stream+' 输出','warning'),...rows];
  if(!source.text)return [message('（空输出）')];
- // JSON and structured text are highlighted, ordinary stdout stays neutral.
- const json=source.text.trimStart();
- let resolvedLanguage=language;
- if(!resolvedLanguage&&(json.startsWith('{')||json.startsWith('['))){
-  try{JSON.parse(json);resolvedLanguage='json';}catch{}
- }
- rows.push(...fullNumberedBlock(source.text,resolvedLanguage));
+ // Full stdout/stderr retains native ANSI SGR foreground colors. Where no
+ // native color exists, use safe JSON / JSONL / log lexical highlighting.
+ rows.push(...fullNumberedBlock(source.text,language??detectOutputLanguage(source.text)));
  return rows;
 }
 export function storedOutputLimited(entry:ActivityEntry):boolean{

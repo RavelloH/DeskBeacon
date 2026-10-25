@@ -1,9 +1,11 @@
 import {createPreview,previewFromEdges,type OutputPreview} from '@deskbeacon/protocol';
+import {styleTerminalSource,type StyledSource} from './terminal-highlight.js';
+import type {CodeSpan} from './syntax-highlight.js';
 
 export type DetailKind='input'|'output';
 export type PreviewPreference='balanced'|'head'|'tail';
 export type DetailBlock={kind:DetailKind;title:string;text:string;preference?:PreviewPreference;language?:string;startLine?:number|null;sourcePreview?:OutputPreview|undefined};
-export type DetailSection={kind:DetailKind;preview:OutputPreview;language?:string;title?:string;startLine?:number|null;lineMap?:Array<number|null>};
+export type DetailSection={kind:DetailKind;preview:OutputPreview;language?:string;title?:string;startLine?:number|null;lineMap?:Array<number|null>;sourceText?:string;sourceStyled?:StyledSource};
 const bytes=(s:string)=>new TextEncoder().encode(s).byteLength;
 
 const marker=/\n… \[中间省略 \d+ 字节 · 查看完整输出\] …\n/;
@@ -26,18 +28,19 @@ export function createDetailSections(blocks:readonly DetailBlock[],budget=4096):
   if(!members.length)return null;
   // Multiple file chunks share one budget, but each keeps its OWN source line
   // numbers; artificial headings and omission markers never get a line number.
-  let lineMap:Array<number|null>|undefined;
+  let lineMap:Array<number|null>|undefined,sourceStyled:StyledSource|undefined;
   let text=members[0]!.text;
   if(members.length>1){
-   const rows:string[]=[],numbers:Array<number|null>=[];
+   const rows:string[]=[],numbers:Array<number|null>=[],styles:CodeSpan[][]=[];
    for(const [index,member] of members.entries()){
-    if(index){rows.push('');numbers.push(null);}
+    if(index){rows.push('');numbers.push(null);styles.push([]);}
     rows.push('['+member.title+']');numbers.push(null);
-    const value=member.text.replace(/\r\n?/g,'\n');
-    const lines=(value.endsWith('\n')?value.slice(0,-1):value).split('\n');
+    styles.push([{text:'['+member.title+']',color:'#ABC5E1'}]);
+    const highlighted=styleTerminalSource(member.text,member.language);
+    const lines=highlighted.lines;
     const omissionIndex=lines.findIndex(v=>/… \[中间省略 \d+ 字节/.test(v));
     for(const [n,line] of lines.entries()){
-     rows.push(line);
+     rows.push(line);styles.push(highlighted.spans[n]??[]);
      const relative=omissionIndex>=0&&n>omissionIndex&&member.sourcePreview?.tailStartLine!==undefined
       ?member.sourcePreview.tailStartLine+(n-omissionIndex-1):
       n+1;
@@ -47,6 +50,7 @@ export function createDetailSections(blocks:readonly DetailBlock[],budget=4096):
     }
    }
    text=rows.join('\n');lineMap=numbers;
+   sourceStyled={lines:rows,spans:styles,hasNativeColor:members.some(x=>/\x1b\[[0-9;]*m/.test(x.text))};
   }
   const mode=members.every(block=>block.preference==='head')?'head':
     members.every(block=>block.preference==='tail')?'tail':'balanced' as PreviewPreference;
@@ -54,7 +58,8 @@ export function createDetailSections(blocks:readonly DetailBlock[],budget=4096):
   const title=members.length===1?members[0]?.title:undefined;
   const startLine=members.length===1?members[0]?.startLine:undefined;
   const sourcePreview=members.length===1?members[0]?.sourcePreview:undefined;
-  return{kind,text,mode,language,title,startLine,sourcePreview,lineMap,size:bytes(text)};
+  return{kind,text,mode,language,title,startLine,sourcePreview,lineMap,sourceStyled,
+   sourceText:sourcePreview?.truncated?undefined:text,size:bytes(text)};
  }).filter((group):group is NonNullable<typeof group>=>group!==null);
  if(!groups.length)return[];
  if(groups.length===1){
@@ -62,7 +67,9 @@ export function createDetailSections(blocks:readonly DetailBlock[],budget=4096):
   return[{kind:g.kind,preview:sizedPreview(g,budget),
     ...(g.language?{language:g.language}:{}),
    ...(g.title?{title:g.title}:{}),...(g.startLine!==undefined?{startLine:g.startLine}:{}),
-   ...(g.lineMap?{lineMap:g.lineMap}:{})}];
+   ...(g.lineMap?{lineMap:g.lineMap}:{}),
+   ...(g.sourceText?{sourceText:g.sourceText}:{}),
+   ...(g.sourceStyled?{sourceStyled:g.sourceStyled}:{})}];
  }
  // Account for both groups' budgets and leave unused capacity for the longer
  // section. 128 B minimum leaves room for UTF-8 omissions and a visible label.
@@ -82,7 +89,9 @@ export function createDetailSections(blocks:readonly DetailBlock[],budget=4096):
   kind:g.kind,preview:sizedPreview(g,g.kind==='input'?inputBudget:outputBudget),
   ...(g.language?{language:g.language}:{}),
   ...(g.title?{title:g.title}:{}),...(g.startLine!==undefined?{startLine:g.startLine}:{}),
-  ...(g.lineMap?{lineMap:g.lineMap}:{})
+  ...(g.lineMap?{lineMap:g.lineMap}:{}),
+  ...(g.sourceText?{sourceText:g.sourceText}:{}),
+  ...(g.sourceStyled?{sourceStyled:g.sourceStyled}:{})
  }));
 }
 function ratio(mode:PreviewPreference):number|undefined{

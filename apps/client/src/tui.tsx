@@ -263,7 +263,8 @@ const DetailCell=React.memo(function DetailCell({item,width}:{item:DetailLine;wi
   const digits=item.lineDigits??String(item.sourceLine??'?').length;
   // Pane separator │ + one inset cell + logical number + │ + one space.
   // Soft wraps retain the gutter but leave the number entirely blank.
-  const gutter=' '+(item.continued?' '.repeat(digits):String(item.sourceLine??'?').padStart(digits))+' │ ';
+  const gutter=' '+(item.continued?' '.repeat(digits):
+    (item.gutterLabel??String(item.sourceLine??'?')).padStart(digits))+' │ ';
   const room=Math.max(0,width-cellWidth(gutter));
   return <Box height={1} flexShrink={0} width={width}>
    <Text color={palette.line}>{gutter}</Text>

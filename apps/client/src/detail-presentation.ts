@@ -5,9 +5,10 @@ import {toolRow,type Tone,type Segment} from './tool-presentation.js';
 import {cellWidth,fit,wrapLines} from './tui-layout.js';
 import {highlightCodeLines,languageForPath,languageForCommand,type CodeSpan} from './syntax-highlight.js';
 import {normalizeProcessStderr} from './terminal-errors.js';
+import {styleTerminalSource,detectOutputLanguage,type StyledSource} from './terminal-highlight.js';
 
 export type DetailLine={text:string;tone?:Tone;bold?:boolean;italic?:boolean;label?:string;section?:string;syntax?:CodeSpan[]|undefined;
- sourceLine?:number|null;continued?:boolean;lineDigits?:number};
+ sourceLine?:number|null;continued?:boolean;lineDigits?:number;gutterLabel?:string};
 type Fields=Record<string,any>;
 const line=(text:string,tone:Tone='default',bold=false,italic=false):DetailLine=>({text,tone,bold,italic});
 const label=(key:string,value:unknown,tone:Tone='default'):DetailLine=>({text:clean(String(value??'—'),1000),label:key,tone});
@@ -31,34 +32,20 @@ export function fullNumberedBlock(raw:unknown,language?:string,startLine:number|
 export function numberedBlock(raw:unknown,language?:string,startLine:number|null=1,
  maxLines=280,maxChars=64000,expand:'i'|'o'='o'):DetailLine[]{
  if(typeof raw!=='string')return [line('（内容不可用）','muted',false,true)];
- const normalized=raw.replace(/\r\n?/g,'\n');
+ // Highlight the WHOLE logical source first, then select visible lines.
+ // This preserves multi-line lexical state and original ANSI colors.
+ const rendered=styleTerminalSource(raw,language??detectOutputLanguage(raw));
+ const whole=rendered.lines.join('\n');
  const budget=maxLines===Infinity&&maxChars===Infinity?Infinity:Math.min(maxChars,4096);
- const preview=Number.isFinite(budget)?createPreview(normalized,budget):null;
- const text=preview?.text??normalized,lines=text.split('\n');
- const displayedSource=lines.slice(0,maxLines);
- const lineLimit=maxLines===Infinity&&maxChars===Infinity?Infinity:500;
- const shownSource=displayedSource.map(value=>value.slice(0,lineLimit));
- const source=shownSource.map(value=>clean(value,Infinity).replace(/\t/g,'  '));
- const lineDigits=startLine===null?1:String(startLine+Math.max(0,source.length-1)).length;
- const highlighted=language?highlightCodeLines(source,language):undefined;
- const result:DetailLine[]=source.map((v,index)=>{
-  if(highlighted)return {...line(v,'muted'),syntax:highlighted[index],sourceLine:startLine===null||preview?.truncated?null:startLine+index,lineDigits};
-  const tone:Tone=v.startsWith('+++')||v.startsWith('+')?'success':
-   v.startsWith('---')||v.startsWith('-')?'danger':v.startsWith('@@')?'warning':'default';
-  const comment=/^\s*(\/\/|#\s)/.test(v);
-  return {...line(v,comment?'muted':tone,v.startsWith('@@'),comment),sourceLine:startLine===null||preview?.truncated?null:startLine+index,lineDigits};
- });
- const shown=displayedSource.join('\n').length;
- const represented=shownSource.join('\n').length;
- const missingChars=Math.max(0,normalized.length-represented);
- let missingLines=0;
- for(let i=shown;i<normalized.length;i++)if(normalized.charCodeAt(i)===10)missingLines++;
- if(missingChars>0||missingLines>0){
-  if(!preview?.truncated||shownSource.length<lines.length||lineLimit!==Infinity&&shownSource.some((v,i)=>v.length<displayedSource[i]!.length))
-   result.push(line('... +'+missingLines+' 行, '+missingChars+' 字符 (按 '+expand+' 展开)','warning'));
+ if(Number.isFinite(budget)){
+  const preview=createPreview(whole,budget);
+  return numberedPreviewBlock(preview,language,startLine,undefined,raw,expand,rendered);
  }
-
- return result;
+ const digitCount=startLine===null?1:String(startLine+Math.max(0,rendered.lines.length-1)).length;
+ return rendered.lines.map((value,index)=>({
+  ...line(value,'muted'),syntax:rendered.spans[index],
+  sourceLine:startLine===null||index===rendered.lines.length-1&&value==='' ?null:startLine+index,lineDigits:digitCount
+ }));
 }
 const loc=(x:Fields)=>x.path??x.name??x.sourcePath??x.filename??'';
 const cmd=(x:Fields)=>{const c=x.command;if(!c||typeof c!=='object')return '';return c.mode==='shell'?String(c.script??''):[c.program,...(Array.isArray(c.args)?c.args:[])].join(' ');};
@@ -123,41 +110,83 @@ function batchLines(input:Fields,result:Fields,running:boolean):DetailLine[]{
  return lines;
 }
 
-// Preserve the original logical line numbers on both sides of a clipped
-// preview. Marker lines are decoration and never receive a fictitious number.
+// Slicing a preview must NOT cause a second independent syntax-highlight pass.
+// For original data still available, select pre-highlighted spans by the
+// original logical line positions (including continuous multiline syntax).
+function selectedSpans(
+ source:StyledSource|undefined,index:number,visible:string,side:'head'|'tail'
+):CodeSpan[]|undefined{
+ if(!source||index<0||index>=source.lines.length)return undefined;
+ const whole=source.lines[index]??'';
+ if(!whole)return [];
+ const spans=source.spans[index]??[];
+ const total=whole.length;
+ const length=visible.length;
+ if(whole===visible)return spans;
+ const start=side==='tail'?Math.max(0,total-length):0;
+ const end=Math.min(total,start+length);
+ let cursor=0;
+ const result:CodeSpan[]=[];
+ for(const span of spans){
+  const from=Math.max(start,cursor),to=Math.min(end,cursor+span.text.length);
+  if(from<to)result.push({text:span.text.slice(from-cursor,to-cursor),color:span.color});
+  cursor+=span.text.length;
+ }
+ return result.map(s=>s);
+}
 export function numberedPreviewBlock(preview:OutputPreview,language?:string,startLine:number|null=1,
- lineMap?:Array<number|null>):DetailLine[]{
- const split=/\n… \[中间省略 \d+ 字节 · 查看完整输出\] …\n/.exec(preview.text);
- const rows=(text:string,start:number|null,rawOffset=0)=>{
-  const cleanText=text.endsWith('\n')?text.slice(0,-1):text;
-  if(!cleanText)return [];
-  const values=fullNumberedBlock(cleanText,language,start);
-  if(lineMap){
-   const digits=String(Math.max(1,...lineMap.filter((n):n is number=>n!==null))).length;
-   return values.map((row,i)=>{
-    const n=lineMap[rawOffset+i];
-    if(typeof n==='number')return {...row,sourceLine:n,lineDigits:digits};
-    const {sourceLine,lineDigits,...plain}=row;
-    return plain;
-   });
+ lineMap?:Array<number|null>,originalSource?:string,expand:'i'|'o'='o',
+ sourceStyled?:StyledSource):DetailLine[]{
+ const split=/\n… \[中间省略 (\d+) 字节(?: · 查看完整输出)?\] …\n/.exec(preview.text);
+ const rendered=sourceStyled??(originalSource===undefined?undefined:
+  styleTerminalSource(originalSource,language??detectOutputLanguage(originalSource)));
+ const fromRows=(text:string,start:number|null,rawOffset:number,side:'head'|'tail')=>{
+  if(!text)return [];
+  const normalized=styleTerminalSource(text,language??detectOutputLanguage(text));
+  const rows=text.endsWith('\n')?normalized.lines.slice(0,-1):normalized.lines;
+  const maxLogical=Math.max((start??1)+(rendered?.lines.length??rows.length)-1,
+   (startLine??1)+(preview.totalLines??0)-1,start??0);
+  const digits=String(Math.max(1,maxLogical)).length;
+  const mapped:DetailLine[]=[];
+  for(let index=0;index<rows.length;index++){
+   const text=rows[index]??'';
+   const sourceIndex=lineMap?rawOffset+index:
+    start===null? -1: start-startLine!+index;
+   const lexical=selectedSpans(rendered,sourceIndex,text,side);
+   const spans=lexical??normalized.spans[index];
+   const row:DetailLine={...line(text,'muted'),syntax:spans,lineDigits:digits};
+   const n=lineMap?.[rawOffset+index]??(start===null?null:start+index);
+   if(typeof n==='number')row.sourceLine=n;
+   else if(start===null||lineMap)delete row.lineDigits;
+   mapped.push(row);
   }
-  return start===null?values.map(({sourceLine,lineDigits,...item})=>item):values;
+  return mapped;
  };
  if(!preview.truncated||!split)
-  return rows(preview.text,startLine);
+  return fromRows(preview.text,startLine,0,'head');
  const head=preview.text.slice(0,split.index);
  const tail=preview.text.slice(split.index+split[0].length);
+ const headCount=styleTerminalSource(head).lines.length;
  const tailStart=startLine!==null&&preview.tailStartLine!==undefined
   ?startLine+preview.tailStartLine-1:null;
+ const hidden=preview.totalLines!==undefined&&preview.headLines!==undefined&&
+  preview.tailStartLine!==undefined
+   ?Math.max(0,preview.tailStartLine-preview.headLines-1):null;
+ // Only a MIDDLE omission occupies a line-number gutter. Edge omissions retain
+ // the previous unobtrusive ellipsis presentation.
+ const middle=head.length>0&&tail.length>0;
+ const ellipsis:DetailLine={
+  ...line(middle&&hidden!==null?
+   (hidden>0?'已隐藏 '+hidden+' 行，按 '+expand+' 展开':
+    '已隐藏 '+preview.omittedBytes+' 字节，按 '+expand+' 展开'):'…','muted'),
+  ...(middle?{sourceLine:null,gutterLabel:'...',lineDigits:String(Math.max(1,preview.totalLines??1)).length}:{})
+ };
+ const tailOffset=preview.tailStartLine===undefined?0:preview.tailStartLine-1;
  const result:DetailLine[]=[
-  ...rows(head,startLine),
-  line('…','muted'),
-  ...rows(tail,tailStart,preview.tailStartLine===undefined?0:preview.tailStartLine-1)
+  ...fromRows(head,startLine,0,'head'),
+  ellipsis,
+  ...fromRows(tail,tailStart,tailOffset,'tail')
  ];
- if(startLine!==null&&tailStart!==null){
-  const digits=String(Math.max(tailStart,preview.totalLines??0)).length;
-  for(const item of result)if(item.sourceLine!==undefined)item.lineDigits=digits;
- }
  return result;
 }
 function contentFor(a:ActivityEntry,i:Fields,r:Fields,liveLog=""):DetailLine[]{
@@ -195,9 +224,9 @@ function contentFor(a:ActivityEntry,i:Fields,r:Fields,liveLog=""):DetailLine[]{
    break;
   case 'fs_write':
    meta([['PATH',i.path],['MODE',i.mode],['BYTES',r.writtenBytes],['SHA256',r.sha256]]);
-   content(i.mode==='append'?'APPENDED CONTENT':'FILE CONTENT',
-    i.encoding==='base64'?'二进制/Base64 输入不作为源码预览':i.content,
-    'input','balanced',languageForPath(i.path),i.mode==='append'?null:1,
+   if(i.encoding==='base64')out.push(line('二进制/Base64 输入不作为源码显示','muted'));
+   else content(i.mode==='append'?'APPENDED CONTENT':'FILE CONTENT',i.content,
+    'input','balanced',languageForPath(i.path),1,
     i.contentPreviewMeta?{...i.contentPreviewMeta,text:i.content}:undefined);
    if(i.previewLimited&&!blocks.length)content('INPUT','当前摘要省略正文；按 i 读取完整输入','input');
    break;
@@ -246,7 +275,7 @@ function contentFor(a:ActivityEntry,i:Fields,r:Fields,liveLog=""):DetailLine[]{
       {...r.outputPreviewMeta,text:r.outputPreview}:undefined);
    if(!liveLog&&r.outputPreviewKind==='tail'&&r.outputPreviewOmittedChars>0)
     out.push(line('历史摘要仅保留末尾，前面已省略 '+r.outputPreviewOmittedChars+' 字符 · 按 o 查看完整日志','warning'));
-   content('STDERR',normalizeProcessStderr(r.stderr??''),'output','tail');
+   content('STDERR',r.stderr??'','output','tail');
    if(r.outputPreviewMeta?.hasFullOutput===false)out.push(line('执行器已达到存储上限，部分输出不可恢复','danger'));
 
    break;
@@ -296,7 +325,8 @@ function contentFor(a:ActivityEntry,i:Fields,r:Fields,liveLog=""):DetailLine[]{
   if(group.title)out.push(line(group.title,'muted',true));
   const preview=group.preview;
   const sourceStart=group.startLine===undefined?null:group.startLine;
-  out.push(...numberedPreviewBlock(preview,group.language,sourceStart,group.lineMap));
+  out.push(...numberedPreviewBlock(preview,group.language,sourceStart,group.lineMap,group.sourceText,
+    group.kind==='input'?'i':'o',group.sourceStyled));
   // The inline omission marker already explains a real truncation; never
   // add another redundant warning underneath it.
  }

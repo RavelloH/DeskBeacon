@@ -25,7 +25,7 @@ test('quote-heavy stdout does not turn the stable cached DETAIL into a generic p
    time:Date.now(),description:'echo',request_json:saved.input,result:saved.result};
   const rows=detailPresentation(e,e.time);
   assert.equal(rows.some(row=>row.section==='OUTPUT'),true);
-  assert.equal(rows.filter(row=>row.text==='…').length,1);
+  assert.equal(rows.filter(row=>row.gutterLabel==='...'&&row.text.includes('已隐藏')).length,1);
  }finally{rmSync(dir,{recursive:true,force:true});}
 });
 

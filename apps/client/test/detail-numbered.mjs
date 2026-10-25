@@ -12,7 +12,7 @@ const digits=numberedBlock('a\nb\nc',undefined,998);
 assert.deepEqual(digits.map(item=>item.lineDigits),[4,4,4],
  'gutter width must accommodate the largest source line number without a five-cell minimum');
 assert.ok(wrapped.some(x=>x.sourceLine===312&&!x.continued));
-assert.equal(numberedBlock('unknown\nline',undefined,null)[0]?.sourceLine,null);
+assert.equal(numberedBlock('unknown\nline',undefined,null)[0]?.sourceLine,undefined);
 const entry={id:'test',grant_id:'grant',actor_name:'ChatGPT',tool:'fs_read',status:'completed',
  time:Date.now(),description:'read',request_json:JSON.stringify({path:'/tmp/a.ts',lineOffset:310}),
  result:JSON.stringify({data:{content:'hello\nworld',linesRead:2,readBytes:11,lineOffset:310}})};

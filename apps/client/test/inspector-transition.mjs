@@ -49,7 +49,7 @@ test('multiple source files preserve their independent line numbers, even with a
  assert.equal(numbers[0],1);
  assert.equal(numbers.at(-1),1257);
  assert.ok(numbers.includes(1178)||numbers.some(n=>n>1178),'the second file uses its own range');
- assert.ok(lines.some(line=>line.text==='…'));
+ assert.ok(lines.some(line=>line.gutterLabel==='...'&&line.text.includes('已隐藏')));
 });
 test('full command output always numbers actual logical lines; no truncation marker when complete',()=>{
  const source=Array.from({length:1180},(_,i)=>'line'+(i+1)).join('\n');
