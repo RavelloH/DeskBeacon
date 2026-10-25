@@ -23,5 +23,6 @@ const multi={...entry,tool:'fs_read_many',
  result:JSON.stringify({data:{files:[{path:'/tmp/a.ts',lineOffset:319,content:'x\ny'}]}})};
 assert.deepEqual(detailPresentation(multi,multi.time).filter(x=>x.sourceLine!==undefined).map(x=>x.sourceLine),[320,321]);
 const bytes={...entry,request_json:JSON.stringify({path:'/tmp/a.ts',byteOffset:50}),result:JSON.stringify({data:{content:'line'}})};
-assert.equal(detailPresentation(bytes,bytes.time).find(x=>x.sourceLine!==undefined)?.sourceLine,null);
+assert.equal(detailPresentation(bytes,bytes.time).find(x=>x.sourceLine!==undefined)?.sourceLine,undefined,
+ 'unknown byte offsets have no source line number gutter');
 console.log('PASS numbered logical lines, continuation gutters, nonzero file read ranges and unknown byte-offset line numbers');

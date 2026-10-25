@@ -45,7 +45,7 @@ function byteSuffix(bytes:Uint8Array,budget:number):string{
  */
 export function previewFromEdges(
  headSource:string,tailSource:string,originalBytes:number,budget:number,
- options:{hasFullOutput?:boolean}={}
+ options:{hasFullOutput?:boolean;headRatio?:number}={}
 ):OutputPreview{
  if(!Number.isSafeInteger(budget)||budget<64)throw new RangeError("INVALID_PREVIEW_BUDGET");
  if(!Number.isSafeInteger(originalBytes)||originalBytes<0)throw new RangeError("INVALID_ORIGINAL_BYTES");
@@ -59,7 +59,10 @@ export function previewFromEdges(
  const strategy:PreviewStrategy=originalBytes<=budget*4?"balanced":"result_priority";
  // Reserve room for a UTF-8 marker and its variable-length omitted byte count.
  const contentBudget=Math.max(0,budget-80);
- const headBudget=Math.floor(contentBudget*(strategy==="balanced"?.5:.25));
+ const defaultRatio=strategy==="balanced"?.5:.25;
+ const headRatio=options.headRatio??defaultRatio;
+ if(!Number.isFinite(headRatio)||headRatio<0||headRatio>1)throw new RangeError("INVALID_PREVIEW_RATIO");
+ const headBudget=Math.floor(contentBudget*headRatio);
  const tailBudget=contentBudget-headBudget;
  let head=bytePrefix(headBytes,headBudget),tail=byteSuffix(tailBytes,tailBudget);
  let shown=byteLength(head)+byteLength(tail);
@@ -70,7 +73,7 @@ export function previewFromEdges(
   displayedBytes:shown,omittedBytes:omitted,hasFullOutput};
 }
 export function createPreview(
- text:string,budget:number,options:{hasFullOutput?:boolean}={}
+ text:string,budget:number,options:{hasFullOutput?:boolean;headRatio?:number}={}
 ):OutputPreview{
  const bytes=encoder.encode(text);
  // Both arguments denote *actual* ends of the same UTF-8 input.

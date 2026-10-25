@@ -14,13 +14,15 @@ const parse=(value?:string|null):Record<string,unknown>=>{
  catch{return{};}
 };
 export function missingSelectedFileSource(entry:ActivityEntry):Source|null{
- if(entry.tool==='fs_write'){
+ if(entry.tool==='fs_write'||entry.tool==='fs_edit'){
   const input=parse(entry.request_json);
-  return typeof input.content==='string'&&input.content!=='[redacted]'?null:'input';
+  if(entry.tool==='fs_edit')
+   return input.previewLimited===true?'input':null;
+  return input.previewLimited===true||typeof input.content!=='string'||input.content==='[redacted]'?'input':null;
  }
  if(entry.tool==='fs_read'){
   const result=parse(entry.result);
-  return typeof result.content==='string'&&result.content!=='[redacted]'?null:'result';
+  return result.previewLimited===true||typeof result.content!=='string'||result.content==='[redacted]'?'result':null;
  }
  if(entry.tool==='fs_read_many'){
   const result=parse(entry.result);

@@ -73,6 +73,11 @@ export function inspectorResult(entry:ActivityEntry,source:FullSource|null):Deta
  const rows:DetailLine[]=[];
  if(entry.record_state==='legacy_partial')rows.push(message('该记录由旧版本迁移，部分原始内容可能已丢失','warning'));
  if(!source.available)rows.push(message('历史完整回执已缺失；以下仅为摘要缓存，无法恢复被删减的数据。','warning'));
+ if(entry.tool==='fs_edit'&&/^(?:Index:|={20,}|--- )/.test(raw)){
+  rows.push(heading('DIFF · OUTPUT'));
+  rows.push(...fullNumberedBlock(raw,'diff'));
+  return rows;
+ }
  const result=data(raw);
  if(result){
   const payload=result.data&&typeof result.data==='object'&&!Array.isArray(result.data)?

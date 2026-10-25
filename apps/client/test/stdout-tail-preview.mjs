@@ -31,9 +31,9 @@ test('journal tail preview labels truncated stdout without inventing first-line 
    time:Date.now(),grant_id:'agent',actor_name:'ChatGPT',
    request_json:journal.getPreview(path).input,result:JSON.stringify(preview)};
   const summary=detailPresentation(entry,entry.time);
-  assert.ok(summary.some(v=>v.section==='STDOUT · 末尾预览'));
+  assert.ok(summary.some(v=>v.section==='OUTPUT'));
   assert.ok(summary.some(v=>v.text.includes('前面已省略')&&v.text.includes('按 o')));
-  const pos=summary.findIndex(v=>v.section==='STDOUT · 末尾预览');
+  const pos=summary.findIndex(v=>v.section==='OUTPUT');
   const tail=summary.slice(pos+1).filter(v=>v.sourceLine!==undefined);
   assert.equal(tail.length,0,'tail rows must not advertise incorrect original line numbers');
   const item=detailLines(entry);

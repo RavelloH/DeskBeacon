@@ -1,3 +1,4 @@
+import {createPreview} from '@deskbeacon/protocol';
 import {createHash} from 'node:crypto';
 import {mkdirSync,openSync,writeSync,readSync,closeSync,statSync,existsSync,fsyncSync} from 'node:fs';
 import {join,dirname,resolve,sep} from 'node:path';
@@ -72,7 +73,7 @@ export class RecordJournal{
   r.bytes+=line.length;
   if(strict)fsyncSync(r.fd);
  }
- stream(id:string,stream:'stdout'|'stderr',data:Buffer):void{
+ stream(id:string,stream:'stdout'|'stderr'|'diff',data:Buffer):void{
   const r=this.open.get(id);if(!r)throw Error('RECORD_NOT_OPEN');
   for(let i=0;i<data.length;i+=streamChunkBytes){
    const chunk=data.subarray(i,i+streamChunkBytes);
@@ -81,9 +82,10 @@ export class RecordJournal{
    this.append(id,text===undefined?
      {type:'stream',stream,encoding:'base64',data:chunk.toString('base64')}:
      {type:'stream',stream,encoding:'utf8',text});
-   if(stream==='stdout')r.stdoutBytes+=chunk.length;else r.stderrBytes+=chunk.length;
+   if(stream==='stdout')r.stdoutBytes+=chunk.length;
+   else if(stream==='stderr')r.stderrBytes+=chunk.length;
   }
-  if(data.length)this.onOutput?.(id,stream,stream==='stdout'?r.stdoutBytes:r.stderrBytes);
+  if(data.length&&stream!=='diff')this.onOutput?.(id,stream,stream==='stdout'?r.stdoutBytes:r.stderrBytes);
  }
  finish(id:string,result:unknown,status:'completed'|'failed',options:{background?:boolean}={}):void{
   const r=this.open.get(id);if(!r)throw Error('RECORD_NOT_OPEN');
@@ -152,13 +154,30 @@ export class RecordJournal{
    // Preserve compact file metadata when a JSONL preview exceeds the list limit.
    // Full file content is still available through the on-demand IPC inspector.
    const object=value&&typeof value==='object'&&!Array.isArray(value)?value as Record<string,unknown>:{};
+   if(tool==='fs_edit'&&kind==='result'){
+    const {path,sha256,bytes,replacements,normalizedEol,changed,dryRun,addedLines,removedLines,
+      diffStored,diffBytes,diffTruncated}=object;
+    return JSON.stringify({path,sha256,bytes,replacements,normalizedEol,changed,dryRun,
+      addedLines,removedLines,diffStored,diffBytes,diffTruncated,
+      ...(typeof object.diff==='string'?{diff:createPreview(object.diff,2048).text}:{}),
+      previewLimited:true});
+   }
+   if(tool==='fs_edit'&&kind==='input'){
+    const {path,mode,expectedHash,dryRun}=object;
+    return JSON.stringify({path,mode,expectedHash,dryRun,
+      previewInput:createPreview(raw,3072).text,previewLimited:true});
+   }
    if(tool==='fs_write'&&kind==='input'){
     const {path,mode,encoding,overwrite,workspaceId}=object;
-    return JSON.stringify({path,mode,encoding,overwrite,workspaceId,previewLimited:true});
+    return JSON.stringify({path,mode,encoding,overwrite,workspaceId,
+      ...(typeof object.content==='string'?{content:createPreview(object.content,3072).text}:{}),
+      previewLimited:true});
    }
    if(tool==='fs_read'&&kind==='result'){
     const {path,encoding,readBytes,totalBytes,linesRead,lineOffset,truncated}=object;
-    return JSON.stringify({path,encoding,readBytes,totalBytes,linesRead,lineOffset,truncated,previewLimited:true});
+    return JSON.stringify({path,encoding,readBytes,totalBytes,linesRead,lineOffset,truncated,
+      ...(typeof object.content==='string'?{content:createPreview(object.content,3072).text}:{}),
+      previewLimited:true});
    }
    if(tool==='fs_read_many'&&kind==='result'){
     const {successCount,failureCount,bytesUsed,truncated}=object;
@@ -208,7 +227,7 @@ export class RecordJournal{
  getResultRaw(relative:string):string|null{
   const value=this.getResult(relative);return value?JSON.stringify(value.result):null;
  }
- getRecordStream(relative:string,stream:'stdout'|'stderr'|'input'|'result',offset:number,budget:number):RecordPage{
+ getRecordStream(relative:string,stream:'stdout'|'stderr'|'input'|'result'|'diff',offset:number,budget:number):RecordPage{
   if(!Number.isSafeInteger(offset)||offset<0||!Number.isInteger(budget)||budget<1||budget>1048576)throw Error('INVALID_RECORD_CURSOR');
   if(!this.exists(relative))return{text:'',nextOffset:0,totalBytes:0,hasMore:false,stream,available:false};
   if(stream==='input'||stream==='result'){

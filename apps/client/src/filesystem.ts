@@ -6,7 +6,8 @@ import { resolve, dirname, basename, join, relative, isAbsolute, sep } from 'nod
 import { spawn } from 'node:child_process';
 import {ripgrepExecutable} from './ripgrep.js';
 import { editText, type EditTextRequest } from './edit-text.js';
-import { diffLines } from 'diff';
+import { diffLines,createTwoFilesPatch } from 'diff';
+import {createPreview} from '@deskbeacon/protocol';
 import AdmZip from 'adm-zip';
 import * as tar from 'tar';
 
@@ -247,7 +248,7 @@ async function archive(i:Input) {
    filter:(p:string,e:any)=>{safeArchiveEntry(target,p);return e.type!=='SymbolicLink'&&e.type!=='Link';}});
  return{extracted:count,expandedBytes:total,target};
 }
-export async function fileTool(tool:string,input:Input,workspace?:string):Promise<any>{
+export async function fileTool(tool:string,input:Input,workspace?:string,onDiff?:(diff:string)=>void):Promise<any>{
  const path=input.path?location(input.path,workspace):'';
  switch(tool){
  case 'fs_read_many':{
@@ -356,14 +357,20 @@ export async function fileTool(tool:string,input:Input,workspace?:string):Promis
      addedLines=difference.filter(part=>part.added).reduce((sum,part)=>sum+(part.count??0),0);
      removedLines=difference.filter(part=>part.removed).reduce((sum,part)=>sum+(part.count??0),0);
    }
-   const diff=input.dryRun&&result.text!==original
-     ?(await import('diff')).createTwoFilesPatch(path,path,original,result.text,'before','after',{context:3}).slice(0,65_536)
-     :undefined;
+   // Preserve the REAL before/after diff for every edit, not an approximation
+   // generated from input snippets. The complete diff is saved locally; only
+   // its bounded preview is returned through the MCP result frame.
+   const fullDiff=result.text!==original
+     ?createTwoFilesPatch(path,path,original,result.text,'before','after',{context:3})
+     :'';
    if(!input.dryRun&&result.text!==original)await atomicWrite(path,changed,true);
+   if(fullDiff&&onDiff)onDiff(fullDiff);
+   const preview=createPreview(fullDiff,8192);
    return{path,sha256:hash(changed),bytes:changed.length,
      replacements:result.replacements,normalizedEol:result.normalizedEol,
      changed:result.text!==original,dryRun:input.dryRun===true,
-     ...(diff!==undefined?{diff,diffTruncated:diff.length>=65_536}:{}) ,
+     ...(fullDiff?{diff:preview.text,diffTruncated:preview.truncated,
+       diffStored:!!onDiff,diffBytes:preview.originalBytes,diffPreviewMeta:preview}:{}),
      ...(addedLines!==undefined&&removedLines!==undefined?{addedLines,removedLines}:{})};
  }
  case 'fs_manage':{

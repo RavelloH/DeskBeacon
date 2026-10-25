@@ -597,11 +597,17 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon',onInten
  useEffect(()=>{
   setSelectedOutputPreview(null);
   if(demo||!baseEntry||view!=='main'||baseEntry.status==='running'||
-     !['exec_foreground','exec_background'].includes(baseEntry.tool))return;
+     !['exec_foreground','exec_background','fs_edit'].includes(baseEntry.tool))return;
+  if(baseEntry.tool==='fs_edit'){
+   let old:Record<string,unknown>={};
+   try{old=JSON.parse(baseEntry.result??'{}');}catch{}
+   if(old.diffStored!==true)return;
+  }
   let alive=true;
   let clipped=false;
   try{const r=JSON.parse(baseEntry.result??'{}');clipped=r.outputLimit===true||r.data?.outputLimit===true;}catch{}
-  void loadSelectedOutputPreview(baseEntry.id,request=>requestLocal(request,8000),4096,!clipped)
+  void loadSelectedOutputPreview(baseEntry.id,request=>requestLocal(request,8000),4096,!clipped,
+   baseEntry.tool==='fs_edit'?'result':'output')
    .then(preview=>{if(alive&&preview)setSelectedOutputPreview({id:baseEntry.id,preview});})
    .catch(()=>{});
   return()=>{alive=false;};
@@ -612,6 +618,8 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon',onInten
   let result:Record<string,unknown>={};
   try{result=JSON.parse(item.result??'{}');}catch{}
   const preview=selectedOutputPreview.preview;
+  if(item.tool==='fs_edit')return {...item,result:JSON.stringify({...result,
+   diff:preview.text,diffPreviewMeta:preview,diffTruncated:preview.truncated})};
   return {...item,result:JSON.stringify({...result,outputPreview:preview.text,
    outputPreviewKind:'head_tail',outputPreviewMeta:preview,
    previewTruncated:preview.truncated,outputPreviewOmittedBytes:preview.omittedBytes})};
@@ -799,14 +807,7 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon',onInten
     inspectorOutput(inspectorSource,inspectorTab,undefined,storedOutputLimited(entry));
    return wrapDetail(inspectorProgress?[{text:inspectorProgress,tone:'muted'},...lines]:lines,Math.max(1,dw-2));
   }
-  const lines=detailPresentation(entry,tick);
-  if(liveLog&&entry.status==='running'){
-   const preview:DetailLine[]=[{text:'LIVE OUTPUT',section:'LIVE OUTPUT',tone:'muted',bold:true}];
-   // Live output is a tail; its actual first stream line is unknown.
-   preview.push(...numberedBlock(liveLog,undefined,null,20,3500));
-   const trace=lines.findIndex(row=>row.section==='TRACE');
-   lines.splice(trace<0?lines.length:trace,0,...preview);
-  }
+  const lines=detailPresentation(entry,tick,entry.status==='running'?liveLog:'');
   return wrapDetail(lines,Math.max(1,dw-2));
  },[entry?.id,entry?.status,entry?.result,entry?.request_json,model?.state,detailNow,liveLog,inspectorTab,inspectorSource,inspectorError,inspectorProgress,view,dw,status?.deviceName,status?.server,demo]);
  const scroll=Math.min(detailScroll,Math.max(0,detail.length-detailRows));

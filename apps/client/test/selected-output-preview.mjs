@@ -51,3 +51,21 @@ test('a source-level output limit is distinct from preview truncation',async()=>
  assert.equal(result.truncated,true);
  assert.equal(result.reason,'preview_budget');
 });
+
+
+test('fs_edit RESULT preview reads from existing result route, not stdout',async()=>{
+ const diff='Index: edited.ts\n'+'--- before\n'+'+++ after\n'+
+  Array.from({length:2000},(_,i)=>'+'+String(i)+' changed\n').join('');
+ const f=fixture(diff);
+ const actions=[];
+ const preview=await loadSelectedOutputPreview('fileedit',async request=>{
+  actions.push(request);
+  return f.fetch(request);
+ },4096,true,'result');
+ assert.ok(preview);
+ assert.equal(preview.truncated,true);
+ assert.ok(preview.text.startsWith('Index: edited.ts'));
+ assert.ok(preview.text.endsWith('1999 changed\n'));
+ assert.ok(actions.length>=2);
+ assert.ok(actions.every(request=>request.action==='result'&&!('stream' in request)));
+});

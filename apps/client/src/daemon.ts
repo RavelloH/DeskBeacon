@@ -693,7 +693,8 @@ export class ClientDaemon extends EventEmitter {
       if(!row)throw Error('WORKSPACE_NOT_FOUND');
       workspace=row.cwd;profile=row.shell;
     }
-    if(tool.startsWith('fs_'))return fileTool(tool,input,workspace);
+    if(tool.startsWith('fs_'))return fileTool(tool,input,workspace,
+      tool==='fs_edit'?diff=>this.journal.stream(operationId,'diff',Buffer.from(diff,'utf8')):undefined);
     if(tool==='exec_foreground'){
       const command={...input.command,cwd:input.command.cwd??workspace??process.cwd(),shellProfile:input.command.shellProfile??profile};
       return await this.supervisor.foreground(operationId,input.description,command,input.timeoutMs??input.command.timeoutMs??LIMITS.defaultForegroundTimeoutMs,

@@ -137,7 +137,13 @@ function resultPage(daemon:ClientDaemon,operationId:unknown,byteOffset:unknown,m
  if(typeof budget!=='number'||!Number.isSafeInteger(budget)||budget<1||budget>maxOutputBytes)
   throw Error('INVALID_OUTPUT_BUDGET');
  const row=daemon.db?.prepare?daemon.db.prepare('SELECT record_path FROM activity WHERE id=?').get(String(operationId)) as {record_path:string|null}|undefined:undefined;
- if(row?.record_path)return daemon.journal.getRecordStream(row.record_path,'result',offset,budget);
+ if(row?.record_path){
+  // For fs_edit, the RESULT inspector reads the actual full diff from the
+  // operation journal. Legacy records without a stored diff retain JSON view.
+  const diff=daemon.journal.getRecordStream(row.record_path,'diff',0,1);
+  if(diff.totalBytes>0)return daemon.journal.getRecordStream(row.record_path,'diff',offset,budget);
+  return daemon.journal.getRecordStream(row.record_path,'result',offset,budget);
+ }
  const bytes=fullResultBytes(daemon,safeId);
  if(!bytes)return{text:'',nextOffset:0,totalBytes:0,hasMore:false,stream:'result',available:false};
  const totalBytes=bytes.length;
