@@ -8,18 +8,17 @@ const environment = readFileSync(new URL('../src/env.ts', import.meta.url), 'utf
 const client = readFileSync(new URL('../../client/src/setup-flow.ts', import.meta.url), 'utf8');
 
 describe('upstream cf-browser-mcp OAuth contract', () => {
-  it('uses one upstream-style secret consent and KV rate limiting', () => {
-    expect(auth).toContain('env.MCP_AUTH_SECRET');
+  it('validates CapJS proof before secret and completes server-bound OAuth consent', () => {
     expect(entry).toContain('authorizationServer.getOAuthApi(env)');
     expect(auth).toContain('oauth.parseAuthRequest(request)');
-    expect(auth).toContain('oauth.describeConsent(authRequest)');
-    expect(auth).toContain('oauth.beginConsent(authRequest)');
-    expect(auth).toContain('oauth.approveConsent(request, handle');
+    expect(auth).toContain('oauth.describeConsent(parsed)');
+    expect(auth).toContain('oauth.beginConsent(parsed)');
+    expect(auth).toContain('oauth.approveConsent(request,handle)');
     expect(auth).toContain('oauth.completeAuthorization(');
-    expect(auth).toContain('rateLimitKey(request)');
-    expect(auth).toContain('expirationTtl: 3600');
-    expect(auth).toContain('attempts >= 8');
-    expect(auth).toContain('constantTimeEqual(provided, env.MCP_AUTH_SECRET)');
+    expect(auth).toContain('guardSecretRequest(request,env,form.get("cap-token"))');
+    expect(auth).toContain('checkSecret(env,form.get("secret")');
+    expect(auth).not.toContain('OAUTH_KV');
+    expect(auth).not.toContain('rateLimitKey');
   });
   it('has no second owner login or PBKDF2 account/session infrastructure', () => {
     expect(auth).not.toMatch(/OWNER_LOGIN|OWNER_PASSWORD_HASH|OWNER_SESSION_SECRET|PBKDF2|LOGIN_CSRF_COOKIE|OWNER_COOKIE|handleLogin/);
@@ -28,7 +27,7 @@ describe('upstream cf-browser-mcp OAuth contract', () => {
   });
   it('allows HTTPS and exact loopback OAuth redirects while retaining server-side 302', () => {
     expect(authPage).toContain("form-action 'self' https: http://127.0.0.1:*");
-    expect(auth).toContain('status: 302');
+    expect(auth).toContain('status:302');
     expect(auth).not.toContain('allowedFormOrigin');
   });
   it('uses upstream OAuth endpoint paths for both worker and device client', () => {

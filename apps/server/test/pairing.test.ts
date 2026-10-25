@@ -7,7 +7,7 @@ const origin='https://beacon.example.test';
 const challenge='a'.repeat(43);
 const make=()=>{
  const data=new Map<string,string>();
- const env={OAUTH_KV:{
+ const env={SECURITY_RATE_LIMIT:{limit:async()=>({success:true})},OAUTH_KV:{
   get:async(key:string,mode?:string)=>{const value=data.get(key);return mode==='json'?(value?JSON.parse(value):null):value??null;},
   put:async(key:string,value:string)=>{data.set(key,value);},
   delete:async(key:string)=>{data.delete(key);}

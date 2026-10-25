@@ -25,12 +25,13 @@ describe("Device OAuth loopback callback CSP",()=>{
   expect(await response.text()).toContain('method="post"');
   expect(callback.startsWith("http://127.0.0.1:")).toBe(true);
  });
- it("keeps server-side redirect and binds the form submission to the authorization endpoint",()=>{
-  expect(auth).toContain('import {htmlEscape, page} from "./auth-page.js"');
-  expect(auth).toContain('status: 302, headers: approved.headers');
-  expect(auth).toContain('approved.headers.set("location", redirectTo)');
-  expect(auth).toContain('status: 302, headers: denied.headers');
-  expect(auth).toContain('action="${htmlEscape(`${formActionUrl.pathname}${formActionUrl.search}`)}"');
+ it("keeps server-side redirect and escapes dynamic OAuth form details",()=>{
+  expect(auth).toContain('import {htmlEscape,page}');
+  expect(auth).toContain('status:302,headers:approved.headers');
+  expect(auth).toContain('approved.headers.set("location",redirectTo)');
+  expect(auth).toContain('status:302,headers:denied.headers');
+  expect(auth).toContain('htmlEscape(url.pathname+url.search)');
+  expect(auth).toContain('data-cap-api-endpoint="/cap/"');
  });
  it("keeps loopback host fixed and port OS-assigned instead of broadening insecure redirects",()=>{
   expect(setup).toContain("callback.listen(0,'127.0.0.1'");

@@ -1,6 +1,7 @@
 import type {OAuthHelpers} from "@cloudflare/workers-oauth-provider";
 import type {Env} from "./env.js";
 import {htmlEscape,page} from "./auth-page.js";
+import {rateLimit} from "./security.js";
 
 /** Authorization-code relay for a headless Device; no new OAuth token issuer. */
 const TTL=300;
@@ -31,17 +32,6 @@ function finishedPage(approved:boolean){
   "<h1>设备授权已确认</h1><p>请返回目标设备的终端完成配对。可以关闭此页面。</p>":
   "<h1>设备授权已取消</h1><p>设备没有获得访问权限。</p>");
 }
-function clientIp(request:Request){
- // These endpoints only run behind Cloudflare; never trust X-Forwarded-For.
- return request.headers.get("cf-connecting-ip")||"unknown";
-}
-async function rateLimit(env:Env,prefix:string,key:string,limit:number):Promise<boolean>{
- const id=prefix+":"+await digest(key);
- const n=Number(await env.OAUTH_KV.get(id)??"0");
- if(n>=limit)return false;
- await env.OAUTH_KV.put(id,String(n+1),{expirationTtl:300});
- return true; // KV limits are best-effort; edge WAF can provide stronger protection.
-}
 async function limitedText(request:Request,maxBytes:number):Promise<string>{
  const length=Number(request.headers.get("content-length")??"0");
  if(length>maxBytes)throw Error("BODY_TOO_LARGE");
@@ -65,7 +55,8 @@ async function readBody(request:Request){
  return JSON.parse(await limitedText(request,4096)) as Record<string,unknown>;
 }
 async function start(request:Request,env:Env,oauth:OAuthHelpers,origin:string){
- if(!await rateLimit(env,"pair:start:ip",clientIp(request),20))return json({error:"rate_limited"},429);
+ const denied=await rateLimit(request,env,"pair-start");
+ if(denied)return denied;
  let body:Record<string,unknown>;
  try{body=await readBody(request);}catch{return json({error:"invalid_request"},400);}
  const clientId=body.client_id,challenge=body.code_challenge,name=body.device_name;
@@ -109,7 +100,8 @@ async function activate(request:Request,env:Env,origin:string){
  if(originHeader&&originHeader!==origin)return inputPage("跨站请求已被拒绝。");
  const type=request.headers.get("content-type")??"";
  if(!type.startsWith("application/x-www-form-urlencoded"))return inputPage("表单格式无效。");
- if(!await rateLimit(env,"pair:activate:ip",clientIp(request),15))return inputPage("尝试次数过多，请稍后重试。");
+ const denied=await rateLimit(request,env,"pair-activate");
+ if(denied)return denied;
  const formText=await limitedText(request,1024).catch(()=>null);
  if(formText===null)return inputPage("验证码无效或已过期。");
  const raw=normalizedCode(new URLSearchParams(formText).get("code")??"");

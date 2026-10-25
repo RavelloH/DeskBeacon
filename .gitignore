@@ -26,3 +26,6 @@ AGENTS.md
 
 # Locally packed release-candidate tarballs
 packed/
+
+# Cap Widget assets generated from pinned npm dependencies
+/apps/server/public/

@@ -1,6 +1,8 @@
 export interface Env {
   OAUTH_KV: KVNamespace;
   DEVICE_SESSIONS: DurableObjectNamespace;
+  ASSETS: {fetch(request:Request):Promise<Response>};
+  SECURITY_RATE_LIMIT: {limit(input:{key:string}):Promise<{success:boolean}>};
 
   MCP_BASE_URL?: string;
   MCP_AUTH_SECRET: string;

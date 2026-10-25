@@ -103,6 +103,25 @@ export class DeviceSession extends DurableObject<Env> {
   }
   async fetch(request: Request): Promise<Response> {
     const pathname = new URL(request.url).pathname;
+    if(pathname==="/security/consume"){
+      if(request.method!=="POST")return json({error:"method_not_allowed"},405);
+      const value=await request.json().catch(()=>null) as {id?:unknown;expires?:unknown}|null;
+      if(!value||typeof value.id!=="string"||!(/^(?:challenge:[a-f0-9]{64}|proof:[a-f0-9-]{36})$/.test(value.id))||
+         typeof value.expires!=="number"||!Number.isSafeInteger(value.expires)||
+         value.expires<=Date.now()||value.expires>Date.now()+600_000)
+        return json({consumed:false},400);
+      this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS cap_used (id TEXT PRIMARY KEY, expires INTEGER NOT NULL)");
+      this.ctx.storage.sql.exec("DELETE FROM cap_used WHERE expires<=?",Date.now());
+      const old=this.ctx.storage.sql.exec("SELECT id FROM cap_used WHERE id=?",value.id).toArray();
+      if(old.length)return json({consumed:false},409);
+      this.ctx.storage.sql.exec("INSERT INTO cap_used(id,expires) VALUES(?,?)",value.id,value.expires);
+      return json({consumed:true});
+    }
+    if(pathname==="/revoke"){
+      if(request.method!=="POST")return json({error:"method_not_allowed"},405);
+      for(const ws of this.ctx.getWebSockets())if(ws.readyState===WebSocket.OPEN)ws.close(4003,"device authorization revoked");
+      return json({revoked:true});
+    }
     if (pathname === "/connect") {
       if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") return json(failure("INVALID_INPUT","Expected WebSocket upgrade"),426);
       const deviceId = request.headers.get("x-device-id");

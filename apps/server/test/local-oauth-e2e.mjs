@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { randomBytes, createHash } from 'node:crypto';
 import {readFileSync} from 'node:fs';
 import { ClientDaemon } from '../../client/dist/daemon.js';
+import {localSecret,solveCap} from './cap-e2e-helper.mjs';
 const base='http://127.0.0.1:8787';
 const cookies=new Map();
 function takeCookies(r){for(const h of r.headers.getSetCookie()){const part=h.split(';')[0];const p=part.indexOf('=');if(p>0)cookies.set(part.slice(0,p),part.slice(p+1));}}
@@ -39,15 +40,18 @@ async function oauth(scope,resource){
    assert.ok(screen.includes('name="scope" value="deskbeacon:agent"'));
    assert.ok(!screen.includes('name="scope" value="deskbeacon:device"'),"Agent consent must not offer Device scope");
  }
- const submit=async(secret)=>req(auth,{method:"POST",headers:{"origin":base,"content-type":"application/x-www-form-urlencoded"},
-   body:new URLSearchParams({handle,scope:"deskbeacon:device",secret,decision:"approve"})});
+ const submit=async(secret)=>{
+   const proof=await solveCap(base);
+   return req(auth,{method:"POST",headers:{"origin":base,"content-type":"application/x-www-form-urlencoded"},
+     body:new URLSearchParams({handle,scope:"deskbeacon:device",secret,decision:"approve","cap-token":proof})});
+ };
  if(scope.includes("deskbeacon:agent")){
    const denied=await submit("wrong-secret-e2e");
-   assert.equal(denied.status,200,"Invalid owner key must rerender authorize page");
+   assert.equal(denied.status,401,"Invalid owner key must rerender authorize page");
    assert.ok((await denied.text()).includes("secret"),"Incorrect secret must not issue tokens");
    console.log("PASS upstream-style incorrect secret rejected");
  }
- r=await submit("local-integration-only");
+ r=await submit(localSecret());
  if(r.status!==302)throw Error("OAuth approve "+r.status+" "+await r.text());
  const callback=new URL(r.headers.get("location"),base);
  const code=callback.searchParams.get("code");

@@ -1,4 +1,4 @@
-import {readFileSync, writeFileSync, unlinkSync} from 'node:fs';
+import {readFileSync, writeFileSync, unlinkSync, mkdirSync, copyFileSync} from 'node:fs';
 import {randomBytes} from 'node:crypto';
 import {basename, dirname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -11,6 +11,16 @@ const mode = process.argv[2] ?? 'deploy';
 if (!['deploy', 'build', 'dev'].includes(mode)) {
   throw new Error('Usage: node scripts/wrangler-run.mjs [deploy|build|dev]');
 }
+
+const assets=join(root,'apps','server','public','assets');
+mkdirSync(assets,{recursive:true});
+const serverModules=join(root,'apps','server','node_modules');
+copyFileSync(join(serverModules,'cap-widget','cap.min.js'),join(assets,'cap.min.js'));
+copyFileSync(join(serverModules,'@cap.js','wasm','browser','cap_wasm_bg.wasm'),join(assets,'cap_wasm_bg.wasm'));
+copyFileSync(join(serverModules,'@cap.js','wasm','browser','hashwx.wasm'),join(assets,'hashwx.wasm'));
+copyFileSync(join(root,'apps','server','src','manage-client.js'),join(assets,'manage.js'));
+writeFileSync(join(assets,'cap-config.js'),
+  'window.CAP_CUSTOM_WASM_URL="/assets/cap_wasm_bg.wasm";window.CAP_CUSTOM_HASHWX_URL="/assets/hashwx.wasm";',{mode:0o644});
 
 const source = readFileSync(sourcePath, 'utf8');
 const transformed = deploymentConfig(source);
