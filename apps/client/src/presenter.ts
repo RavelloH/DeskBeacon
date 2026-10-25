@@ -370,7 +370,13 @@ function resultDetailLines(tool:string,r:Record<string,any>,i:Record<string,any>
   if(r.spawnError)lines.push(`进程启动错误：${oneLine(r.spawnError,400)}`);
   if(typeof r.stdout==='string'||r.stdoutBytes!==undefined)lines.push(...outputDetailLines('stdout',r.stdout,r.stdoutBytes));
   if(typeof r.stderr==='string'||r.stderrBytes!==undefined)lines.push(...outputDetailLines('stderr',r.stderr,r.stderrBytes));
-  if(typeof r.outputPreview==='string')lines.push(...outputDetailLines('历史输出预览',r.outputPreview,undefined,r.previewTruncated===true));
+  if(typeof r.outputPreview==='string'){
+   const tail=r.outputPreviewKind==='tail';
+   const omitted=Number(r.outputPreviewOmittedChars??0);
+   lines.push(...outputDetailLines(tail?'stdout 末尾预览':'历史输出预览',
+    r.outputPreview,undefined,r.previewTruncated===true));
+   if(tail)lines.push((omitted>0?'前面省略 '+omitted+' 字符':'仅显示输出末尾')+'；按 o 查看完整输出');
+  }
  }else if(tool==='background_output'&&Array.isArray(r.results)){
   for(const [index,item] of r.results.entries()){
    const label=item?.stream==='stderr'||i.stream==='stderr'?'stderr':item?.stream==='stdout'||i.stream==='stdout'?'stdout':index===0?'stdout':'stderr';

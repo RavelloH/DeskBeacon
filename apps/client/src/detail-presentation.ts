@@ -195,7 +195,17 @@ function contentFor(a:ActivityEntry,i:Fields,r:Fields):DetailLine[]{
   case 'exec_foreground':case 'exec_background':
    meta([['CWD',i.command?.cwd??a.cwd],['EXIT',r.exitCode],['PID',r.pid],['TIMEOUT',r.timedOut]]);
    content('COMMAND',cmd(i),languageForCommand(i.command),1,'i');
-   if(r.stdout||r.outputPreview)content('STDOUT',r.stdout??normalizeProcessStderr(r.outputPreview));
+   if(typeof r.stdout==='string'&&r.stdout)content('STDOUT',r.stdout);
+   else if(typeof r.outputPreview==='string'&&r.outputPreview){
+    const tail=r.outputPreviewKind==='tail';
+    out.push(section(tail?'STDOUT · 末尾预览':'STDOUT · 历史预览'));
+    const omitted=Number.isSafeInteger(r.outputPreviewOmittedChars)&&r.outputPreviewOmittedChars>0?
+      '前面已省略 '+r.outputPreviewOmittedChars+' 字符':'部分原始输出可能未保留在摘要中';
+    out.push(line((tail?omitted:'以下仅为摘要，不代表完整输出')+' · 按 o 查看完整 STDOUT','warning'));
+    // A suffix has no known first line. Do not number its rows from 1.
+    out.push(...numberedBlock(normalizeProcessStderr(r.outputPreview),undefined,null)
+      .map(({sourceLine,lineDigits,...item})=>item));
+   }
    if(r.stderr)content('STDERR',normalizeProcessStderr(r.stderr));break;
   case 'batch':
    meta([['STAGES',i.stages?.length],['DONE',r.completed],['FAILED',r.failed],['SKIPPED',r.skipped]]);

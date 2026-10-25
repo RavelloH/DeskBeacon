@@ -136,12 +136,13 @@ export class RecordJournal{
   }finally{closeSync(fd);}
  }
  getPreview(relative:string):{input:string;result:string}{
-  let input:unknown=null,result:unknown=null,tail='',tool='';
+  let input:unknown=null,result:unknown=null,tail='',tool='',stdoutChars=0;
   for(const e of this.events(relative)){
    if(e.type==='start'){input=e.input;tool=String(e.tool??'');}
    else if(e.type==='result')result=e.data;
    else if(e.type==='stream'&&e.stream==='stdout'){
     const part=e.encoding==='base64'?new TextDecoder('utf-8').decode(Buffer.from(String(e.data??''),'base64')):String(e.text??'');
+    stdoutChars+=part.length;
     tail=(tail+part).slice(-384);
    }
   }
@@ -170,7 +171,13 @@ export class RecordJournal{
    }
    return JSON.stringify({summary:'预览过长，请查看完整日志',previewLimited:true});
   };
-  if(result&&typeof result==='object'&&tail)(result as Record<string,unknown>).outputPreview=tail.trim();
+  if(result&&typeof result==='object'&&tail){
+   const output=result as Record<string,unknown>;
+   output.outputPreview=tail.trim();
+   output.outputPreviewKind='tail';
+   output.outputPreviewOmittedChars=Math.max(0,stdoutChars-tail.length);
+   if(stdoutChars>tail.length)output.previewTruncated=true;
+  }
   return{input:preview(input,6000,'input'),result:preview(result,6000,'result')};
  }
 
