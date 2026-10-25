@@ -1,6 +1,6 @@
 import {previewFromEdges,type OutputPreview} from '@deskbeacon/protocol';
 
-type Page={text:string;totalBytes:number;nextOffset:number;available?:boolean};
+type Page={text:string;totalBytes:number;nextOffset:number;available?:boolean;totalLines?:number};
 type FetchPage=(request:{action:'output'|'result';operationId:string;stream?:'stdout';byteOffset:number;maxBytes:number})=>Promise<Page>;
 
 /** Only two small IPC pages are read for a selected DETAIL, regardless of log size. */
@@ -21,5 +21,6 @@ export async function loadSelectedOutputPreview(
    }
   }
  }
- return previewFromEdges(head.text,tail,head.totalBytes,budget,{hasFullOutput});
+ return previewFromEdges(head.text,tail,head.totalBytes,budget,
+  {...(head.totalLines===undefined?{}:{totalLines:head.totalLines}),hasFullOutput});
 }

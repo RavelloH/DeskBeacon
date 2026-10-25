@@ -1,4 +1,4 @@
-import {createPreview} from '@deskbeacon/protocol';
+import {createPreview,type OutputPreview} from '@deskbeacon/protocol';
 import {createDetailSections,type DetailBlock,type PreviewPreference} from './detail-preview.js';
 import {activityPresentation,type ActivityEntry} from './presenter.js';
 import {toolRow,type Tone,type Segment} from './tool-presentation.js';
@@ -123,14 +123,53 @@ function batchLines(input:Fields,result:Fields,running:boolean):DetailLine[]{
  return lines;
 }
 
+// Preserve the original logical line numbers on both sides of a clipped
+// preview. Marker lines are decoration and never receive a fictitious number.
+export function numberedPreviewBlock(preview:OutputPreview,language?:string,startLine:number|null=1,
+ lineMap?:Array<number|null>):DetailLine[]{
+ const split=/\n… \[中间省略 \d+ 字节 · 查看完整输出\] …\n/.exec(preview.text);
+ const rows=(text:string,start:number|null,rawOffset=0)=>{
+  const cleanText=text.endsWith('\n')?text.slice(0,-1):text;
+  if(!cleanText)return [];
+  const values=fullNumberedBlock(cleanText,language,start);
+  if(lineMap){
+   const digits=String(Math.max(1,...lineMap.filter((n):n is number=>n!==null))).length;
+   return values.map((row,i)=>{
+    const n=lineMap[rawOffset+i];
+    if(typeof n==='number')return {...row,sourceLine:n,lineDigits:digits};
+    const {sourceLine,lineDigits,...plain}=row;
+    return plain;
+   });
+  }
+  return start===null?values.map(({sourceLine,lineDigits,...item})=>item):values;
+ };
+ if(!preview.truncated||!split)
+  return rows(preview.text,startLine);
+ const head=preview.text.slice(0,split.index);
+ const tail=preview.text.slice(split.index+split[0].length);
+ const tailStart=startLine!==null&&preview.tailStartLine!==undefined
+  ?startLine+preview.tailStartLine-1:null;
+ const result:DetailLine[]=[
+  ...rows(head,startLine),
+  line('…','muted'),
+  ...rows(tail,tailStart,preview.tailStartLine===undefined?0:preview.tailStartLine-1)
+ ];
+ if(startLine!==null&&tailStart!==null){
+  const digits=String(Math.max(tailStart,preview.totalLines??0)).length;
+  for(const item of result)if(item.sourceLine!==undefined)item.lineDigits=digits;
+ }
+ return result;
+}
 function contentFor(a:ActivityEntry,i:Fields,r:Fields,liveLog=""):DetailLine[]{
  const out:DetailLine[]=[],blocks:DetailBlock[]=[];
  const meta=(fields:[string,unknown][])=>out.push(...fields.filter(([,v])=>v!==undefined&&v!==null&&v!=='')
   .map(([k,v])=>label(k,v)));
  const content=(title:string,value:unknown,kind:'input'|'output'='output',
-  preference:PreviewPreference='balanced',language?:string,startLine:number|null=1)=>{
+  preference:PreviewPreference='balanced',language?:string,startLine:number|null=1,
+  sourcePreview?:OutputPreview)=>{
   if(typeof value==='string'&&value&&value!=='[redacted]'){
-   blocks.push({kind,title,text:value,preference,startLine,...(language?{language}:{})});
+   blocks.push({kind,title,text:value,preference,startLine,
+    ...(sourcePreview?{sourcePreview}:{}),...(language?{language}:{})});
   }
  };
  const list=(title:string,value:unknown,format:(v:Fields,n:number)=>string)=>{
@@ -150,14 +189,16 @@ function contentFor(a:ActivityEntry,i:Fields,r:Fields,liveLog=""):DetailLine[]{
      expectedReplacements:i.expectedReplacements},null,2):
     i.mode==='replace_many'?JSON.stringify(i.replacements??[],null,2):'';
    content('EDIT PARAMETERS',editInput,'input','balanced',i.mode==='patch'?'diff':'json');
-   if(typeof r.diff==='string')content('DIFF',r.diff,'output','balanced','diff');
-   else content('DIFF','旧记录没有保存实际修改差异；可按 i 查看当时的编辑参数。','output');
+   if(typeof r.diff==='string')content('DIFF',r.diff,'output','balanced','diff',1,
+     r.diffPreviewMeta?{...r.diffPreviewMeta,text:r.diff}:undefined);
+   // An unchanged edit has no diff; old receipts without a diff remain silent.
    break;
   case 'fs_write':
    meta([['PATH',i.path],['MODE',i.mode],['BYTES',r.writtenBytes],['SHA256',r.sha256]]);
    content(i.mode==='append'?'APPENDED CONTENT':'FILE CONTENT',
     i.encoding==='base64'?'二进制/Base64 输入不作为源码预览':i.content,
-    'input','balanced',languageForPath(i.path),i.mode==='append'?null:1);
+    'input','balanced',languageForPath(i.path),i.mode==='append'?null:1,
+    i.contentPreviewMeta?{...i.contentPreviewMeta,text:i.content}:undefined);
    if(i.previewLimited&&!blocks.length)content('INPUT','当前摘要省略正文；按 i 读取完整输入','input');
    break;
   case 'fs_read':
@@ -165,7 +206,8 @@ function contentFor(a:ActivityEntry,i:Fields,r:Fields,liveLog=""):DetailLine[]{
    const offset=r.lineOffset??i.lineOffset;
    const start=Number.isSafeInteger(offset)?Number(offset)+1:
      Number(i.byteOffset??0)>0?null:1;
-   content('FILE CONTENT',r.content,'output','balanced',languageForPath(i.path),start);
+   content('FILE CONTENT',r.content,'output','balanced',languageForPath(i.path),start,
+    r.contentPreviewMeta?{...r.contentPreviewMeta,text:r.content}:undefined);
    if(r.previewLimited&&!blocks.length)content('OUTPUT','当前摘要省略正文；按 o 读取完整结果','output');
    break;
   case 'fs_read_many':
@@ -176,7 +218,8 @@ function contentFor(a:ActivityEntry,i:Fields,r:Fields,liveLog=""):DetailLine[]{
     else content('FILE · '+path,file.content,'output','balanced',languageForPath(path),
       Number.isSafeInteger(file.lineOffset)?Number(file.lineOffset)+1:
       Number(i.files?.find((f:Fields)=>f.path===file.path)?.byteOffset??0)>0?null:
-      Number(i.files?.find((f:Fields)=>f.path===file.path)?.lineOffset??0)+1);
+      Number(i.files?.find((f:Fields)=>f.path===file.path)?.lineOffset??0)+1,
+      file.contentPreviewMeta?{...file.contentPreviewMeta,text:file.content}:undefined);
    }
    if(r.previewLimited&&!blocks.length)content('OUTPUT','历史摘要不包含文件正文；按 o 读取完整结果','output');
    break;
@@ -198,12 +241,14 @@ function contentFor(a:ActivityEntry,i:Fields,r:Fields,liveLog=""):DetailLine[]{
    meta([['CWD',i.command?.cwd??a.cwd],['EXIT',r.exitCode],['PID',r.pid],['TIMEOUT',r.timedOut]]);
    content('COMMAND',cmd(i),'input','balanced',languageForCommand(i.command));
    content(liveLog?'LIVE STDOUT':'STDOUT',liveLog||r.stdout||r.outputPreview,'output','tail',undefined,
-     !liveLog&&typeof r.stdout==='string'?1:null);
+     !liveLog&&typeof r.stdout==='string'||r.outputPreviewKind==='head_tail'?1:null,
+     !liveLog&&r.outputPreviewKind==='head_tail'&&r.outputPreviewMeta?
+      {...r.outputPreviewMeta,text:r.outputPreview}:undefined);
    if(!liveLog&&r.outputPreviewKind==='tail'&&r.outputPreviewOmittedChars>0)
     out.push(line('历史摘要仅保留末尾，前面已省略 '+r.outputPreviewOmittedChars+' 字符 · 按 o 查看完整日志','warning'));
    content('STDERR',normalizeProcessStderr(r.stderr??''),'output','tail');
    if(r.outputPreviewMeta?.hasFullOutput===false)out.push(line('执行器已达到存储上限，部分输出不可恢复','danger'));
-   if(r.previewTruncated||r.outputPreviewMeta?.truncated)out.push(line('按 o 查看完整 stdout / stderr','muted'));
+
    break;
   case 'batch':
    meta([['STAGES',i.stages?.length],['DONE',r.completed],['FAILED',r.failed],['SKIPPED',r.skipped]]);
@@ -250,11 +295,10 @@ function contentFor(a:ActivityEntry,i:Fields,r:Fields,liveLog=""):DetailLine[]{
   out.push(section(group.kind==='input'?'INPUT':'OUTPUT'));
   if(group.title)out.push(line(group.title,'muted',true));
   const preview=group.preview;
-  const sourceStart=preview.truncated?null:group.startLine===undefined?null:group.startLine;
-  const rows=fullNumberedBlock(preview.text,group.language,sourceStart);
-  out.push(...(sourceStart===null?rows.map(({sourceLine,lineDigits,...item})=>item):rows));
-  if(preview.truncated)out.push(line('预览已省略 '+preview.omittedBytes+
-    ' 字节 · 按 '+(group.kind==='input'?'i':'o')+' 查看完整'+(group.kind==='input'?'输入':'输出'),'warning'));
+  const sourceStart=group.startLine===undefined?null:group.startLine;
+  out.push(...numberedPreviewBlock(preview,group.language,sourceStart,group.lineMap));
+  // The inline omission marker already explains a real truncation; never
+  // add another redundant warning underneath it.
  }
  return out;
 }

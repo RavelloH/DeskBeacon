@@ -366,11 +366,12 @@ export async function fileTool(tool:string,input:Input,workspace?:string,onDiff?
    if(!input.dryRun&&result.text!==original)await atomicWrite(path,changed,true);
    if(fullDiff&&onDiff)onDiff(fullDiff);
    const preview=createPreview(fullDiff,8192);
+   const {text:diffPreviewText,...diffPreviewMeta}=preview;
    return{path,sha256:hash(changed),bytes:changed.length,
      replacements:result.replacements,normalizedEol:result.normalizedEol,
      changed:result.text!==original,dryRun:input.dryRun===true,
-     ...(fullDiff?{diff:preview.text,diffTruncated:preview.truncated,
-       diffStored:!!onDiff,diffBytes:preview.originalBytes,diffPreviewMeta:preview}:{}),
+     ...(fullDiff?{diff:diffPreviewText,diffTruncated:preview.truncated,
+       diffStored:!!onDiff,diffBytes:preview.originalBytes,diffPreviewMeta}:{}),
      ...(addedLines!==undefined&&removedLines!==undefined?{addedLines,removedLines}:{})};
  }
  case 'fs_manage':{

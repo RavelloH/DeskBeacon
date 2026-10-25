@@ -37,7 +37,8 @@ test('fs_edit retains the real applied diff in OUTPUT and bounds Agent preview',
   assert.ok(!view.some(row=>row.section==='COMPLETE RESULT · JSON'));
   const d=detailPresentation(entry,Date.now());
   assert.ok(d.some(row=>row.section==='OUTPUT'));
-  assert.ok(d.some(row=>row.text.includes('省略')));
+  assert.ok(d.some(row=>row.text==='…'));
+  assert.ok(!d.some(row=>row.text.startsWith('预览已省略')));
  }finally{rmSync(dir,{recursive:true,force:true});}
 });
 

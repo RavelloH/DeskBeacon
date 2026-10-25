@@ -39,7 +39,7 @@ describe('unified output previews',()=>{
  it('supports paged first and last edges with known full stream size',()=>{
   const content='BEGIN\n'+('line-data\\n'.repeat(10000))+'END\n';
   const result=createPreview(content,4096);
-  const edges=previewFromEdges(content.slice(0,4096),content.slice(-4096),bytes(content),4096);
+  const edges=previewFromEdges(content.slice(0,4096),content.slice(-4096),bytes(content),4096,{totalLines:result.totalLines});
   expect(edges).toEqual(result);
  });
  it('indicates original output unavailable independently of display clipping',()=>{

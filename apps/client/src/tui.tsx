@@ -1,15 +1,13 @@
-import type {OutputPreview} from '@deskbeacon/protocol';
-import {loadSelectedOutputPreview} from './selected-output-preview.js';
 import React, {useEffect, useMemo, useRef, useState, useSyncExternalStore} from 'react';
 import {render, Box, Text, useInput, useApp, useStdout} from 'ink';
 import {LiveIpcClient,type LiveEvent} from './ipc-live.js';
 import {backgroundWindow} from './background-window.js';
 import {activityPresentation, safeText, duration, elapsedText, type ActivityEntry} from './presenter.js';
 import {toolRow, type Segment, type Tone} from './tool-presentation.js';
-import {detailPresentation, wrapDetail, numberedBlock, type DetailLine} from './detail-presentation.js';
+import {detailPresentation, wrapDetail, type DetailLine} from './detail-presentation.js';
 import {inspectorInput,inspectorResult,inspectorOutput,inspectorCopyText,storedOutputLimited,type InspectorTab,type FullSource} from './detail-inspector.js';
 import {readEntireLocalStream} from './local-stream.js';
-import {loadSelectedFilePreview,missingSelectedFileSource,withSelectedFilePreview,type SelectedFilePreview} from './selected-file-preview.js';
+import {AtomicInspectorSwitch} from './inspector-transition.js';
 import {terminalWindowTitle,writeTerminalTitle} from './terminal-title.js';
 import {activityFileLink,openActivityFile,decodeSgrMouse} from './action-link.js';
 import {logEvent,flushLogs} from './diagnostics.js';
@@ -376,11 +374,10 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon',onInten
  const inspectorSourceRef=useRef<FullSource|null>(null);
  inspectorSourceRef.current=inspectorSource;
  const [inspectorError,setInspectorError]=useState('');
- const [inspectorProgress,setInspectorProgress]=useState('');
- const [selectedFilePreview,setSelectedFilePreview]=useState<SelectedFilePreview|null>(null);
- const [selectedOutputPreview,setSelectedOutputPreview]=useState<{id:string;preview:OutputPreview}|null>(null);
+ const inspectorSwitcherRef=useRef(new AtomicInspectorSwitch<FullSource>());
+ const inspectorEntryRef=useRef<string|null>(null);
+ const inspectorSessionRef=useRef(0);
  const [liveLog,setLiveLog]=useState('');
- const [refresh,setRefresh]=useState(0);
  const [pageHasMore,setPageHasMore]=useState(false);
  const [pageLoading,setPageLoading]=useState(false);
  const [pageTotal,setPageTotal]=useState(0);
@@ -580,50 +577,11 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon',onInten
  const taskEntry=task?{...(task.entry??{id:task.id,grant_id:'',tool:task.kind==='transfer'?'transfer_upload':'exec_background',description:task.title}),
   status:'running',time:task.start,finished_at:null,duration_ms:null}:undefined;
  const baseEntry=detailTask?taskEntry:selected;
- // Fetch full saved I/O for the selected file operation only, never the full list.
- useEffect(()=>{
-  setSelectedFilePreview(null);
-  if(demo||!baseEntry||view!=='main'||!missingSelectedFileSource(baseEntry))return;
-  let alive=true;
-  const timer=setTimeout(()=>{
-   void loadSelectedFilePreview(baseEntry,request=>requestLocal(request,8000))
-    .then(preview=>{if(alive)setSelectedFilePreview(preview);})
-    .catch(()=>{if(alive)setSelectedFilePreview(null);});
-  },130);
-  return()=>{alive=false;clearTimeout(timer);};
- },[demo,baseEntry?.id,baseEntry?.tool,baseEntry?.request_json,baseEntry?.result,detailTask,view,ipcSession]);
- // A selected DETAIL preview is fetched on demand (4 KiB), not hydrated for
- // every ACTIVITY row. The OUTPUT inspector continues to page the full log.
- useEffect(()=>{
-  setSelectedOutputPreview(null);
-  if(demo||!baseEntry||view!=='main'||baseEntry.status==='running'||
-     !['exec_foreground','exec_background','fs_edit'].includes(baseEntry.tool))return;
-  if(baseEntry.tool==='fs_edit'){
-   let old:Record<string,unknown>={};
-   try{old=JSON.parse(baseEntry.result??'{}');}catch{}
-   if(old.diffStored!==true)return;
-  }
-  let alive=true;
-  let clipped=false;
-  try{const r=JSON.parse(baseEntry.result??'{}');clipped=r.outputLimit===true||r.data?.outputLimit===true;}catch{}
-  void loadSelectedOutputPreview(baseEntry.id,request=>requestLocal(request,8000),4096,!clipped,
-   baseEntry.tool==='fs_edit'?'result':'output')
-   .then(preview=>{if(alive&&preview)setSelectedOutputPreview({id:baseEntry.id,preview});})
-   .catch(()=>{});
-  return()=>{alive=false;};
- },[demo,baseEntry?.id,baseEntry?.status,view,ipcSession]);
- const entry=useMemo(()=>{
-  const item=baseEntry?withSelectedFilePreview(baseEntry,selectedFilePreview):undefined;
-  if(!item||selectedOutputPreview?.id!==item.id)return item;
-  let result:Record<string,unknown>={};
-  try{result=JSON.parse(item.result??'{}');}catch{}
-  const preview=selectedOutputPreview.preview;
-  if(item.tool==='fs_edit')return {...item,result:JSON.stringify({...result,
-   diff:preview.text,diffPreviewMeta:preview,diffTruncated:preview.truncated})};
-  return {...item,result:JSON.stringify({...result,outputPreview:preview.text,
-   outputPreviewKind:'head_tail',outputPreviewMeta:preview,
-   previewTruncated:preview.truncated,outputPreviewOmittedBytes:preview.omittedBytes})};
- },[baseEntry,selectedFilePreview,selectedOutputPreview]);
+ // DETAIL is rendered solely from the bounded journal snapshot. No delayed
+ // hydration may replace an already-visible preview after selecting a row.
+ const entry=baseEntry;
+ inspectorEntryRef.current=entry?.id??null;
+ inspectorSessionRef.current=ipcSession;
  // Completed entries are immutable between activity revisions; do not parse their JSON on each clock tick.
  const model=useMemo(()=>entry?activityPresentation(entry,entry.status==='running'?tick:0):null,
   [entry,entry?.status==='running'?tick:0]);
@@ -722,41 +680,38 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon',onInten
  const columns=useMemo(()=>tableColumns(Math.max(1,aw-2),longestTime+1,layout.detailGain),
   [aw,longestTime,layout.detailGain]);
  const detailRows=Math.max(1,layout.detailHeight-(inspectorTab==='summary'?2:3));
- useEffect(()=>{setDetailScroll(0);setInspectorSource(null);setInspectorError('');},[entry?.id,inspectorTab]);
- useEffect(()=>{
-  if(inspectorTab==='summary'||!entry)return;
-  let alive=true;
-  setInspectorError('');setInspectorSource(null);setInspectorProgress('');
-  const mode=inspectorTab;
-  if(demo){
-   if(mode==='input'){
-    const raw=entry.request_json??'';
-    setInspectorSource({text:raw,totalBytes:Buffer.byteLength(raw),available:raw!=='',legacy:true});
-   }else{
-    let result:Record<string,unknown>={};try{result=JSON.parse(entry.result??'{}');}catch{}
-    const raw=mode==='result'?(entry.result??''):String(result[mode]??'');
-    setInspectorSource({text:raw,totalBytes:Buffer.byteLength(raw),available:true});
-   }
-   return;
+ // Switch INPUT/OUTPUT atomically: keep the existing panel visible until
+ // the requested page stream has fully loaded. Cache completed views for
+ // instantaneous repeat switches and reject superseded asynchronous replies.
+ const openInspectorTab=(mode:InspectorTab,force=false)=>{
+  if(mode==='summary'){
+   inspectorSwitcherRef.current.cancel();
+   setInspectorTab('summary');setInspectorSource(null);
+   setInspectorError('');setDetailScroll(0);return;
   }
-  const action=mode==='input'?'input':mode==='result'?'result':'output';
-  void readEntireLocalStream(async byteOffset=>
-    await requestLocal({action,operationId:entry.id,...(mode==='input'?{}:{stream:mode}),
-      byteOffset,maxBytes:65536}) as OutputPage & {available?:boolean},
-    (loaded,total)=>{if(alive&&total>65536)setInspectorProgress('已读取 '+loaded+' / '+total+' 字节');})
-   .then(source=>{if(alive){
-     setInspectorSource(source);
-     if(mode==='input'&&!source.available)setInspectorProgress('旧版输入快照不可用');
-     else setInspectorProgress('');
-   }})
-   .catch(error=>{if(alive){
-     if(mode==='input'){
-      setInspectorSource({text:'',totalBytes:0,available:false,legacy:true});
-      setInspectorProgress('旧版输入快照不可用');
-     }else setInspectorError(safeText(String(error),300));
-   }});
-  return()=>{alive=false;};
- },[demo,entry?.id,inspectorTab,refresh]);
+  if(!entry)return;
+  const id=entry.id,session=ipcSession,key=session+'|'+id+'|'+mode;
+  const load=async():Promise<FullSource>=>{
+   if(demo){
+    const raw=mode==='input'?entry.request_json??'':
+     mode==='result'?entry.result??'':
+     (()=>{try{const value=JSON.parse(entry.result??'{}');return String(value[mode]??'');}catch{return '';}})();
+    return{text:raw,totalBytes:Buffer.byteLength(raw),available:raw!==''};
+   }
+   const action=mode==='input'?'input':mode==='result'?'result':'output';
+   return await readEntireLocalStream(async byteOffset=>
+    await requestLocal({action,operationId:id,
+      ...(['stdout','stderr'].includes(mode)?{stream:mode}:{}),
+      byteOffset,maxBytes:65536}) as OutputPage & {available?:boolean});
+  };
+  void inspectorSwitcherRef.current.show(key,load,source=>{
+   // This is the FIRST time the new view becomes visible. No loading
+   // placeholder or old operation's content is rendered in the new tab.
+   setInspectorSource(source);setInspectorError('');
+   setInspectorTab(mode);setDetailScroll(0);
+  },error=>setNotice('读取视图失败：'+safeText(String(error),120)),
+   {force,valid:()=>inspectorEntryRef.current===id&&inspectorSessionRef.current===session});
+ };
  // Full I/O follows file growth using byte offsets; never reread the entire output on a timer.
  useEffect(()=>{
   if(demo||!entry||entry.status!=='running'||!['stdout','stderr'].includes(inspectorTab))return;
@@ -805,13 +760,13 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon',onInten
     inspectorTab==='input'?inspectorInput(entry,inspectorSource):
     inspectorTab==='result'?inspectorResult(entry,inspectorSource):
     inspectorOutput(inspectorSource,inspectorTab,undefined,storedOutputLimited(entry));
-   return wrapDetail(inspectorProgress?[{text:inspectorProgress,tone:'muted'},...lines]:lines,Math.max(1,dw-2));
+   return wrapDetail(lines,Math.max(1,dw-2));
   }
   const lines=detailPresentation(entry,tick,entry.status==='running'?liveLog:'');
   return wrapDetail(lines,Math.max(1,dw-2));
- },[entry?.id,entry?.status,entry?.result,entry?.request_json,model?.state,detailNow,liveLog,inspectorTab,inspectorSource,inspectorError,inspectorProgress,view,dw,status?.deviceName,status?.server,demo]);
+ },[entry?.id,entry?.status,entry?.result,entry?.request_json,model?.state,detailNow,liveLog,inspectorTab,inspectorSource,inspectorError,view,dw,status?.deviceName,status?.server,demo]);
  const scroll=Math.min(detailScroll,Math.max(0,detail.length-detailRows));
- const resetDetail=()=>{setDetailScroll(0);setInspectorTab('summary');setView('main');};
+ const resetDetail=()=>{openInspectorTab('summary');setView('main');};
  const move=(delta:number,edge?:'first'|'last',target:Focus=focus)=>{
   if(target==='detail'){
    setDetailScroll(x=>edge==='first'?0:edge==='last'?Math.max(0,detail.length-detailRows):Math.max(0,Math.min(detail.length-detailRows,x+delta)));
@@ -870,7 +825,7 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon',onInten
    const local=event.x-aw-1;
    const commandTool=entry&&['exec_foreground','exec_background'].includes(entry.tool);
    if(local>=0&&local<(commandTool?29:19)){
-    setInspectorTab(local<9?'input':commandTool?(local<19?'stdout':'stderr'):'result');
+    openInspectorTab(local<9?'input':commandTool?(local<19?'stdout':'stderr'):'result');
     setDetailScroll(0);
    }
    return;
@@ -950,7 +905,7 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon',onInten
    if(mode==='stderr'&&!['exec_foreground','exec_background'].includes(entry.tool)){
     setNotice('此工具没有 stderr，请使用 /view output');return true;
    }
-   setInspectorTab(mode);setFocus('detail');setDetailScroll(0);
+   openInspectorTab(mode);setFocus('detail');
    if(selected&&selectedId===null)setSelectedId(selected.id);
    return true;
   }
@@ -1039,6 +994,7 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon',onInten
   }
   if(input==='q'){if(!demo){logEvent('tui','exit.requested','info',{reason:'q'});onIntentionalExit?.('q');}exit();return;}
   if(key.escape){
+   if(inspectorTab==='summary')inspectorSwitcherRef.current.cancel();
    if(view!=='main'||inspectorTab!=='summary'){resetDetail();return;}
    if(query){setQuery('');setSelectedId(null);return;}
    setFocus('activity');setDetailTask(false);return;
@@ -1083,15 +1039,15 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon',onInten
    void copyText(content).then(()=>setNotice('已复制 '+content.length+' 字符')).catch(e=>setNotice(String(e)));return;
   }
   if((input==='i'||input==='o')&&entry){
-   setInspectorTab(input==='i'?'input':
+   openInspectorTab(input==='i'?'input':
     ['exec_foreground','exec_background'].includes(entry.tool)?'stdout':'result');
-   setFocus('detail');setDetailScroll(0);
+   setFocus('detail');
    if(selected&&selectedId===null)setSelectedId(selected.id);return;
   }
   if(input==='e'&&(inspectorTab==='stdout'||inspectorTab==='stderr')){
-   setInspectorTab(inspectorTab==='stdout'?'stderr':'stdout');return;
+   openInspectorTab(inspectorTab==='stdout'?'stderr':'stdout');return;
   }
-  if(input==='r'&&inspectorTab!=='summary'){setRefresh(x=>x+1);return;}
+  if(input==='r'&&inspectorTab!=='summary'){openInspectorTab(inspectorTab,true);return;}
  });
  const connected=ipcOfflineSince===null&&status?.state==='connected';
  const connecting=ipcOfflineSince===null&&(!status||status.state==='connecting');

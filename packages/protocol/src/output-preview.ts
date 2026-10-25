@@ -13,11 +13,15 @@ export interface OutputPreview {
  displayedBytes:number;
  omittedBytes:number;
  hasFullOutput:boolean;
+ totalLines?:number;
+ headLines?:number;
+ tailStartLine?:number;
 }
 const encoder=new TextEncoder();
 const decoder=new TextDecoder();
 const marker=(omitted:number)=>"\n… [中间省略 "+omitted+" 字节 · 查看完整输出] …\n";
 const byteLength=(value:string)=>encoder.encode(value).length;
+const countLines=(value:string)=>value.length?value.split('\n').length-(value.endsWith('\n')?1:0):0;
 
 function bytePrefix(bytes:Uint8Array,budget:number):string{
  if(budget<=0)return "";
@@ -45,7 +49,7 @@ function byteSuffix(bytes:Uint8Array,budget:number):string{
  */
 export function previewFromEdges(
  headSource:string,tailSource:string,originalBytes:number,budget:number,
- options:{hasFullOutput?:boolean;headRatio?:number}={}
+ options:{hasFullOutput?:boolean;headRatio?:number;totalLines?:number}={}
 ):OutputPreview{
  if(!Number.isSafeInteger(budget)||budget<64)throw new RangeError("INVALID_PREVIEW_BUDGET");
  if(!Number.isSafeInteger(originalBytes)||originalBytes<0)throw new RangeError("INVALID_ORIGINAL_BYTES");
@@ -54,7 +58,8 @@ export function previewFromEdges(
  const fullAvailable=headBytes.byteLength>=originalBytes;
  if(originalBytes<=budget&&fullAvailable)return{
   text:bytePrefix(headBytes,originalBytes),truncated:false,reason:"none",
-  strategy:"full",originalBytes,displayedBytes:originalBytes,omittedBytes:0,hasFullOutput
+  strategy:"full",originalBytes,displayedBytes:originalBytes,omittedBytes:0,hasFullOutput,
+  totalLines:options.totalLines??countLines(headSource)
  };
  const strategy:PreviewStrategy=originalBytes<=budget*4?"balanced":"result_priority";
  // Reserve room for a UTF-8 marker and its variable-length omitted byte count.
@@ -70,12 +75,16 @@ export function previewFromEdges(
  let text=head+marker(omitted)+tail;
  if(byteLength(text)>budget)throw new Error("PREVIEW_EXCEEDS_BUDGET");
  return {text,truncated:true,reason:"preview_budget",strategy,originalBytes,
-  displayedBytes:shown,omittedBytes:omitted,hasFullOutput};
+  displayedBytes:shown,omittedBytes:omitted,hasFullOutput,
+  headLines:countLines(head),
+  ...(options.totalLines===undefined?{}:{totalLines:options.totalLines,
+    tailStartLine:Math.max(1,options.totalLines-countLines(tail)+1)})};
 }
 export function createPreview(
- text:string,budget:number,options:{hasFullOutput?:boolean;headRatio?:number}={}
+ text:string,budget:number,options:{hasFullOutput?:boolean;headRatio?:number;totalLines?:number}={}
 ):OutputPreview{
  const bytes=encoder.encode(text);
  // Both arguments denote *actual* ends of the same UTF-8 input.
- return previewFromEdges(text,text,bytes.byteLength,budget,options);
+ return previewFromEdges(text,text,bytes.byteLength,budget,
+  {...options,totalLines:countLines(text)});
 }
