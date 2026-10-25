@@ -1,3 +1,4 @@
+import {createPreview} from '@deskbeacon/protocol';
 import {createPatch} from 'diff';
 import {activityPresentation,type ActivityEntry} from './presenter.js';
 import {toolRow,type Tone,type Segment} from './tool-presentation.js';
@@ -31,7 +32,9 @@ export function numberedBlock(raw:unknown,language?:string,startLine:number|null
  maxLines=280,maxChars=64000,expand:'i'|'o'='o'):DetailLine[]{
  if(typeof raw!=='string')return [line('（内容不可用）','muted',false,true)];
  const normalized=raw.replace(/\r\n?/g,'\n');
- const text=normalized.slice(0,maxChars),lines=text.split('\n');
+ const budget=maxLines===Infinity&&maxChars===Infinity?Infinity:Math.min(maxChars,4096);
+ const preview=Number.isFinite(budget)?createPreview(normalized,budget):null;
+ const text=preview?.text??normalized,lines=text.split('\n');
  const displayedSource=lines.slice(0,maxLines);
  const lineLimit=maxLines===Infinity&&maxChars===Infinity?Infinity:500;
  const shownSource=displayedSource.map(value=>value.slice(0,lineLimit));
@@ -39,19 +42,21 @@ export function numberedBlock(raw:unknown,language?:string,startLine:number|null
  const lineDigits=startLine===null?1:String(startLine+Math.max(0,source.length-1)).length;
  const highlighted=language?highlightCodeLines(source,language):undefined;
  const result:DetailLine[]=source.map((v,index)=>{
-  if(highlighted)return {...line(v,'muted'),syntax:highlighted[index],sourceLine:startLine===null?null:startLine+index,lineDigits};
+  if(highlighted)return {...line(v,'muted'),syntax:highlighted[index],sourceLine:startLine===null||preview?.truncated?null:startLine+index,lineDigits};
   const tone:Tone=v.startsWith('+++')||v.startsWith('+')?'success':
    v.startsWith('---')||v.startsWith('-')?'danger':v.startsWith('@@')?'warning':'default';
   const comment=/^\s*(\/\/|#\s)/.test(v);
-  return {...line(v,comment?'muted':tone,v.startsWith('@@'),comment),sourceLine:startLine===null?null:startLine+index,lineDigits};
+  return {...line(v,comment?'muted':tone,v.startsWith('@@'),comment),sourceLine:startLine===null||preview?.truncated?null:startLine+index,lineDigits};
  });
  const shown=displayedSource.join('\n').length;
  const represented=shownSource.join('\n').length;
  const missingChars=Math.max(0,normalized.length-represented);
  let missingLines=0;
  for(let i=shown;i<normalized.length;i++)if(normalized.charCodeAt(i)===10)missingLines++;
- if(missingChars>0||missingLines>0)
-  result.push(line('... +'+missingLines+' 行, '+missingChars+' 字符 (按 '+expand+' 展开)','warning'));
+ if(missingChars>0||missingLines>0){
+  if(!preview?.truncated||shownSource.length<lines.length||lineLimit!==Infinity&&shownSource.some((v,i)=>v.length<displayedSource[i]!.length))
+   result.push(line('... +'+missingLines+' 行, '+missingChars+' 字符 (按 '+expand+' 展开)','warning'));
+ }
 
  return result;
 }
@@ -197,14 +202,16 @@ function contentFor(a:ActivityEntry,i:Fields,r:Fields):DetailLine[]{
    content('COMMAND',cmd(i),languageForCommand(i.command),1,'i');
    if(typeof r.stdout==='string'&&r.stdout)content('STDOUT',r.stdout);
    else if(typeof r.outputPreview==='string'&&r.outputPreview){
-    const tail=r.outputPreviewKind==='tail';
-    out.push(section(tail?'STDOUT · 末尾预览':'STDOUT · 历史预览'));
-    const omitted=Number.isSafeInteger(r.outputPreviewOmittedChars)&&r.outputPreviewOmittedChars>0?
-      '前面已省略 '+r.outputPreviewOmittedChars+' 字符':'部分原始输出可能未保留在摘要中';
-    out.push(line((tail?omitted:'以下仅为摘要，不代表完整输出')+' · 按 o 查看完整 STDOUT','warning'));
-    // A suffix has no known first line. Do not number its rows from 1.
-    out.push(...numberedBlock(normalizeProcessStderr(r.outputPreview),undefined,null)
-      .map(({sourceLine,lineDigits,...item})=>item));
+    const tail=r.outputPreviewKind==='tail',unified=r.outputPreviewKind==='head_tail';
+    out.push(section(unified?'STDOUT · 预览 (4 KiB)':tail?'STDOUT · 末尾预览':'STDOUT · 历史预览'));
+    const omitted=unified?Number(r.outputPreviewOmittedBytes??0):Number(r.outputPreviewOmittedChars??0);
+    if(r.outputPreviewMeta?.hasFullOutput===false)out.push(line('执行器已达到存储上限：原始输出后续部分不可恢复','danger'));
+    out.push(line((omitted>0?(tail?'前面已省略 ':'已省略 ')+omitted+(tail?' 字符':' 字节'):'仅展示预览')
+      +' · 按 o 查看完整 STDOUT','warning'));
+    // A clipped head/tail or legacy suffix cannot have sequential source line numbers.
+    const rows=numberedBlock(normalizeProcessStderr(r.outputPreview),undefined,
+      unified&&!r.previewTruncated?1:null);
+    out.push(...(unified&&!r.previewTruncated?rows:rows.map(({sourceLine,lineDigits,...item})=>item)));
    }
    if(r.stderr)content('STDERR',normalizeProcessStderr(r.stderr));break;
   case 'batch':

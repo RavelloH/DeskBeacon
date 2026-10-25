@@ -1,3 +1,5 @@
+import type {OutputPreview} from '@deskbeacon/protocol';
+import {loadSelectedOutputPreview} from './selected-output-preview.js';
 import React, {useEffect, useMemo, useRef, useState, useSyncExternalStore} from 'react';
 import {render, Box, Text, useInput, useApp, useStdout} from 'ink';
 import {LiveIpcClient,type LiveEvent} from './ipc-live.js';
@@ -376,6 +378,7 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon',onInten
  const [inspectorError,setInspectorError]=useState('');
  const [inspectorProgress,setInspectorProgress]=useState('');
  const [selectedFilePreview,setSelectedFilePreview]=useState<SelectedFilePreview|null>(null);
+ const [selectedOutputPreview,setSelectedOutputPreview]=useState<{id:string;preview:OutputPreview}|null>(null);
  const [liveLog,setLiveLog]=useState('');
  const [refresh,setRefresh]=useState(0);
  const [pageHasMore,setPageHasMore]=useState(false);
@@ -589,8 +592,30 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon',onInten
   },130);
   return()=>{alive=false;clearTimeout(timer);};
  },[demo,baseEntry?.id,baseEntry?.tool,baseEntry?.request_json,baseEntry?.result,detailTask,view,ipcSession]);
- const entry=useMemo(()=>baseEntry?withSelectedFilePreview(baseEntry,selectedFilePreview):undefined,
-  [baseEntry,selectedFilePreview]);
+ // A selected DETAIL preview is fetched on demand (4 KiB), not hydrated for
+ // every ACTIVITY row. The OUTPUT inspector continues to page the full log.
+ useEffect(()=>{
+  setSelectedOutputPreview(null);
+  if(demo||!baseEntry||view!=='main'||baseEntry.status==='running'||
+     !['exec_foreground','exec_background'].includes(baseEntry.tool))return;
+  let alive=true;
+  let clipped=false;
+  try{const r=JSON.parse(baseEntry.result??'{}');clipped=r.outputLimit===true||r.data?.outputLimit===true;}catch{}
+  void loadSelectedOutputPreview(baseEntry.id,request=>requestLocal(request,8000),4096,!clipped)
+   .then(preview=>{if(alive&&preview)setSelectedOutputPreview({id:baseEntry.id,preview});})
+   .catch(()=>{});
+  return()=>{alive=false;};
+ },[demo,baseEntry?.id,baseEntry?.status,view,ipcSession]);
+ const entry=useMemo(()=>{
+  const item=baseEntry?withSelectedFilePreview(baseEntry,selectedFilePreview):undefined;
+  if(!item||selectedOutputPreview?.id!==item.id)return item;
+  let result:Record<string,unknown>={};
+  try{result=JSON.parse(item.result??'{}');}catch{}
+  const preview=selectedOutputPreview.preview;
+  return {...item,result:JSON.stringify({...result,outputPreview:preview.text,
+   outputPreviewKind:'head_tail',outputPreviewMeta:preview,
+   previewTruncated:preview.truncated,outputPreviewOmittedBytes:preview.omittedBytes})};
+ },[baseEntry,selectedFilePreview,selectedOutputPreview]);
  // Completed entries are immutable between activity revisions; do not parse their JSON on each clock tick.
  const model=useMemo(()=>entry?activityPresentation(entry,entry.status==='running'?tick:0):null,
   [entry,entry?.status==='running'?tick:0]);

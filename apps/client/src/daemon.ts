@@ -11,7 +11,7 @@ import { WebSocket } from 'ws';
 import {networkFetch,networkWebSocket} from './outbound-network.js';
 import {availableShells,cpuCount} from './platform-compat.js';
 import si from 'systeminformation';
-import { PROTOCOL_VERSION, LIMITS, ProtocolMessageSchema, toolInputSchemas, executeToolBatch, normalizeToolError, type ProtocolMessage, type BatchInput } from '@deskbeacon/protocol';
+import { createPreview, PROTOCOL_VERSION, LIMITS, ProtocolMessageSchema, toolInputSchemas, executeToolBatch, normalizeToolError, type ProtocolMessage, type BatchInput } from '@deskbeacon/protocol';
 import { RecordJournal } from './record-journal.js';
 import { TaskSupervisor } from './process.js';
 import { batchActivityInput, batchActivityResult } from './batch-activity.js';
@@ -635,10 +635,12 @@ export class ClientDaemon extends EventEmitter {
             const budget=Math.min(batch.maxResultBytes,8192);
             const out=String(stdout??''),err=String(stderr??'');
             const preview=Math.max(128,Math.floor((budget-1024)/2));
+            const outPreview=createPreview(out,preview),errPreview=createPreview(err,preview);
             return {status:'completed',childOperationId:localId,
-              data:{...metadata,stdout:out.slice(0,preview),stderr:err.slice(0,preview),
-                stdoutTruncated:out.length>preview,stderrTruncated:err.length>preview,
-                stdoutBytes:Buffer.byteLength(out),stderrBytes:Buffer.byteLength(err)}};
+              data:{...metadata,stdout:outPreview.text,stderr:errPreview.text,
+                stdoutTruncated:outPreview.truncated,stderrTruncated:errPreview.truncated,
+                stdoutPreviewMeta:outPreview,stderrPreviewMeta:errPreview,
+                stdoutBytes:outPreview.originalBytes,stderrBytes:errPreview.originalBytes}};
           }
           return {status:'completed',childOperationId:localId,data:result};
         },()=>this.supervisor.isCancelled(operationId));

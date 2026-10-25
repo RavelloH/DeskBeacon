@@ -1,5 +1,5 @@
 ﻿import { DurableObject } from "cloudflare:workers";
-import { LIMITS, PROTOCOL_VERSION, ProtocolMessageSchema, type ProtocolMessage } from "@deskbeacon/protocol";
+import { createPreview,previewFromEdges,LIMITS, PROTOCOL_VERSION, ProtocolMessageSchema, type ProtocolMessage } from "@deskbeacon/protocol";
 import type { Env, DeviceRecord } from "./env.js";
 
 type Waiter = {
@@ -390,26 +390,22 @@ export class DeviceSession extends DurableObject<Env> {
         this.finish(msg.operationId,failure("RESULT_INVALID","Missing foreground text begin"),"failed");return;
       }
       const data=msg.payload.result;
-      // Preserve the head AND the tail, where build failures commonly appear.
+      // Same head/tail algorithm as local DETAIL and Batch previews.
+      // Query only the edges for large results: never load 16 MiB into a DO preview.
       const totalOutputBytes=Number(row.stdout_bytes??0)+Number(row.stderr_bytes??0);
       const clipped=totalOutputBytes>LIMITS.resultPreviewBytes;
-      let outputPreview:string;
+      let preview;
       if(!clipped){
         const all=this.ctx.storage.sql.exec("SELECT content FROM chunks WHERE op_id=? ORDER BY stream,idx",msg.operationId).toArray() as Row[];
-        outputPreview=all.map(r=>String(r.content)).join("");
+        preview=createPreview(all.map(r=>String(r.content)).join(""),LIMITS.resultPreviewBytes);
       }else{
         const first=this.ctx.storage.sql.exec("SELECT content FROM chunks WHERE op_id=? ORDER BY stream,idx LIMIT 8",msg.operationId).toArray() as Row[];
         const last=this.ctx.storage.sql.exec("SELECT content FROM chunks WHERE op_id=? ORDER BY stream DESC,idx DESC LIMIT 8",msg.operationId).toArray() as Row[];
-        const budget=Math.floor((LIMITS.resultPreviewBytes-128)/2);
-        const head=new TextDecoder().decode(new TextEncoder().encode(first.map(r=>String(r.content)).join("")).slice(0,budget));
-        const tailBytes=new TextEncoder().encode(last.reverse().map(r=>String(r.content)).join(""));
-        let start=Math.max(0,tailBytes.byteLength-budget);
-        while(start<tailBytes.length&&(tailBytes[start]!&0xc0)===0x80)start++;
-        const tail=new TextDecoder().decode(tailBytes.slice(start));
-        outputPreview=head+"\n... [output truncated; use operation_output] ...\n"+tail;
+        preview=previewFromEdges(first.map(r=>String(r.content)).join(""),
+          last.reverse().map(r=>String(r.content)).join(""),totalOutputBytes,LIMITS.resultPreviewBytes);
       }
       this.finish(msg.operationId,{status:"completed",data,...(FG.has(row.tool)?{
-        outputPreview,previewTruncated:clipped,
+        outputPreview:preview.text,previewTruncated:preview.truncated,outputPreviewMeta:preview,
         stdoutBytes:Number(row.stdout_bytes??0),stderrBytes:Number(row.stderr_bytes??0),totalOutputBytes,
         historyAvailable:true
       }: {})},"completed");

@@ -1,3 +1,4 @@
+import {createPreview} from '@deskbeacon/protocol';
 // User-facing descriptions for every DeskBeacon MCP operation.
 // Never display raw JSON, access tokens, inline file contents, or auth credentials.
 export type ActivityEntry={
@@ -345,16 +346,17 @@ function inputDetailLines(tool:string,i:Record<string,any>):string[]{
 function outputDetailLines(label:string,value:unknown,knownBytes?:unknown,previewTruncated=false,maxLines=40):string[]{
  const text=typeof value==='string'?value:'';
  const actualBytes=new TextEncoder().encode(text).byteLength;
+ const preview=createPreview(text,4096);
  const bytes=typeof knownBytes==='number'&&Number.isFinite(knownBytes)?knownBytes:actualBytes;
  const lines=[`${label} · ${displayBytes(bytes)}${text.length===0?' · 空':''}`];
  if(!text){if(previewTruncated||bytes>actualBytes)lines.push('输出预览已截断或不完整；按 o 查看本地日志');return lines;}
- const rows=text.replace(/\r\n?/g,'\n').split('\n').filter(line=>line.length>0);
+ const rows=preview.text.replace(/\r\n?/g,'\n').split('\n').filter(line=>line.length>0);
  let clippedLine=false;
  lines.push(...rows.slice(0,maxLines).map(row=>{
   if(row.length>500)clippedLine=true;
   return oneLine(row,500);
  }));
- if(rows.length>maxLines||clippedLine||previewTruncated||bytes>actualBytes)
+ if(rows.length>maxLines||clippedLine||preview.truncated||previewTruncated||bytes>actualBytes)
   lines.push('输出预览已截断或不完整；按 o 查看本地日志');
  return lines;
 }
