@@ -80,3 +80,26 @@ test('four-digit source numbers keep four-column gutters and still align with th
  assert.ok(rows.filter(x=>typeof x.sourceLine==='number').every(x=>
   sourceLineGutter(x).indexOf('│')===sourceLineGutter(marker).indexOf('│')));
 });
+
+
+test('middle omission gutter aligns separator with numeric line numbers at every width',()=>{
+ for(const count of [25,125,1180,10000]){
+  const source=Array.from({length:count},(_,i)=>'line '+(i+1)+' '+'.'.repeat(35)).join('\n');
+  const [group]=createDetailSections([{kind:'output',title:'LOG',text:source,startLine:1}],384);
+  assert.equal(group.preview.truncated,true);
+  const rows=numberedPreviewBlock(group.preview,undefined,1,
+   group.lineMap,group.sourceText,'o',group.sourceStyled);
+  const marker=rows.find(item=>item.gutterLabel==='...');
+  assert.ok(marker,'missing omission line for '+count);
+  const numbered=rows.filter(item=>typeof item.sourceLine==='number');
+  assert.equal(numbered.at(-1)?.sourceLine,count);
+  const separatorColumns=new Set([...numbered,marker].map(item=>sourceLineGutter(item).indexOf('│')));
+  assert.equal(separatorColumns.size,1,'separator shifted for '+count+' lines');
+  assert.equal(sourceLineGutter(marker).length,sourceLineGutter(numbered[0]).length);
+  assert.equal(marker.lineDigits,Math.max(3,String(count).length));
+  const wrapped=wrapDetail(rows,28);
+  const wrappedGutters=new Set(wrapped.filter(item=>item.sourceLine!==undefined).map(item=>sourceLineGutter(item).indexOf('│')));
+  assert.deepEqual([...wrappedGutters],[separatorColumns.values().next().value],
+   'soft-wrap separator shifted for '+count+' lines');
+ }
+});
