@@ -245,7 +245,8 @@ export class ClientDaemon extends EventEmitter {
   private recordConnection(kind:string,detail=''){
     if(this.stopped)return;
     const level=/error|exception|failed/.test(kind)?'error':
-      /timeout|closed|reconnect_scheduled|ack_deferred|disconnect/.test(kind)?'warn':'info';
+      /timeout|closed|reconnect_scheduled|ack_deferred|disconnect/.test(kind)?'warn':
+      /^(connecting|first_pong)$/.test(kind)?'debug':'info';
     logEvent('connection',kind,level,{detail,epoch:this.epoch,ready:this.ready,state:this.state,
       awaitingPong:this.heartbeatAwaiting,heartbeatMisses:this.heartbeatMisses,
       latencyMs:this.latencyMs,connectedForMs:this.socketOpenedAt?Date.now()-this.socketOpenedAt:null});

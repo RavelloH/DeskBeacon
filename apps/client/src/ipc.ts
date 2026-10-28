@@ -7,6 +7,7 @@ import { existsSync, rmSync, chmodSync, readdirSync, openSync, closeSync, readSy
 import type { ClientDaemon } from './daemon.js';
 import { dataDir, loadConfig, saveConfig } from './daemon.js';
 import {getConfigView,setPendingServerUrl,setProxyConfig} from './config-actions.js';
+import {diagnosticsSnapshot} from './diagnostics.js';
 import {detectFileOutputEncoding,decodeOutputPage} from './output-encoding.js';
 export const ipcPath=process.env.DESKBEACON_IPC_PATH ?? (platform()==='win32'?'\\\\.\\pipe\\deskbeacon-'+process.env.USERNAME:
   join(dataDir,'daemon.sock'));
@@ -288,6 +289,11 @@ export function startIpc(daemon:ClientDaemon,onExit?:()=>Promise<void>){
            }
            else if(request.action==='status-lite')result=await daemon.status(false);
            else if(request.action==='status')result=await daemon.status();
+           else if(request.action==='diagnostics')result={
+             schemaVersion:1,scope:'runtime',capturedAt:new Date().toISOString(),
+             pid:process.pid,uptimeSeconds:Math.round(process.uptime()),
+             memoryRssBytes:process.memoryUsage().rss,loggers:diagnosticsSnapshot()
+           };
            else if(request.action==='config-get')result=getConfigView();
            else if(request.action==='config-set'){
              const key=request.key,value=String(request.value??'').trim();

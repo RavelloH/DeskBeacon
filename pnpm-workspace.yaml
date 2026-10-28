@@ -5,5 +5,8 @@ allowBuilds:
   esbuild: true
   sharp: true
   workerd: true
+# First-party RLog release; permit the workspace to install it immediately.
+minimumReleaseAgeExclude:
+  - rlog-js@3.1.0
 patchedDependencies:
   '@alcalzone/ansi-tokenize@0.3.1': patches/@alcalzone__ansi-tokenize@0.3.1.patch

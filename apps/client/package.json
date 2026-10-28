@@ -41,7 +41,7 @@
     "node-fetch": "^3.3.2",
     "proxy-agent": "^8.0.2",
     "react": "^19.3.1",
-    "rlog-js": "^3.0.0",
+    "rlog-js": "^3.1.0",
     "screenshot-desktop": "^1.15.7",
     "sharp": "^0.35.5",
     "string-width": "8.3.0",

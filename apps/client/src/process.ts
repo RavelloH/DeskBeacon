@@ -10,7 +10,7 @@ import { platform, tmpdir } from 'node:os';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { DatabaseSync } from 'node:sqlite';
 import type {RecordJournal} from './record-journal.js';
-import {logEvent} from './diagnostics.js';
+import {logEvent,withLogContext} from './diagnostics.js';
 import { ForegroundPool } from './foreground-pool.js';
 import { LIMITS } from '@deskbeacon/protocol';
 
@@ -98,12 +98,20 @@ export class TaskSupervisor{
  trackBatch(id:string,active:boolean){if(active)this.batches.add(id);else{this.batches.delete(id);this.clearCancelled(id);}}
 
  async runProcess(id:string,description:string,c:Input,timeoutMs:number,fg:boolean){
-   const p=shellPlan(c);let child:ChildProcessWithoutNullStreams;
+   return withLogContext('execution',{operationId:id,executionMode:fg?'foreground':'background'},()=>{
+     return this.runProcessWithContext(id,description,c,timeoutMs,fg);
+   });
+ }
+ private async runProcessWithContext(id:string,description:string,c:Input,timeoutMs:number,fg:boolean){
+   const p=shellPlan(c);
+   logEvent('execution','process.start_requested','debug',{operationId:id,executionMode:fg?'foreground':'background',program:p.exe,cwd:p.cwd,timeoutMs});
+   let child:ChildProcessWithoutNullStreams;
    const jobManaged=process.platform==='win32';
    const exe=jobManaged?resolveWindowsJobBinary():p.exe;
    const args=jobManaged?[Buffer.from(JSON.stringify({File:p.exe,Args:p.args,Cwd:p.cwd,ParentPid:process.pid}),'utf8').toString('base64')]:p.args;
    try{child=spawn(exe,args,{cwd:p.cwd,env:{...process.env,...c.env},windowsHide:true,detached:process.platform!=='win32',stdio:'pipe'}) as ChildProcessWithoutNullStreams;}
    catch(e){logEvent('execution','process.spawn_failed','error',{operationId:id,error:e,program:p.exe,cwd:p.cwd});throw Error('SPAWN_FAILED: '+String(e));}
+   logEvent('execution','process.spawned','debug',{operationId:id,pid:child.pid??null,executionMode:fg?'foreground':'background',program:p.exe});
    const safeId=id.replace(/[^a-zA-Z0-9_.-]/g,'_');
    const task:Running={proc:child,id,description,since:Date.now(),out:join(this.outputDir,safeId+'.out'),err:join(this.outputDir,safeId+'.err'),jobManaged};
    if(fg)this.fg.set(id,task);else this.bg.set(id,task);

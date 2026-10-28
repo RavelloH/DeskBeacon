@@ -5,6 +5,8 @@ import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import stringWidth from 'string-width';
 import type {DemoScenario} from './demo.js';
+import type {LogDomain} from './diagnostics.js';
+import {readSupervisorReport} from './supervisor-diagnostics.js';
 declare const __DESKBEACON_RELEASE__:boolean;
 const DEMO_ENABLED=typeof __DESKBEACON_RELEASE__==='undefined'||!__DESKBEACON_RELEASE__;
 
@@ -22,7 +24,7 @@ const [
  {requestIpc,startIpc,closeIpc},
  {superviseService,supervisorRunning,requestSupervisorStop},
  {migrateCommand,migrationRequired,codeVersion},
- {installDiagnostics,logEvent,flushLogs,closeLogs,discardLegacyLog,logsDir}
+ {installDiagnostics,logEvent,flushLogs,closeLogs,discardLegacyLog,readDiagnosticLogTail}
 ]=await Promise.all([
  import('./daemon.js'),import('./ipc.js'),import('./service-supervisor.js'),
  import('./migration-command.js'),import('./diagnostics.js')
@@ -195,6 +197,7 @@ const usage=()=>{
   row('status [--all|--full]','查看设备与 Runtime 状态；选项可包含任务历史'),
   row('service logs [领域]','查看指定领域的诊断日志（默认 service）'),
   detail('领域',logDomains),
+  row('service diagnostics [--json]','查询 Runtime 与 Supervisor 的日志队列、故障和重启状态'),
   '',
   '维护工具',
   row('migrate [--no-tui]','迁移本地存储；--no-tui 使用非交互式进度'),
@@ -304,13 +307,73 @@ async function main(){
    return;
  }
  if(action==='service'&&args[0]==='logs'){
-   const {readFileSync}=await import('node:fs');
-   const {join}=await import('node:path');
-   const domains=logDomains;
    const selected=args[1]??'service';
-   if(!domains.includes(selected))throw Error('Unknown log domain. Choose: '+domains.join(', '));
-   const path=join(logsDir,selected+'.jsonl');
-   console.log(existsSync(path)?readFileSync(path,'utf8').slice(-18000):'No '+selected+' diagnostics recorded yet.');return;
+   if(!logDomains.includes(selected))throw Error('Unknown log domain. Choose: '+logDomains.join(', '));
+   console.log(await readDiagnosticLogTail(selected as LogDomain));return;
+ }
+ if(action==='service'&&args[0]==='diagnostics'){
+   const flags=args.slice(1);
+   if(flags.some(flag=>flag!=='--json'))throw Error('Usage: deskbeacon service diagnostics [--json]');
+   const supervisor=readSupervisorReport();
+   let snapshot:any=null;
+   let runtimeStatus:'connected'|'unsupported'|'unavailable'='unavailable';
+   try{
+     const response=await requestIpc({action:'diagnostics'},3500);
+     if(response?.scope==='runtime'&&response?.schemaVersion===1&&response?.loggers){
+       snapshot=response;runtimeStatus='connected';
+     }else runtimeStatus='unsupported';
+   }catch{}
+   if(!snapshot&&!supervisor){
+     if(runtimeStatus==='unsupported')
+       throw Error('Running Runtime does not support diagnostics; restart it after upgrading DeskBeacon.');
+     throw Error('Cannot query Runtime diagnostics via IPC: Runtime is unavailable and no Supervisor report exists.');
+   }
+   if(flags.includes('--json')){
+     console.log(JSON.stringify({schemaVersion:1,scope:'service',capturedAt:new Date().toISOString(),
+       supervisor,runtime:snapshot,runtimeStatus},null,2));return;
+   }
+   console.log('DeskBeacon service diagnostics');
+   if(supervisor){
+     console.log('Supervisor: '+supervisor.phase+(supervisor.running?' (running)':' (not running)')+
+       (supervisor.fresh?'':' (stale snapshot)')+' · PID '+supervisor.pid+
+       ' · Worker '+(supervisor.workerPid??'-')+' · Restarts '+supervisor.totalRestarts+
+       ' (last 60s: '+supervisor.restartsInWindow+')');
+     if(supervisor.lastExit)console.log('  Last worker exit: code='+
+       (supervisor.lastExit.code??'-')+' signal='+(supervisor.lastExit.signal??'-')+
+       ' at '+supervisor.lastExit.at);
+     if(supervisor.logger)console.log('  Logger: queued='+supervisor.logger.queuedRecords+
+       ' · dropped='+supervisor.logger.droppedRecords+
+       ' · fileErrors='+supervisor.logger.fileErrors+
+       ' · recovered='+supervisor.logger.recoverySuccesses+'/'+supervisor.logger.recoveryAttempts+
+       ' · flight='+supervisor.logger.flightRecords);
+   }else console.log('Supervisor: no diagnostic snapshot available.');
+   if(!snapshot){
+     console.log('Runtime: '+(runtimeStatus==='unsupported'?'older version, restart to enable diagnostics':'unavailable'));
+     return;
+   }
+   console.log('DeskBeacon Runtime diagnostics · '+snapshot.capturedAt);
+   console.log('Scope: Runtime only (Supervisor is a separate process) · PID '+snapshot.pid+
+     ' · Uptime '+snapshot.uptimeSeconds+'s · RSS '+Math.round(snapshot.memoryRssBytes/1024/1024)+' MiB');
+   const entries=Object.entries(snapshot.loggers) as [string,any][];
+   if(!entries.length){console.log('No active Runtime loggers.');return;}
+   for(const [domain,value] of entries.sort(([a],[b])=>a.localeCompare(b))){
+     const log=value.logger,flight=value.flightRecorder,recovery=log.recovery?.jsonl;
+     console.log(
+       domain+': sink='+ (log.sinkActive.jsonl?'active':'disabled')+
+       ' · queue='+log.queuedRecords+'/'+log.maxQueuedRecords+
+       ' ('+log.queuedBytes+'/'+log.maxQueuedBytes+' bytes)'+
+       ' · dropped='+log.droppedRecords+
+       ' · fileErrors='+log.fileErrors+
+       ' · deferredErrors='+log.deferredErrors+
+       ' · recovery='+ (recovery?.successes??0)+'/'+(recovery?.attempts??0)+
+       ' · flight='+flight.records+'/'+flight.maxRecords+
+       ' ('+flight.bytes+'/'+flight.maxBytes+' bytes)'
+     );
+     if(recovery?.nextAttemptAt)console.log('  Next file recovery attempt: '+recovery.nextAttemptAt);
+     if(log.lastFileError)console.log('  Last file error: '+log.lastFileError.operation+
+       ' at '+log.lastFileError.timestamp);
+   }
+   return;
  }
  if(action==='service'){
    if(args[0]==='start'){await serviceStart();return;}

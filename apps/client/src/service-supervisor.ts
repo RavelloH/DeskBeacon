@@ -3,6 +3,7 @@ import {closeSync,existsSync,mkdirSync,openSync,readFileSync,rmSync,writeFileSyn
 import {join} from 'node:path';
 import {dataDir} from './daemon.js';
 import {logEvent,installDiagnostics,flushLogs,closeLogs,discardLegacyLog} from './diagnostics.js';
+import {writeSupervisorReport,type SupervisorPhase,type SupervisorReport} from './supervisor-diagnostics.js';
 
 const supervisorLock=join(dataDir,'supervisor.lock');
 const stopMarker=join(dataDir,'supervisor.stop');
@@ -24,17 +25,18 @@ export function requestSupervisorStop(force=false):boolean{
  writeFileSync(stopMarker,JSON.stringify({requestedAt:Date.now(),force}),{mode:0o600});
  return true;
 }
-function acquireLock():boolean{
+function acquireLock():number|null{
  mkdirSync(dataDir,{recursive:true,mode:0o700});
  for(let i=0;i<3;i++){
   try{
    const fd=openSync(supervisorLock,'wx',0o600);
-   try{writeFileSync(fd,JSON.stringify({pid:process.pid,startedAt:Date.now()}));}
+   const startedAt=Date.now();
+   try{writeFileSync(fd,JSON.stringify({pid:process.pid,startedAt}));}
    finally{closeSync(fd);}
-   return true;
+   return startedAt;
   }catch(e){
    if((e as NodeJS.ErrnoException).code!=='EEXIST')throw e;
-   if(supervisorRunning())return false;
+   if(supervisorRunning())return null;
    rmSync(supervisorLock,{force:true});
   }
  }
@@ -55,15 +57,33 @@ export type SupervisorOptions={
  restartDelayMs?:number;
 };
 export async function superviseService(options:SupervisorOptions):Promise<void>{
- if(!acquireLock())return;
+ const startedAt=acquireLock();
+ if(startedAt===null)return;
  installDiagnostics('supervisor');discardLegacyLog();
  // A previous stop marker cannot affect a newly explicitly launched service.
  rmSync(stopMarker,{force:true});
  let childPid=0,stopping=false;
  let restarts:number[]=[];
- const onSignal=()=>{stopping=true;writeFileSync(stopMarker,String(Date.now()));};
+ let totalRestarts=0,phase:SupervisorPhase='starting';
+ let lastExit:SupervisorReport['lastExit']=null;
+ let snapshotErrorLogged=false;
+ const publishStatus=()=>{
+  try{
+   writeSupervisorReport({startedAt,phase,workerPid:childPid||null,
+     totalRestarts,restartsInWindow:restarts.length,lastExit});
+   snapshotErrorLogged=false;
+  }catch(error){
+   if(!snapshotErrorLogged){snapshotErrorLogged=true;
+    logEvent('service','supervisor.snapshot_failed','warn',{error});
+   }
+  }
+ };
+ const onSignal=()=>{stopping=true;phase='stopping';publishStatus();writeFileSync(stopMarker,String(Date.now()));};
  process.on('SIGTERM',onSignal);process.on('SIGINT',onSignal);
  logEvent('service','supervisor.started','info',{pid:process.pid,restartLimit:maxRestarts,restartWindowMs});
+ publishStatus();
+ const statusTimer=setInterval(publishStatus,15_000);
+ statusTimer.unref();
  try{
   while(!stopping){
    if(existsSync(stopMarker))break;
@@ -72,6 +92,7 @@ export async function superviseService(options:SupervisorOptions):Promise<void>{
     stdio:['ignore','pipe','pipe']
    });
    childPid=worker.pid??0;
+   phase='worker-running';publishStatus();
    logEvent('service','worker.spawned','info',{workerPid:childPid,supervisorPid:process.pid,attempt:restarts.length+1});
    worker.stdout?.on('data',(data:Buffer)=>captureWorkerDiagnostic('stdout',data));
    worker.stderr?.on('data',(data:Buffer)=>captureWorkerDiagnostic('stderr',data));
@@ -96,6 +117,8 @@ export async function superviseService(options:SupervisorOptions):Promise<void>{
     worker.once('error',error=>{logEvent('service','worker.spawn_error','error',{error});finish(1,null);});
    });
    childPid=0;
+   lastExit={code:status.code,signal:status.signal,at:new Date().toISOString()};
+   phase=stopping?'stopping':'restarting';publishStatus();
    logEvent('service','worker.exited',stopping?'info':'error',{code:status.code,signal:status.signal,expected:stopping,workerPid:worker.pid??null});
    // Only an explicit stop request ends supervision. A worker may exit 0
    // unexpectedly (including a stray IPC exit); restart it rather than
@@ -103,17 +126,24 @@ export async function superviseService(options:SupervisorOptions):Promise<void>{
    if(stopping)break;
    const now=Date.now();
    restarts=restarts.filter(time=>now-time<restartWindowMs);
-   restarts.push(now);
+   restarts.push(now);totalRestarts++;
    if(restarts.length>maxRestarts){
+    phase='restart-limit';publishStatus();
     logEvent('service','supervisor.restart_limit','fatal',{restarts:restarts.length,windowMs:restartWindowMs});
     break;
    }
    const delay=options.restartDelayMs??Math.min(8_000,500*Math.pow(2,restarts.length-1));
    logEvent('service','worker.restart_scheduled','warn',{delayMs:delay,attempt:restarts.length});
+   publishStatus();
    await new Promise<void>(resolve=>setTimeout(resolve,delay));
   }
  }finally{
+  clearInterval(statusTimer);
   if(childPid){try{process.kill(childPid,'SIGTERM');}catch{}}
+  // Preserve the terminal reason; "stopped" alone would hide the
+  // restart-limit failure that caused this Supervisor to exit.
+  if(phase!=='restart-limit')phase='stopped';
+  publishStatus();
   logEvent('service','supervisor.stopped','info',{pid:process.pid});
   await flushLogs();await closeLogs();
   process.off('SIGTERM',onSignal);process.off('SIGINT',onSignal);
