@@ -1,13 +1,31 @@
 import {loadConfig,saveConfig} from './daemon.js';
+import {normalizeDesktopMode,normalizeDesktopCursor} from './desktop/defaults.js';
 import {normalizeServerUrl} from './command-palette.js';
 import {logEvent} from './diagnostics.js';
 import {validateProxyUrl,clearProxyCache} from './outbound-network.js';
 
 /** The same display shape served to the TUI by config-get and to the CLI offline. */
-export type ConfigView={name:string;url:string;activeUrl:string;pending:boolean;proxyAuto:boolean;proxyUrl:string|null};
+export type ConfigView={name:string;url:string;activeUrl:string;pending:boolean;proxyAuto:boolean;proxyUrl:string|null;
+ desktopMode:'observe_only'|'headless_only'|'headed_allowed';desktopCursor:boolean};
 export function getConfigView():ConfigView{
  const cfg=loadConfig();
- return{name:cfg.deviceName,url:cfg.pendingUrl??cfg.url,activeUrl:cfg.url,pending:Boolean(cfg.pendingUrl),proxyAuto:cfg.proxyAuto===true,proxyUrl:cfg.proxyUrl??null};
+ return{name:cfg.deviceName,url:cfg.pendingUrl??cfg.url,activeUrl:cfg.url,pending:Boolean(cfg.pendingUrl),proxyAuto:cfg.proxyAuto===true,proxyUrl:cfg.proxyUrl??null,desktopMode:normalizeDesktopMode(cfg.desktopMode),desktopCursor:normalizeDesktopCursor(cfg.desktopCursor)};
+}
+
+/** Only local device users may change desktop permissions (CLI/TUI via local IPC). */
+export function setDesktopConfig(key:'desktop-mode'|'desktop-cursor',value:string):ConfigView{
+ const cfg=loadConfig();
+ if(key==='desktop-mode'){
+  if(!['observe_only','headless_only','headed_allowed'].includes(value))
+   throw Error('desktop-mode 只能是 observe_only、headless_only 或 headed_allowed');
+  cfg.desktopMode=value as 'observe_only'|'headless_only'|'headed_allowed';
+ }else{
+  if(!/^(true|false)$/i.test(value))throw Error('desktop-cursor 只能是 true 或 false');
+  cfg.desktopCursor=value.toLowerCase()==='true';
+ }
+ saveConfig(cfg);
+ logEvent('security','desktop.configuration_changed','info',{key,mode:cfg.desktopMode,cursor:cfg.desktopCursor===true});
+ return getConfigView();
 }
 
 /** Changing the origin never transfers existing OAuth tokens to the new server. */

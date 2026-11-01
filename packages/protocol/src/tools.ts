@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { LIMITS } from './constants.js';
 import { batchInputSchema } from './batch.js';
+import { desktopToolInputSchemas } from './desktop.js';
 
 const DeviceId = z.string().trim().min(1).max(128);
 const WorkspaceId = z.string().trim().min(1).max(128);
@@ -39,6 +40,7 @@ const CursorPage = {
 };
 
 export const toolInputSchemas = {
+  ...desktopToolInputSchemas,
   device_list: z.object({ includeRevoked: z.boolean().default(false), ...CursorPage }).strict(),
   device_info: z.object({ ...CommonDevice }).strict(),
   workspace_open: z.object({ ...CommonDevice, path: Path, shellProfile: z.string().max(128).optional(), workspaceId: WorkspaceId.optional() }).strict(),
@@ -124,7 +126,19 @@ export const toolInputSchemas = {
   http_request: z.object({ ...CommonDevice, method: z.enum(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']), url: z.string().url().max(8_192), headers: z.record(z.string(), z.string().max(8_192)).default({}), body: z.string().max(1_048_576).optional(), timeoutMs: z.number().int().min(1).max(60_000).default(5_000), maxResponseBytes: z.number().int().min(1).max(2_097_152).default(65_536), redirect: z.enum(['manual', 'follow', 'error']).default('follow'), maxRedirects: z.number().int().min(0).max(10).default(3) }).strict(),
   system_snapshot: z.object({ ...CommonDevice, includeDisks: z.boolean().default(true), includeNetwork: z.boolean().default(true) }).strict(),
   system_processes: z.object({ ...CommonDevice, name: z.string().max(256).optional(), pid: z.number().int().positive().optional(), sortBy: z.enum(['cpu', 'memory', 'name', 'pid']).default('cpu'), limit: z.number().int().min(1).max(2_000).default(200), cursor: Cursor }).strict(),
-  screen_capture: z.object({ ...CommonDevice, monitor: z.number().int().nonnegative().optional(), rect: z.object({ x: z.number().int(), y: z.number().int(), width: z.number().int().min(1), height: z.number().int().min(1) }).strict().optional(), format: z.enum(['png', 'jpeg']).default('jpeg'), maxWidth: z.number().int().min(1).max(3_840).default(1_920), maxHeight: z.number().int().min(1).max(2_160).default(1_080), quality: z.number().min(0.1).max(1).default(0.8) }).strict(),
+  screen_capture: z.object({ ...CommonDevice,
+    target:z.enum(['screen','monitor','region','app','window']).optional(),
+    app:z.string().min(1).max(256).optional(),windowId:z.string().min(1).max(128).optional(),
+    monitor: z.number().int().nonnegative().optional(), rect: z.object({ x: z.number().int(), y: z.number().int(), width: z.number().int().min(1), height: z.number().int().min(1) }).strict().optional(),
+    format: z.enum(['png', 'jpeg']).default('jpeg'), maxWidth: z.number().int().min(1).max(3_840).default(1_920),
+    maxHeight: z.number().int().min(1).max(2_160).default(1_080), quality: z.number().min(0.1).max(1).default(0.8)
+  }).strict().superRefine((i,ctx)=>{
+    if(i.target==='app'&&!i.app)ctx.addIssue({code:'custom',path:['app'],message:'app target requires app'});
+    if(i.target==='window'&&!i.windowId)ctx.addIssue({code:'custom',path:['windowId'],message:'window target requires windowId'});
+    if(i.target==='region'&&!i.rect)ctx.addIssue({code:'custom',path:['rect'],message:'region target requires rect'});
+    if(['app','window'].includes(i.target??'')&&(i.rect||i.monitor!==undefined))
+      ctx.addIssue({code:'custom',path:['target'],message:'window/app snapshots cannot be combined with monitor/region'});
+  }),
 } as const;
 
 export type ToolName = keyof typeof toolInputSchemas;

@@ -20,16 +20,19 @@ import { systemTool, networkTool } from './system.js';
 import {activityPage, type ActivityPageOptions} from './activity-query.js';
 import {logEvent} from './diagnostics.js';
 import {codeVersion} from './version.js';
+import {normalizeDesktopMode,normalizeDesktopCursor} from './desktop/defaults.js';
 
 
 
-export type Config={url:string;deviceId:string;accessToken:string;refreshToken?:string;accessTokenExpiresAt?:number;clientId:string;deviceName:string;pendingUrl?:string|undefined;proxyAuto?:boolean|undefined;proxyUrl?:string|null|undefined};
+export type Config={url:string;deviceId:string;accessToken:string;refreshToken?:string;accessTokenExpiresAt?:number;clientId:string;deviceName:string;pendingUrl?:string|undefined;proxyAuto?:boolean|undefined;proxyUrl?:string|null|undefined;desktopMode?:'observe_only'|'headless_only'|'headed_allowed';desktopCursor?:boolean};
 export const dataDir=process.env.DESKBEACON_DATA_DIR ?? join(homedir(),'.deskbeacon');
 export const configPath=join(dataDir,'config.json');
 /** Persist the two proxy settings with stable JSON types, including for legacy configs. */
 export function saveConfig(config:Config){
  const stored={...config,proxyAuto:config.proxyAuto===true,
-  proxyUrl:typeof config.proxyUrl==='string'&&config.proxyUrl.trim()?config.proxyUrl:null};
+  proxyUrl:typeof config.proxyUrl==='string'&&config.proxyUrl.trim()?config.proxyUrl:null,
+  desktopMode:normalizeDesktopMode(config.desktopMode),
+  desktopCursor:normalizeDesktopCursor(config.desktopCursor)};
  mkdirSync(dataDir,{recursive:true});
  writeFileSync(configPath,JSON.stringify(stored,null,2),{mode:0o600});
  if(process.platform!=='win32')chmodSync(configPath,0o600);
@@ -38,7 +41,9 @@ export function loadConfig():Config{
  if(!existsSync(configPath))throw Error('DEVICE_NOT_CONFIGURED: run deskbeacon setup --url https://your-worker.example');
  const config=JSON.parse(readFileSync(configPath,'utf8')) as Config;
  return {...config,proxyAuto:config.proxyAuto===true,
-  proxyUrl:typeof config.proxyUrl==='string'&&config.proxyUrl.trim()?config.proxyUrl:null};
+  proxyUrl:typeof config.proxyUrl==='string'&&config.proxyUrl.trim()?config.proxyUrl:null,
+  desktopMode:normalizeDesktopMode(config.desktopMode),
+  desktopCursor:normalizeDesktopCursor(config.desktopCursor)};
 }
 const now=()=>new Date().toISOString();
 const sha=(value:string)=>createHash('sha256').update(value).digest('hex');
@@ -64,6 +69,10 @@ export class ClientDaemon extends EventEmitter {
   private replayInProgress=false;
   // Memory-only execution guard: a repeated dispatch with the same ID must never restart work.
   private operationInFlight=new Set<string>();
+  // Never persist sensitive UI/image responses; keep only unacknowledged live responses in memory.
+  private volatileResults=new Map<string,unknown>();
+  private desktopControllers=new Map<string,AbortController>();
+  private desktopAdapterUsed=false;
   private disconnectTimer:NodeJS.Timeout|undefined;
   private keepaliveTimer:NodeJS.Timeout|undefined;
   private handshakeTimer:NodeJS.Timeout|undefined;
@@ -111,7 +120,8 @@ export class ClientDaemon extends EventEmitter {
     if(token.refresh_token)this.config.refreshToken=token.refresh_token;
     if(token.expires_in)this.config.accessTokenExpiresAt=Date.now()+token.expires_in*1000;
     this.forceRefresh=false;
-    if(existsSync(configPath))try{const saved=loadConfig();if(saved.clientId===this.config.clientId)saveConfig({...saved,...this.config,pendingUrl:saved.pendingUrl,proxyAuto:saved.proxyAuto,proxyUrl:saved.proxyUrl});}catch{}
+    if(existsSync(configPath))try{const saved=loadConfig();if(saved.clientId===this.config.clientId)saveConfig({...saved,...this.config,pendingUrl:saved.pendingUrl,proxyAuto:saved.proxyAuto,proxyUrl:saved.proxyUrl,
+      desktopMode:normalizeDesktopMode(saved.desktopMode),desktopCursor:normalizeDesktopCursor(saved.desktopCursor)});}catch{}
   }
 
   private transfers=new Map<string,{status:string;bytes:number;path:string}>();
@@ -386,6 +396,17 @@ export class ClientDaemon extends EventEmitter {
       this.state='error: '+err(e);
     });
   }
+  /** Stop an already-created visual session without loading Desktop on ordinary runtime startup. */
+  async stopDesktopCursor(){
+    if(!this.desktopAdapterUsed)return;
+    const {stopSharedCursor}=await import('./desktop/adapter.js');
+    await stopSharedCursor();
+  }
+  async disposeDesktopRuntime(){
+    if(!this.desktopAdapterUsed)return;
+    const {disposeDesktopSessions}=await import('./desktop/adapter.js');
+    await disposeDesktopSessions();
+  }
   /** Reloads network routing on the next connection attempt without restarting the service. */
   reconnectForProxyChange(){if(!this.stopped)this.ws?.terminate();}
   stop(){
@@ -396,6 +417,8 @@ export class ClientDaemon extends EventEmitter {
     if(this.keepaliveTimer)clearInterval(this.keepaliveTimer);
     if(this.handshakeTimer)clearTimeout(this.handshakeTimer);
     if(this.reconnectTimer)clearTimeout(this.reconnectTimer);
+    for(const controller of this.desktopControllers.values())controller.abort();
+    void this.disposeDesktopRuntime();
     this.ws?.close();this.journal.closeAll();this.db.close();
   }
   async shutdown(){
@@ -409,12 +432,14 @@ export class ClientDaemon extends EventEmitter {
     // Shutdown does not require a WebSocket close handshake. terminate() releases
     // the transport immediately rather than waiting up to 30 seconds.
     this.ws?.terminate();
+    for(const controller of this.desktopControllers.values())controller.abort();
     const ids=new Set(this.supervisor.active().map(task=>task.id.split(':')[0]!));
     await Promise.allSettled([...ids].map(id=>this.supervisor.stop(id)));
     const deadline=Date.now()+7500;
-    while(this.supervisor.active().length&&Date.now()<deadline){
+    while((this.supervisor.active().length||this.desktopControllers.size)&&Date.now()<deadline){
       await new Promise(resolve=>setTimeout(resolve,75));
     }
+    await this.disposeDesktopRuntime();
     // Background close listeners must finish SQLite updates before DB shutdown.
     this.journal.closeAll();this.db.close();
   }
@@ -430,9 +455,11 @@ export class ClientDaemon extends EventEmitter {
     return this.send(value);
   }
   private restoredResult(id:string,receipt?:{status:string;result:string|null}):any|null{
+    if(this.volatileResults.has(id))return this.volatileResults.get(id);
     if(receipt?.result){try{return JSON.parse(receipt.result);}catch{}}
-    const row=this.db.prepare('SELECT record_path FROM activity WHERE id=?').get(id) as {record_path:string|null}|undefined;
-    if(!row?.record_path)return null;
+    const row=this.db.prepare('SELECT record_path,tool FROM activity WHERE id=?').get(id) as
+      {record_path:string|null;tool:string}|undefined;
+    if(!row?.record_path||row.tool.startsWith('desktop_')||row.tool==='screen_capture')return null;
     try{return this.journal.getResult(row.record_path)?.result??null;}catch{return null;}
   }
   private async replayPending(){
@@ -446,7 +473,11 @@ export class ClientDaemon extends EventEmitter {
         const receipt=this.supervisor.hasReceipt(item.operation_id);
         if(receipt?.status!=='completed')continue;
         const result=this.restoredResult(item.operation_id,receipt);
-        if(result===null)continue;
+        if(result===null){
+          this.send({type:'operation.failed',operationId:item.operation_id,payload:{code:'OPERATION_RESULT_UNAVAILABLE',
+            message:'Completed UI/image result is not retained after a runtime restart; inspect the UI before attempting any new action',retryable:false}});
+          continue;
+        }
         try{await this.final(item.operation_id,item.tool,result);}
         catch(e){logEvent('execution','result.replay_suspended','error',{error:e});break;}
       }
@@ -498,11 +529,13 @@ export class ClientDaemon extends EventEmitter {
     }
     if(m.type==='control.ack'){
       const id=this.resultAckIds.get(m.payload.inReplyTo);
-      if(id){this.resultAckIds.delete(m.payload.inReplyTo);this.db.prepare('DELETE FROM unacked_results WHERE operation_id=?').run(id);}
+      if(id){this.resultAckIds.delete(m.payload.inReplyTo);this.volatileResults.delete(id);this.db.prepare('DELETE FROM unacked_results WHERE operation_id=?').run(id);}
       return;
     }
     if(m.type==='operation.dispatch')await this.dispatch(m);
     else if(m.type==='foreground.cancel'){
+      for(const [id,controller] of this.desktopControllers)
+        if(id===m.operationId||id.startsWith(m.operationId+':'))controller.abort();
       await this.supervisor.stop(m.operationId);
     }
   }
@@ -547,14 +580,14 @@ export class ClientDaemon extends EventEmitter {
     const cwd=String(input.command?.cwd??input.cwd??
       (fileAction&&typeof pathHint==='string'?dirname(pathHint):pathHint)??process.cwd());
     this.db.prepare('INSERT OR REPLACE INTO activity(id,grant_id,actor_name,tool,description,status,time,cwd,request_json,record_path,record_state,outcome) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)')
-      .run(opId,m.grantId,actorName,tool,description,tool==='exec_foreground'?'queued':'running',started,cwd,null,journalPath,'ready','running');
+      .run(opId,m.grantId,actorName,tool,description,(tool==='exec_foreground'||tool.startsWith('desktop_'))?'queued':'running',started,cwd,null,journalPath,'ready','running');
     this.activityRevision++;
     this.emit('change');
     // Acceptance is already persisted locally. A disconnect during the ACK
     // must not silently prevent an otherwise valid, once-only execution.
     try{this.send({type:'operation.accepted',operationId:opId,payload:{acceptedAt:now()}});}
     catch{this.recordConnection('operation_ack_deferred','accepted '+opId);}
-    if(tool!=='exec_foreground'){
+    if(tool!=='exec_foreground'&&!tool.startsWith('desktop_')){
       try{this.send({type:'operation.started',operationId:opId,payload:{startedAt:now()}});}
       catch{this.recordConnection('operation_ack_deferred','started '+opId);}
     }
@@ -562,6 +595,10 @@ export class ClientDaemon extends EventEmitter {
       const result=await this.execute(tool,input,opId,m.grantId);
       this.journal.finish(opId,result,'completed',{background:tool==='exec_background'});
       this.supervisor.record(opId,'completed',result);
+      if(tool.startsWith('desktop_')||tool==='screen_capture'){
+        this.volatileResults.set(opId,result);
+        while(this.volatileResults.size>64)this.volatileResults.delete(this.volatileResults.keys().next().value!);
+      }
       const failure=result&&typeof result==='object'&&(Number(result.exitCode??0)!==0||result.isError===true||Boolean(result.error||result.spawnError||result.timedOut)||Number(result.failureCount??result.failed??0)>0);
       this.db.prepare('UPDATE activity SET status=?,result=NULL,finished_at=?,duration_ms=?,outcome=?,exit_code=?,error_code=? WHERE id=?')
         .run('completed',Date.now(),Date.now()-started,failure?'failed':'success',Number.isSafeInteger(result?.exitCode)?result.exitCode:null,typeof result?.code==='string'?result.code:null,opId);
@@ -610,6 +647,25 @@ export class ClientDaemon extends EventEmitter {
     }
   }
   private async execute(tool:string,input:Record<string,any>,operationId:string,grantId:string):Promise<any>{
+    if(tool.startsWith('desktop_')){
+      // Reject unsupported hosts before any import of the native Desktop Adapter.
+      const {assertDesktopPlatform}=await import('./desktop/platform.js');
+      assertDesktopPlatform();
+      const controller=new AbortController();
+      this.desktopControllers.set(operationId,controller);
+      try{return await this.supervisor.foregroundPool.run(operationId,async()=>{
+        if(controller.signal.aborted||this.supervisor.isCancelled(operationId))
+          throw Error('DESKTOP_CANCELLED: Operation cancelled before delivery');
+        const {executeDesktopTool}=await import('./desktop/adapter.js');
+        this.desktopAdapterUsed=true;
+        return executeDesktopTool(tool,input,grantId,controller.signal);
+      },operationId.includes(':')?undefined:()=>{
+        this.db.prepare("UPDATE activity SET status='running' WHERE id=?").run(operationId);
+        this.activityRevision++;this.emit('change');
+        try{this.send({type:'operation.started',operationId,payload:{startedAt:now()}});}
+        catch{this.recordConnection('operation_ack_deferred','started '+operationId);}
+      });}finally{this.desktopControllers.delete(operationId);}
+    }
     if(tool==='batch'){
       const batch=input as BatchInput;
       this.supervisor.trackBatch(operationId,true);
@@ -729,6 +785,16 @@ export class ClientDaemon extends EventEmitter {
     }
     if(tool==='net_ports')return systemTool(tool,input);
     if(tool.startsWith('net_')||tool==='http_request')return networkTool(tool,input);
+    if(tool==='screen_capture'&&(input.target==='app'||input.target==='window')){
+      const {assertDesktopPlatform}=await import('./desktop/platform.js');
+      assertDesktopPlatform();
+      const {captureDesktopWindow}=await import('./desktop/screenshot.js');
+      this.desktopAdapterUsed=true;
+      const controller=new AbortController();
+      this.desktopControllers.set(operationId,controller);
+      try{return await captureDesktopWindow(input,grantId,controller.signal);}
+      finally{this.desktopControllers.delete(operationId);}
+    }
     if(tool.startsWith('system_')||tool==='screen_capture')return systemTool(tool,input);
     if(tool==='transfer_upload'){
       if(!input.dataBase64)throw Error('UNSUPPORTED_HOST_TRANSFER: inline data required');

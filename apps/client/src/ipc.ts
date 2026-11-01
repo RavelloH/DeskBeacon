@@ -6,7 +6,7 @@ import { existsSync, rmSync, chmodSync, readdirSync, openSync, closeSync, readSy
   mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import type { ClientDaemon } from './daemon.js';
 import { dataDir, loadConfig, saveConfig } from './daemon.js';
-import {getConfigView,setPendingServerUrl,setProxyConfig} from './config-actions.js';
+import {getConfigView,setPendingServerUrl,setProxyConfig,setDesktopConfig} from './config-actions.js';
 import {diagnosticsSnapshot} from './diagnostics.js';
 import {detectFileOutputEncoding,decodeOutputPage} from './output-encoding.js';
 export const ipcPath=process.env.DESKBEACON_IPC_PATH ?? (platform()==='win32'?'\\\\.\\pipe\\deskbeacon-'+process.env.USERNAME:
@@ -300,6 +300,10 @@ export function startIpc(daemon:ClientDaemon,onExit?:()=>Promise<void>){
              if(key==='name')result={name:await daemon.rename(value)};
              else if(key==='url')result=setPendingServerUrl(value);
              else if(key==='proxy-auto'||key==='proxy-url'){result=setProxyConfig(key,value);daemon.reconnectForProxyChange();}
+             else if(key==='desktop-mode'||key==='desktop-cursor'){
+               result=setDesktopConfig(key,value);
+               if(key==='desktop-cursor'&&value==='false')await daemon.stopDesktopCursor();
+             }
              else throw Error('UNKNOWN_CONFIG_KEY');
            }
            else if(request.action==='activity-list'){

@@ -7,7 +7,7 @@ import {normalizeProcessStderr} from './terminal-errors.js';
 
 export type RecordEvent={v:1;type:string;time:number;[key:string]:unknown};
 export type RecordPage={text:string;nextOffset:number;totalBytes:number;hasMore:boolean;stream:string;available:boolean;encoding?:string;totalLines?:number};
-type OpenRecord={fd:number;path:string;relativePath:string;operationId:string;bytes:number;stdoutBytes:number;stderrBytes:number;finished:boolean;processExited:boolean;isBackground:boolean};
+type OpenRecord={fd:number;path:string;relativePath:string;operationId:string;tool:string;bytes:number;stdoutBytes:number;stderrBytes:number;finished:boolean;processExited:boolean;isBackground:boolean};
 const sensitive=/token|secret|password|cookie|authorization|api[_-]?key|private[_-]?key/i;
 const maxInputBytes=32*1024*1024;
 const maxResultBytes=64*1024*1024;
@@ -34,6 +34,21 @@ function safeSized(value:unknown,max:number,preserveBinary=false):{value:unknown
  if(Buffer.byteLength(raw)<=max)return{value:safe,limited:false};
  return{value:{summary:'Record exceeds local safety budget',originalBytes:Buffer.byteLength(raw),truncated:true},limited:true};
 }
+/** Desktop UI content is private. Journal only safe metadata; raw results still reach the authenticated MCP caller. */
+function desktopJournalSummary(value:unknown,kind:'input'|'result'):Record<string,unknown>{
+ const v=value&&typeof value==='object'?value as Record<string,any>:{};
+ if(kind==='input')return Object.fromEntries(['deviceId','action','kind','condition','refId','windowId','interactionMode','role',
+   'property','event','predicate','timeoutMs','idempotencyKey'].filter(k=>v[k]!==undefined).map(k=>[k,v[k]]));
+ const data=v.data&&typeof v.data==='object'?v.data:{};
+ const error=v.error&&typeof v.error==='object'?v.error:{};
+ return {
+  ok:v.ok??null,command:v.command??null,
+  snapshotId:data.snapshot_id??null,refCount:data.ref_count??null,complete:data.complete??null,
+  disposition:data.disposition??error.disposition??null,
+  errorCode:error.code??v.code??null,sessionId:v.desktop?.sessionId??null,
+  contentRedacted:true
+ };
+}
 export function recordRelativePath(operationId:string,at=Date.now()):string{
  const d=new Date(at),p=(n:number)=>String(n).padStart(2,'0');
  const hash=createHash('sha256').update(operationId).digest('hex');
@@ -55,10 +70,11 @@ export class RecordJournal{
   const at=options.time??Date.now(),relative=recordRelativePath(id,at),path=this.absolute(relative);
   mkdirSync(dirname(path),{recursive:true,mode:0o700});
   const fd=openSync(path,'wx',0o600);
-  const record:OpenRecord={fd,path,relativePath:relative,operationId:id,bytes:0,stdoutBytes:0,stderrBytes:0,finished:false,processExited:false,isBackground:options.isBackground??false};
+  const record:OpenRecord={fd,path,relativePath:relative,operationId:id,tool,bytes:0,stdoutBytes:0,stderrBytes:0,finished:false,processExited:false,isBackground:options.isBackground??false};
   this.open.set(id,record);
   try{
-   const prepared=safeSized(input,maxInputBytes);
+   const prepared=safeSized(tool.startsWith('desktop_')?desktopJournalSummary(input,'input'):
+     tool==='screen_capture'?{target:(input as any)?.target??'screen',monitor:(input as any)?.monitor??null,contentRedacted:true}:input,maxInputBytes);
    this.append(id,{type:'start',operationId:id,tool,parentOperationId:options.parentOperationId??null,input:prepared.value,
     ...(prepared.limited?{inputTruncated:true}:{}),time:at},true);
    fsyncSync(fd); // An accepted side-effecting command must have its journal first.
@@ -92,7 +108,9 @@ export class RecordJournal{
   if(r.finished)throw Error('RECORD_ALREADY_FINISHED');
   const payload:Record<string,unknown>=result&&typeof result==='object'?{...(result as Record<string,unknown>)}:{value:result};
   delete payload.stdout;delete payload.stderr;
-  const safe=safeSized(payload,maxResultBytes,true);
+  const safe=safeSized(r.tool.startsWith('desktop_')?desktopJournalSummary(payload,'result'):
+    r.tool==='screen_capture'?{mimeType:payload.mimeType,width:payload.width,height:payload.height,
+      sizeBytes:payload.sizeBytes,target:payload.target,contentRedacted:true}:payload,maxResultBytes,true);
   if(safe.limited)throw Error('RECORD_RESULT_LIMIT');
   this.append(id,{type:'result',data:safe.value,...(safe.limited?{resultTruncated:true}:{})});
   this.append(id,{type:'call_finish',status,stdoutBytes:r.stdoutBytes,stderrBytes:r.stderrBytes});

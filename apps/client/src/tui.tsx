@@ -341,9 +341,9 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon',onInten
  const [edit,setEdit]=useState<'command'|'search'|null>(null);
  const [text,setText]=useState(''),[query,setQuery]=useState('');
  const [commandIndex,setCommandIndex]=useState(0);
- const [settings,setSettings]=useState<{name?:string|undefined;url?:string|undefined;pending?:boolean;activeUrl?:string;proxyAuto?:boolean;proxyUrl?:string|null}>({});
+ const [settings,setSettings]=useState<{name?:string|undefined;url?:string|undefined;pending?:boolean;activeUrl?:string;proxyAuto?:boolean;proxyUrl?:string|null;desktopMode?:string;desktopCursor?:boolean}>({});
  const commandMenu=edit==='command'?commandPalette(text,{
-   name:settings.name??status?.deviceName,url:settings.url??status?.server,proxyAuto:settings.proxyAuto,proxyUrl:settings.proxyUrl}):null;
+   name:settings.name??status?.deviceName,url:settings.url??status?.server,proxyAuto:settings.proxyAuto,proxyUrl:settings.proxyUrl,desktopMode:settings.desktopMode,desktopCursor:settings.desktopCursor}):null;
  const commandOptions=commandMenu?.items??[];
  const commandSelect=Math.min(commandIndex,Math.max(0,commandOptions.length-1));
  useEffect(()=>{
@@ -928,7 +928,7 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon',onInten
     if(demo){setNotice(key+' = '+(key==='name'?status?.deviceName:status?.server));return true;}
     void requestLocal({action:'config-get'},3000).then(c=>{
      setSettings(c);
-     setNotice(key+' = '+String(key==='proxy-auto'?String(c.proxyAuto===true):key==='proxy-url'?(c.proxyUrl?'已配置':'null'):c[key]??'未配置')+(key==='url'&&c.pending?' · 待重新授权后切换':''));
+     setNotice(key+' = '+String(key==='desktop-mode'?(c.desktopMode??'headed_allowed'):key==='desktop-cursor'?String(c.desktopCursor!==false):key==='proxy-auto'?String(c.proxyAuto===true):key==='proxy-url'?(c.proxyUrl?'已配置':'null'):c[key]??'未配置')+(key==='url'&&c.pending?' · 待重新授权后切换':''));
     }).catch(error=>setNotice('配置读取失败：'+String(error)));
     return true;
    }
@@ -940,6 +940,8 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon',onInten
    void requestLocal({action:'config-set',key,value},18000).then(c=>{
     setSettings(prev=>({...prev,...c}));
     if(key==='name')setNotice('设备名称已同步：'+c.name);
+    else if(key==='desktop-mode')setNotice('桌面控制权限：'+c.desktopMode);
+    else if(key==='desktop-cursor')setNotice('Agent 光标显示：'+String(c.desktopCursor===true));
     else if(key==='proxy-auto')setNotice('自动代理：'+String(c.proxyAuto===true));
     else if(key==='proxy-url')setNotice('手动代理：'+(c.proxyUrl?'已配置':'null'));
     else setNotice(c.pending?'新 URL 已暂存，当前连接不变；运行 deskbeacon setup --url '+c.url+' 重新授权后切换':

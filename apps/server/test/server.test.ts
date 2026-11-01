@@ -13,8 +13,8 @@ describe('Server static contract',()=>{
   expect(wrangler.d1_databases).toBeUndefined();
   expect(wrangler.r2_buckets).toBeUndefined();
  });
- it('defines 36 MCP tools',()=>{
-  expect(TOOL_NAMES).toHaveLength(36);
+ it('defines core and initial Desktop MCP tools',()=>{
+  expect(TOOL_NAMES).toHaveLength(50);
   expect(TOOL_NAMES).toContain('batch');
   expect(TOOL_NAMES).toContain('fs_archive');
   expect(TOOL_NAMES).toContain('fs_read_many');

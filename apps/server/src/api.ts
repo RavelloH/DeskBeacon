@@ -103,13 +103,33 @@ export function makeMcpServer(env: Env, grantId: string, actorName?: string, oau
       } else {
         content.push({ type: "text", text: JSON.stringify(result) });
       }
-      return { content, structuredContent: result, isError: error };
+      // Image payloads must not be duplicated into structuredContent.
+      const structuredContent = !error && name === 'screen_capture' && result.data &&
+        typeof result.data === 'object' && 'base64' in result.data
+        ? {...result,data:Object.fromEntries(Object.entries(result.data).filter(([key])=>key!=='base64'))}
+        : result;
+      return { content, structuredContent, isError: error };
     });
   }
   return server;
 }
 
 const descriptions: Record<string,string> = {
+  desktop_status: "Inspect native Desktop automation status, permissions and supported surfaces. The agent-desktop runtime is loaded only when invoked and only on supported OS/architectures.",
+  desktop_list: "List desktop applications, windows, displays or UI surfaces on the selected device. Read-only; use windows to find a target windowId.",
+  desktop_snapshot: "Read a structured accessibility snapshot. Use compact interactive mode by default; follow @snapshot:eN qualified refs, re-snapshot after UI changes.",
+  desktop_find: "Search accessible UI elements by role/name/text/value and return qualified refs; narrow searches before modifying the UI.",
+  desktop_get: "Read live property or accessibility state for a snapshot-qualified element ref. Unknown is not the same as false.",
+  desktop_click: "Click a qualified accessibility ref. Defaults to headless semantic input; headed physical input is explicitly requested and device-policy gated.",
+  desktop_input: "Set, type or clear text on a snapshot-qualified control. Prefer set_value for semantic editing. Inputs are sensitive; do not send passwords unnecessarily.",
+  desktop_wait: "Wait for an element, window, text, menu, event or notification; returns once matched or on deadline. Does not alter the UI.",
+  desktop_control: "Set accessible element state, select, focus, or scroll using snapshot refs; prefer check/uncheck over toggle.",
+  desktop_press: "Send a keyboard shortcut to a chosen app or window. Requires explicit headed mode and device permission.",
+  desktop_pointer: "Physical hover, move, click, drag or mouse-wheel action. Requires headed permission; coordinate actions are invasive.",
+  desktop_app: "Launch or gracefully close a desktop application, or explicitly force termination.",
+  desktop_window: "Focus, move, resize, minimize, maximize, or restore a desktop window. Specify app or windowId.",
+  desktop_session: "Create, inspect, list or end agent-owned native desktop sessions. Session IDs are private to the Agent; cursor overlays need device opt-in.",
+
   device_list: "Find paired devices and their current live online/offline state. Call first when deviceId is unknown; records may remain listed while computers are powered off. Do not interpret lastSeenAt as continuous availability.",
   device_info: "Get a live device capability snapshot, current OS, supported shells, and default working directory. Requires an online device.",
   workspace_open: "Create or reopen a workspace. An explicit workspaceId is honored, and reopening keeps the original cwd. Shell cd commands do NOT update this context.",
@@ -143,7 +163,7 @@ const descriptions: Record<string,string> = {
   http_request: "Issue bounded HTTP requests FROM the device, including localhost-only APIs. Observe status/headers/body limits. Never send secrets in URL query strings.",
   system_snapshot: "Read CPU, memory, filesystem, and network system information without mutating the device.",
   system_processes: "List matching system processes by name or PID; read-only, not a process kill tool.",
-  screen_capture: "Capture the current screen and return image content when desktop permissions permit. Use sparingly and avoid sensitive screens.",
+  screen_capture: "Capture screen, monitor or rectangle via existing backend, or app/window via lazily loaded agent-desktop. Returns one image plus metadata; no duplicated Base64 in structuredContent.",
   fs_find: "Filename search via ripgrep. includeDirectories additionally discovers parent directories of searchable files (empty directories omitted). .gitignore works only within Git repositories; use respectIgnore=false to disable ignoring.",
   fs_grep: "Fast content grep via ripgrep with bounded structured results and truncation metadata.",
 };

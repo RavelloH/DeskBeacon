@@ -106,6 +106,9 @@ importers:
       '@deskbeacon/win32-x64':
         specifier: workspace:*
         version: link:../../packages/win32-x64
+      agent-desktop:
+        specifier: 1.0.2
+        version: 1.0.2
 
   apps/server:
     dependencies:
@@ -1178,6 +1181,13 @@ packages:
   agent-base@9.0.0:
     resolution: {integrity: sha512-TQf59BsZnytt8GdJKLPfUZ54g/iaUL2OWDSFCCvMOhsHduDQxO8xC4PNeyIkVcA5KwL2phPSv0douC0fgWzmnA==}
     engines: {node: '>= 20'}
+
+  agent-desktop@1.0.2:
+    resolution: {integrity: sha512-k2Qi3f0y1U60YaJOw1dob3EO55P/DuH4HK3WKdI9sMZLjVxpGZAzuG50rIWuIqS0JIVy07g+0pp9Of2JDjTX0w==}
+    engines: {node: '>=18'}
+    cpu: [arm64, x64]
+    os: [darwin, win32, linux]
+    hasBin: true
 
   ajv-formats@3.0.1:
     resolution: {integrity: sha512-8iUql50EUR+uUcdRQ3HDqa6EVyo3docL8g5WJ3FNcWmu62IbkGUue/pEyLBW8VGKKucTPgqeks4fIU1DA4yowQ==}
@@ -3108,6 +3118,9 @@ snapshots:
   adm-zip@0.6.1: {}
 
   agent-base@9.0.0: {}
+
+  agent-desktop@1.0.2:
+    optional: true
 
   ajv-formats@3.0.1(ajv@8.20.0):
     optionalDependencies:

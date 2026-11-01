@@ -2,6 +2,7 @@ packages:
   - apps/*
   - packages/*
 allowBuilds:
+  agent-desktop: true
   esbuild: true
   sharp: true
   workerd: true

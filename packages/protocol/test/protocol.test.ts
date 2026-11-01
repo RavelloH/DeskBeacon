@@ -10,8 +10,12 @@ import {
 } from '../src/index.js';
 
 describe('protocol schemas', () => {
-  it('registers the 36 MCP tools with universal batch and paged child output', () => {
-    expect(Object.keys(toolInputSchemas)).toHaveLength(36);
+  it('registers core tools and the initial Desktop MCP tools', () => {
+    expect(Object.keys(toolInputSchemas)).toHaveLength(50);
+    for(const name of ['desktop_status','desktop_list','desktop_snapshot','desktop_find',
+      'desktop_get','desktop_click','desktop_input','desktop_wait',
+      'desktop_control','desktop_press','desktop_pointer','desktop_app','desktop_window','desktop_session'])
+      expect(toolInputSchemas).toHaveProperty(name);
   });
 
   it('round-trips a versioned operation dispatch message', () => {

@@ -212,7 +212,8 @@ export class DeviceSession extends DurableObject<Env> {
 
   private async dispatch(body:Rpc):Promise<Record<string,unknown>> {
     const isFg=FG.has(body.name);
-    const canCancel=isFg||body.name==='batch';
+    const canCancel=isFg||body.name==='batch'||body.name.startsWith('desktop_')||
+      (body.name==='screen_capture'&&['app','window'].includes(String(body.input.target)));
     const input=body.input;
     const digest=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(JSON.stringify([body.name,input])));
     const requestHash=Array.from(new Uint8Array(digest)).map(x=>x.toString(16).padStart(2,"0")).join("");

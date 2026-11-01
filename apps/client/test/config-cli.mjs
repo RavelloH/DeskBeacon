@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {spawn,spawnSync} from 'node:child_process';
-import {mkdtempSync,rmSync,existsSync} from 'node:fs';
+import {mkdtempSync,rmSync,existsSync,readFileSync,writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {once} from 'node:events';
@@ -12,12 +12,22 @@ process.env.DESKBEACON_IPC_PATH=process.platform==='win32'?
  '\\\\.\\pipe\\deskbeacon-config-test-'+process.pid:join(root,'device.sock');
 const entry=fileURLToPath(new URL('../dist/index.js',import.meta.url));
 const env={...process.env,DESKBEACON_DATA_DIR:root,DESKBEACON_IPC_PATH:process.env.DESKBEACON_IPC_PATH};
-const {ClientDaemon,saveConfig,loadConfig}=await import('../dist/daemon.js');
+const {ClientDaemon,saveConfig,loadConfig,configPath}=await import('../dist/daemon.js');
 const {startIpc}=await import('../dist/ipc.js');
 const {closeLogs}=await import('../dist/diagnostics.js');
 const base={deviceName:'ASUS 原设备',url:'https://original.example',deviceId:'test-id',clientId:'test-id',
  accessToken:'DO_NOT_LEAK_ACCESS',refreshToken:'DO_NOT_LEAK_REFRESH'};
 saveConfig(base);
+// A pre-Desktop config without these keys uses new defaults; explicit overrides remain intact.
+assert.equal(loadConfig().desktopMode,'headed_allowed');
+assert.equal(loadConfig().desktopCursor,true);
+const preDesktop=JSON.parse(readFileSync(configPath,'utf8'));
+delete preDesktop.desktopMode;delete preDesktop.desktopCursor;
+writeFileSync(configPath,JSON.stringify(preDesktop));
+assert.equal(loadConfig().desktopMode,'headed_allowed');
+assert.equal(loadConfig().desktopCursor,true);
+saveConfig(loadConfig());
+assert.equal(JSON.parse(readFileSync(configPath,'utf8')).desktopCursor,true);
 const offline=(...args)=>spawnSync(process.execPath,[entry,'config',...args],{env,encoding:'utf8',timeout:9000});
 const online=(...args)=>new Promise((resolve,reject)=>{
  const child=spawn(process.execPath,[entry,'config',...args],{env,windowsHide:true,stdio:['ignore','pipe','pipe']});
@@ -31,7 +41,7 @@ let daemon,server;
 try{
  const list=offline();
  assert.equal(list.status,0);
- assert.match(list.stdout,/deskbeacon config <name\|url\|proxy-auto\|proxy-url> \[value\]/);
+ assert.match(list.stdout,/deskbeacon config <name\|url\|proxy-auto\|proxy-url\|desktop-mode\|desktop-cursor> \[value\]/);
  const name=offline('name');
  assert.equal(name.status,0,name.stderr);assert.match(name.stdout,/name = ASUS 原设备/);
  const url=offline('url');
@@ -61,6 +71,22 @@ try{
  assert.equal(invalidClear.status,1);assert.equal(loadConfig().proxyUrl,null);
  const invalidProxy=offline('proxy-url','file:///unsafe');
  assert.equal(invalidProxy.status,1);assert.equal(loadConfig().proxyUrl,null);
+ const desktopDefault=offline('desktop-mode');assert.match(desktopDefault.stdout,/headed_allowed/);
+ const cursorDefault=offline('desktop-cursor');assert.match(cursorDefault.stdout,/true/);
+ const desktopReadOnly=offline('desktop-mode','observe_only');
+ assert.equal(desktopReadOnly.status,0,desktopReadOnly.stderr);
+ assert.equal(loadConfig().desktopMode,'observe_only');
+ const desktopInvalid=offline('desktop-mode','headed_with_approval');
+ assert.equal(desktopInvalid.status,1);assert.equal(loadConfig().desktopMode,'observe_only');
+ const headed=offline('desktop-mode','headed_allowed');
+ assert.equal(headed.status,0);assert.equal(loadConfig().desktopMode,'headed_allowed');
+ const offAgain=offline('desktop-mode','headless_only');
+ assert.equal(offAgain.status,0);
+ const showCursor=offline('desktop-cursor','true');assert.equal(showCursor.status,0);
+ assert.equal(loadConfig().desktopCursor,true);
+ const invalidCursor=offline('desktop-cursor','yes');assert.equal(invalidCursor.status,1);
+ const hideCursor=offline('desktop-cursor','false');assert.equal(hideCursor.status,0);
+ assert.equal(loadConfig().desktopCursor,false);
  const pending=offline('url','https://new.example');
  assert.equal(pending.status,0,pending.stderr);assert.match(pending.stdout,/新 URL 已暂存/);
  let cfg=loadConfig();
@@ -93,6 +119,12 @@ try{
  assert.deepEqual(calls,['新设备 带空格']);
  assert.equal(loadConfig().deviceName,'新设备 带空格');
  const runtimeGet=await online('name');assert.match(runtimeGet.stdout,/name = 新设备 带空格/);
+ const onlineMode=await online('desktop-mode','observe_only');
+ assert.equal(onlineMode.status,0,onlineMode.stderr);
+ assert.equal(loadConfig().desktopMode,'observe_only');
+ const onlineCursor=await online('desktop-cursor','false');
+ assert.equal(onlineCursor.status,0,onlineCursor.stderr);
+ assert.equal(loadConfig().desktopCursor,false);
  const runtimeUrl=await online('url','https://another.example');
  assert.equal(runtimeUrl.status,0,runtimeUrl.stderr);
  assert.match(runtimeUrl.stdout,/重新授权后切换/);

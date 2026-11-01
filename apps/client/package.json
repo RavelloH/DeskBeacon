@@ -51,6 +51,7 @@
     "ws": "^8.22.0"
   },
   "optionalDependencies": {
+    "agent-desktop": "1.0.2",
     "@deskbeacon/win32-arm64": "workspace:*",
     "@deskbeacon/win32-x64": "workspace:*"
   }

@@ -10,7 +10,8 @@ export type ToolRow={toolLabel:string;action:Segment[];result:Segment[];readOnly
 const readTools=new Set(['device_list','device_info','workspace_info','fs_list','fs_stat',
  'fs_read','fs_read_many','fs_find','fs_grep','background_list','background_get',
  'background_output','operation_get','operation_output','transfer_download','transfer_status',
- 'net_ports','net_probe','system_snapshot','system_processes','screen_capture']);
+ 'net_ports','net_probe','system_snapshot','system_processes','screen_capture',
+ 'desktop_status','desktop_list','desktop_snapshot','desktop_find','desktop_get','desktop_wait']);
 export function isReadOnlyTool(tool:string,request?:string|null):boolean{
  if(readTools.has(tool))return true;
  if(tool==='fs_archive'){const input=parse(request);return input.action==='list';}
@@ -102,6 +103,21 @@ function editResult(r:Fields):Segment[]{
  return part(r.changed===false?'无变化':'已更新');
 }
 const templates:Record<ToolName,Template>={
+ desktop_status:{label:'桌面能力',action:()=> '检查桌面自动化可用性',result:r=>part(r.ok===false?'检测失败':clean(r.data?.platform??r.platform??'已检查'))},
+ desktop_list:{label:'桌面列表',action:i=>'查看 '+clean(i.kind),result:r=>part(qty((Array.isArray(r.data)?r.data:(r.data?.apps??r.data?.windows??r.data?.displays??r.data?.surfaces??[])).length,'项'))},
+ desktop_snapshot:{label:'桌面快照',action:i=>clean(i.app??i.windowId??'当前界面'),result:r=>part(qty(r.data?.ref_count,'个可操作控件'))},
+ desktop_find:{label:'桌面查找',action:i=>clean(i.role??'控件')+' · 按条件查找',result:r=>part(qty(r.data?.matches?.length,'个匹配'))},
+ desktop_get:{label:'控件属性',action:i=>clean(i.property??'text'),result:r=>part(r.ok===false?'读取失败':'已读取')},
+ desktop_click:{label:'桌面点击',action:i=>clean(i.kind??'single')+' · '+clean(i.refId),result:r=>part(clean(r.data?.disposition?.delivery??'已执行'))},
+ desktop_input:{label:'桌面输入',action:i=>clean(i.action??'set_value')+' · '+clean(i.refId),result:r=>part(clean(r.data?.disposition?.delivery??'已执行'))},
+ desktop_wait:{label:'桌面等待',action:i=>clean(i.condition),result:r=>part(r.ok===false?'未满足':'条件已满足')},
+ desktop_control:{label:'桌面控件',action:i=>clean(i.action)+' · '+clean(i.refId),result:r=>part(clean(r.data?.disposition?.delivery??'已执行'))},
+ desktop_press:{label:'键盘快捷键',action:i=>clean(i.key),result:r=>part(clean(r.data?.disposition?.delivery??'已执行'))},
+ desktop_pointer:{label:'鼠标操作',action:i=>clean(i.action)+' · 物理交互',result:r=>part(clean(r.data?.disposition?.delivery??'已执行'))},
+ desktop_app:{label:'应用管理',action:i=>clean(i.action)+' · '+clean(i.app),result:r=>part(clean(r.data?.disposition?.delivery??'已执行'))},
+ desktop_window:{label:'窗口管理',action:i=>clean(i.action)+' · '+clean(i.app??i.windowId),result:r=>part(clean(r.data?.disposition?.delivery??'已执行'))},
+ desktop_session:{label:'桌面会话',action:i=>clean(i.action)+' · 会话管理',result:r=>part(clean(r.data?.session_id??'已完成'))},
+
  device_list:{label:'设备列表',action:()=> '已授权设备',result:r=>part(qty(r.devices?.length,'台设备')+(Array.isArray(r.devices)?' · '+r.devices.filter((d:Fields)=>d.state==='online').length+' 在线':''))},
  device_info:{label:'设备信息',action:i=>clean(i.deviceId,60),result:r=>part(clean(r.platform??r.os??r.deviceName??'已获取设备信息'))},
  workspace_open:{label:'创建工作区',action:i=>clean(i.cwd??i.path??'当前目录')+' · '+clean(i.shellProfile??'默认 Shell',32),result:r=>part('已创建 · '+clean(r.workspaceId,12))},
@@ -137,7 +153,7 @@ const templates:Record<ToolName,Template>={
  http_request:{label:'HTTP 请求',action:i=>clean(i.method??'GET')+' · '+safeUrl(i.url),result:r=>part('HTTP '+String(r.status??r.statusCode??'—'),Number(r.status??r.statusCode)>=400?'danger':'muted')},
  system_snapshot:{label:'系统概况',action:()=> 'CPU · 内存 · 磁盘',result:r=>part(r.cpuPercent!==undefined?'CPU '+r.cpuPercent+'%':r.cpu?.usage!==undefined?'CPU '+r.cpu.usage+'%':'系统状态已读取')},
  system_processes:{label:'系统进程',action:i=>clean(i.name??(i.pid?'PID '+i.pid:'全部')),result:r=>listResult(r,'processes','个进程')},
- screen_capture:{label:'屏幕截图',action:i=>(i.monitor!==undefined?'屏幕 '+(Number(i.monitor)+1):'默认屏幕'),result:r=>part((r.width??'—')+'×'+(r.height??'—')+(r.sizeBytes?' · '+bytes(r.sizeBytes):''))}
+ screen_capture:{label:'屏幕截图',action:i=>i.target==='window'?('窗口 '+clean(i.windowId)):i.target==='app'?('应用 '+clean(i.app)):(i.monitor!==undefined?'屏幕 '+(Number(i.monitor)+1):'默认屏幕'),result:r=>part((r.width??'—')+'×'+(r.height??'—')+(r.sizeBytes?' · '+bytes(r.sizeBytes):''))}
 };
 export const TOOL_LABELS=Object.fromEntries(Object.entries(templates).map(([name,template])=>[name,template.label])) as Record<ToolName,string>;
 export function toolRow(a:ActivityEntry):ToolRow{

@@ -10,6 +10,7 @@ DeskBeacon 是一个开源、自托管的远程设备 MCP 服务。连接后，�
 - **处理文件**：查看、搜索、编辑文件，压缩或解压。
 - **传输文件**：在 AI 客户端与设备之间传输文件。
 - **查看设备状态**：检查进程、网络、运行状况，并在受支持的平台上截图。
+- **操作桌面**：在支持的图形系统上读取应用与控件树、查找元素、语义点击、编辑输入框及管理窗口。
 - **管理多台设备**：通过一个服务器连接多台电脑，分别为它们命名。
 
 ## 快速开始
@@ -108,6 +109,26 @@ https://deskbeacon.your-account.workers.dev/mcp
 | `x` | 停止选中的任务 |
 | `?` | 查看快捷键 |
 | `q` | 退出界面 |
+
+## 桌面控制
+
+DeskBeacon 默认安装桌面自动化依赖，但不会随终端界面或后台 Runtime 启动而加载它；只有调用 `desktop_*` 等相关工具、或使用 `screen_capture` 截取应用/窗口时，才会检查平台、权限并按需执行原生程序。
+
+桌面控制支持 Windows、macOS 及满足原生运行条件的 Linux 图形会话；不支持的系统（如 Android / Termux）会返回明确错误，不影响文件、命令或网络工具。普通截图仍使用 DeskBeacon 原有实现。
+
+默认采用非侵入式 Headless 控件操作。真实键鼠或需要切换焦点的操作必须显式请求 Headed，并经设备端权限策略允许；不会自动从 Headless 回退到 Headed。不同 Agent 的操作记录继续出现在原有活动历史与详情界面，输入文本和截图不会被完整保存在普通操作日志中。
+
+桌面策略由设备使用者在本机管理，不允许远程 Agent 修改。默认 `desktop-mode=headed_allowed`、`desktop-cursor=true`，可以通过现有 TUI 的 `/config` 或 CLI 修改：
+
+```bash
+deskbeacon config desktop-mode observe_only
+deskbeacon config desktop-mode headless_only
+deskbeacon config desktop-mode headed_allowed
+deskbeacon config desktop-cursor true
+deskbeacon config desktop-cursor false
+```
+
+`observe_only` 只允许观察界面；`headless_only` 允许语义控件操作；`headed_allowed` 额外允许 Agent 显式请求真实键鼠输入。多 Agent Cursor Overlay 默认允许显示，但仍只在遇到实际 Desktop 调用时按需创建，不会随 DeskBeacon 启动；关闭后会回收运行中的共享可视化 Session。截图和无障碍快照可能包含敏感内容，请仅将设备授权给可信的 Agent。
 
 ## 更新与排查
 
