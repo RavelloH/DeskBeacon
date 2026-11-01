@@ -99,6 +99,204 @@ export async function runNative(command:string,args:string[],timeoutMs=15000,max
   });
 }
 
+
+type WindowInfo={id:string;app_name:string;title?:string;is_focused?:boolean;accessible?:boolean;bounds?:{x:number;y:number;width:number;height:number};process_instance?:string;pid?:number};
+function windowsFrom(result:Record<string,any>):WindowInfo[]{
+ const data=result.data;
+ return (Array.isArray(data)?data:Array.isArray(data?.windows)?data.windows:[]) as WindowInfo[];
+}
+function canonicalApp(name:string):string{
+ return name.toLowerCase().replace(/\\/g,'/').split('/').pop()!.replace(/\.exe$/,'');
+}
+export function matchesApp(requested:string,observed:string):boolean{
+ const a=canonicalApp(requested),b=canonicalApp(observed);
+ if(a===b)return true;
+ // The Windows Calculator launch alias is "calc", but its accessible process is CalculatorApp.exe.
+ return process.platform==='win32'&&
+   ((a==='calc'||a==='calculator')&&b==='calculatorapp');
+}
+async function nativeWindows(signal?:AbortSignal):Promise<WindowInfo[]>{
+ const result=await runNative('list-windows',[],10000,160*1024,signal);
+ return windowsFrom(result);
+}
+function selectedWindow(rows:WindowInfo[],input:Input):WindowInfo|undefined{
+ return rows.find(row=>input.windowId?row.id===input.windowId:
+   typeof input.app==='string'&&matchesApp(input.app,row.app_name));
+}
+function nativePostState(command:string,data:Record<string,unknown>):Record<string,unknown>{
+ return {ok:true,command,data};
+}
+/** The native launcher can outlive its caller after creating a GUI process. Only newly observed,
+ * identity-matching GUI windows provide enough evidence to report a verified launch.
+ * Preexisting matching windows must not be reported as new launches. */
+async function launchWithPostcondition(input:Input,args:string[],signal?:AbortSignal):Promise<Record<string,any>>{
+ const nativeDeadline=Math.min(input.timeoutMs??15000,120000);
+ let before:WindowInfo[]|null=null;
+ try{before=await nativeWindows(signal);}catch{/* Preserve upstream result if window discovery is unavailable. */}
+ const start=Date.now();
+ try{
+  return await runNative('launch',[...args,'--timeout',String(nativeDeadline)],nativeDeadline+3500,160*1024,signal);
+ }catch(error){
+  const err=error as Error & {code?:string};
+  if(signal?.aborted||before===null||!['DESKTOP_TIMEOUT','TIMEOUT','WINDOW_NOT_FOUND','ACTION_FAILED'].includes(err.code??''))throw error;
+  let after:WindowInfo[];
+  try{after=await nativeWindows(signal);}catch{throw error;}
+  const beforeIds=new Set(before.map(w=>w.process_instance??w.id));
+  const created=after.find(row=>matchesApp(input.app,row.app_name)&&
+    !beforeIds.has(row.process_instance??row.id) && (!input.activate||row.is_focused));
+  if(!created)throw error;
+  return nativePostState('launch',{
+   app:input.app,window:created,elapsed_ms:Date.now()-start,
+   disposition:{delivery:'delivered_verified',retry:'unsafe'},
+   details:{verification_scope:'new_application_window',upstream_error:err.code,launch_result:'observed_after_native_timeout'}
+  });
+ }
+}
+
+function actionUndelivered(error:unknown):boolean{
+ const e=error as {partialResult?:{disposition?:{delivery?:string};details?:{physical_delivery_started?:boolean}}};
+ return e.partialResult?.disposition?.delivery==='not_delivered'&&
+   e.partialResult?.details?.physical_delivery_started!==true;
+}
+function sessionFlags(args:string[],input:Input):string[]{
+ const idx=args.findIndex(v=>v===input.refId||v==='--window-id'||v==='--app');
+ return idx<0?args.slice():args.slice(0,idx);
+}
+function focusableRef(tree:any):string|undefined{
+ let found:string|undefined;
+ function visit(node:any):void{
+  if(found||!node||typeof node!=='object')return;
+  const actions=Array.isArray(node.available_actions)?node.available_actions:[];
+  if(node.ref_id&&actions.includes('SetFocus')&&
+    ['textfield','listbox','tab','button','menuitem'].includes(String(node.role)) &&
+    !/^(关闭|close)(\s|$)/i.test(String(node.name??''))){found=node.ref_id;return;}
+  for(const child of node.children??[])visit(child);
+ }
+ visit(tree);
+ return found;
+}
+/** Only when native foreground delivery never started, retry by focusing a harmless,
+ * accessibility-backed control and verifying the exact target window became focused. */
+async function focusByAccessibility(window:WindowInfo,args:string[],input:Input,signal?:AbortSignal):Promise<boolean>{
+ if(!window.accessible&&'accessible' in window)return false;
+ const prefix=sessionFlags(args,input);
+ const snapshot=await runNative('snapshot',[...prefix,'--window-id',window.id,'-i','--compact','--max-depth','10'],
+   12000,160*1024,signal);
+ const ref=focusableRef(snapshot.data?.tree);
+ if(!ref)return false;
+ await runNative('focus',[...prefix,ref],12000,160*1024,signal);
+ return selectedWindow(await nativeWindows(signal),{windowId:window.id})?.is_focused===true;
+}
+async function hoverWithRecovery(input:Input,args:string[],signal?:AbortSignal):Promise<Record<string,any>>{
+ const limit=Math.min(input.timeoutMs??15000,120000)+2500;
+ try{return await runNative('hover',args,limit,160*1024,signal);}
+ catch(error){
+  if(!input.refId||!actionUndelivered(error)||signal?.aborted)throw error;
+  const prefix=sessionFlags(args,input),ref=input.refId;
+  // Ref focus uses accessibility only; no mouse event has yet been delivered.
+  try{await runNative('focus',[...prefix,ref],12000,160*1024,signal);}
+  catch(focusError){
+   if(!actionUndelivered(focusError))throw focusError;
+   throw nativeError('DESKTOP_FOREGROUND_UNAVAILABLE',
+    'Windows denied focusing the hover target; physical pointer delivery did not begin',
+    {disposition:{delivery:'not_delivered',retry:'safe'},
+     suggestion:'Focus the target window manually, then retry the ref hover; avoid blind coordinate input.'});
+  }
+  try{return await runNative('hover',args,limit,160*1024,signal);}
+  catch(second){
+   if(!actionUndelivered(second)||signal?.aborted)throw second;
+   const boundsResult=await runNative('get',[...prefix,ref,'--property','bounds'],10000,160*1024,signal);
+   const rect=boundsResult.data?.value;
+   if(!rect||!Number.isFinite(rect.x)||!Number.isFinite(rect.y)||
+      !Number.isFinite(rect.width)||!Number.isFinite(rect.height)||
+      rect.width<=0||rect.height<=0)throw second;
+   const point={x:Math.round(rect.x+rect.width/2),y:Math.round(rect.y+rect.height/2)};
+   const rows=await nativeWindows(signal);
+   // The physical fallback is valid only when exactly one foreground window covers the target.
+   const foreground=rows.filter(w=>w.is_focused===true&&w.bounds&&
+     point.x>=w.bounds.x&&point.x<=w.bounds.x+w.bounds.width&&
+     point.y>=w.bounds.y&&point.y<=w.bounds.y+w.bounds.height);
+   if(foreground.length!==1)throw second;
+   const moved=await runNative('mouse-move',[...prefix,'--xy',point.x+','+point.y],
+     limit,160*1024,signal);
+   return nativePostState('hover',{action:'hover',target:{ref,point,window_id:foreground[0]!.id},
+     disposition:{delivery:moved.data?.disposition?.delivery??'delivered_unverified',retry:'unsafe'},
+     details:{recovery:'focused_ref_then_coordinate_move',verified:false}});
+  }
+ }
+}
+
+async function focusWindowWithPostcondition(input:Input,args:string[],signal?:AbortSignal):Promise<Record<string,any>>{
+ const initial=selectedWindow(await nativeWindows(signal),input);
+ if(initial?.is_focused){
+  return nativePostState('focus-window',{window:initial,
+   disposition:{delivery:'delivered_verified',retry:'safe'},
+   details:{already_focused:true,verification_scope:'window_focus'}});
+ }
+ try{return await runNative('focus-window',args,Math.min(input.timeoutMs??15000,120000)+2500,160*1024,signal);}
+ catch(error){
+  if(signal?.aborted)throw error;
+  let after=selectedWindow(await nativeWindows(signal),input);
+  if(!after?.is_focused&&after?.accessible&&actionUndelivered(error)&&input.interactionMode==='headed'){
+   try{await focusByAccessibility(after,args,input,signal);}catch{/* Keep original native error if verified focus cannot be established. */}
+   after=selectedWindow(await nativeWindows(signal),input);
+  }
+  if(!after?.is_focused){
+   if(actionUndelivered(error)&&process.platform==='win32')
+    throw nativeError('DESKTOP_FOREGROUND_UNAVAILABLE',
+      'Windows did not allow the requested application to become foreground; no physical input was delivered',
+      {disposition:{delivery:'not_delivered',retry:'safe'},details:{window_id:input.windowId??after?.id,upstream_error:(error as {code?:string}).code},
+       suggestion:'Bring the window to the foreground manually, then retry or use headless accessibility actions.'});
+   throw error;
+  }
+  return nativePostState('focus-window',{window:after,
+   disposition:{delivery:'delivered_verified',retry:'unsafe'},
+   details:{verification_scope:'window_focus',upstream_error:(error as {code?:string}).code,
+    recovery:'accessibility_focus_and_state_verification'}});
+ }
+}
+export function closeButton(tree:any):string|undefined{
+ const matches:string[]=[];
+ function visit(node:any,withinTitlebar=false):void{
+  if(!node||typeof node!=='object')return;
+  const inTitle=withinTitlebar||String(node.native_id?.value??'').toLowerCase()==='titlebar'||
+   String(node.name??'').toLowerCase()==='标题栏';
+  const name=String(node.name??'');
+  if(node.role==='button'&&typeof node.ref_id==='string'&&(
+    String(node.native_id?.value??'').toLowerCase()==='close'||
+    (inTitle&&/^(关闭|close)(\s|$)/i.test(name))))matches.push(node.ref_id);
+  for(const child of node.children??[])visit(child,inTitle);
+ }
+ visit(tree);
+ return matches.length===1?matches[0]:undefined;
+}
+/** Graceful fallback for packaged Windows apps whose windows appear in list-windows but
+ * whose process identity cannot be resolved by close-app. Never terminate or force-close. */
+async function closePackagedWindow(input:Input,args:string[],signal?:AbortSignal):Promise<Record<string,any>>{
+ const windows=(await nativeWindows(signal)).filter(w=>matchesApp(input.app,w.app_name));
+ if(windows.length===0)throw nativeError('APP_NOT_FOUND','No accessible window belongs to '+input.app);
+ if(windows.length!==1)throw nativeError('AMBIGUOUS_TARGET',
+  'Cannot safely resolve a single target window for packaged application '+input.app);
+ const window=windows[0]!;
+ const prefix=args.slice(0,args.lastIndexOf(input.app));
+ const snapshot=await runNative('snapshot',[...prefix,'--window-id',window.id,'-i','--compact'],
+   12000,160*1024,signal);
+ const ref=closeButton(snapshot.data?.tree);
+ if(!ref)throw nativeError('ACTION_NOT_SUPPORTED','Could not uniquely identify a title-bar Close control');
+ const clicked=await runNative('click',[...prefix,ref],12000,160*1024,signal);
+ let remaining=await nativeWindows(signal);
+ for(let attempt=0;attempt<3&&remaining.some(w=>w.id===window.id);attempt++){
+  await new Promise(resolve=>setTimeout(resolve,150));
+  remaining=await nativeWindows(signal);
+ }
+ if(remaining.some(w=>w.id===window.id))
+  throw nativeError('DESKTOP_CLOSE_UNVERIFIED','Close control was activated but the window remains visible',
+   {disposition:{delivery:clicked.data?.disposition?.delivery??'delivered_unverified',retry:'unsafe'}});
+ return nativePostState('close-app',{app:input.app,window_id:window.id,method:'window_close_control',
+  disposition:{delivery:'delivered_verified',retry:'unsafe'},
+  details:{verification_scope:'window_absent',native_app_discovery:'unavailable'}});
+}
+
 export async function executeDesktopTool(
   tool:string,input:Input,grantId:string,signal?:AbortSignal,
 ):Promise<Record<string,unknown>>{
@@ -238,6 +436,21 @@ export async function executeDesktopTool(
     default:throw nativeError('UNSUPPORTED_TOOL','Desktop action is not implemented: '+tool);
   }
   // Execution deadline includes initialization, ref resolution and native UI activity.
-  const result=await runNative(command,args,Math.min(input.timeoutMs??15000,120000)+2500,160*1024,signal);
+  let result:Record<string,any>;
+  if(tool==='desktop_app'&&input.action==='launch'){
+    result=await launchWithPostcondition(input,args,signal);
+  }else if(tool==='desktop_window'&&input.action==='focus'){
+    result=await focusWindowWithPostcondition(input,args,signal);
+  }else if(tool==='desktop_pointer'&&input.action==='hover'){
+    result=await hoverWithRecovery(input,args,signal);
+  }else if(tool==='desktop_app'&&input.action==='close'&&!input.force){
+    try{result=await runNative(command,args,Math.min(input.timeoutMs??15000,120000)+2500,160*1024,signal);}
+    catch(error){
+      if(process.platform!=='win32'||(error as {code?:string}).code!=='APP_NOT_FOUND')throw error;
+      result=await closePackagedWindow(input,args,signal);
+    }
+  }else{
+    result=await runNative(command,args,Math.min(input.timeoutMs??15000,120000)+2500,160*1024,signal);
+  }
   return {...result,desktop:{sessionId,engine:'agent-desktop',policy:desktopPolicy()}};
 }

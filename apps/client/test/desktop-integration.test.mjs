@@ -112,3 +112,30 @@ test('journal does not persist Desktop input text, accessible values or screensh
     assert.ok(!contents.includes(secret),secret);
  }finally{rmSync(root,{recursive:true,force:true});}
 });
+
+test('region screenshot maps x/y to Sharp left/top without mutating the public rectangle',async()=>{
+ const {sharpRegion}=await import('../dist/system.js');
+ const rect={x:152,y:207,width:460,height:235};
+ assert.deepEqual(sharpRegion(rect),{left:152,top:207,width:460,height:235});
+ assert.deepEqual(rect,{x:152,y:207,width:460,height:235});
+});
+
+test('packaged Windows app aliases and titlebar close-button selection are unambiguous',async()=>{
+ const {matchesApp,closeButton}=await import('../dist/desktop/adapter.js');
+ assert.equal(matchesApp('CalculatorApp.exe','CalculatorApp.exe'),true);
+ if(process.platform==='win32'){
+  assert.equal(matchesApp('calc','CalculatorApp.exe'),true);
+  assert.equal(matchesApp('calculator','CalculatorApp.exe'),true);
+ }
+ assert.equal(matchesApp('notepad','CalculatorApp.exe'),false);
+ const titlebar={role:'group',native_id:{kind:'automation_id',value:'TitleBar'},
+  children:[
+   {role:'button',name:'关闭 计算器',ref_id:'@s123:e4'},
+   {role:'button',name:'最大化 计算器',ref_id:'@s123:e3'}
+  ]};
+ assert.equal(closeButton({role:'window',children:[titlebar]}),'@s123:e4');
+ assert.equal(closeButton({role:'window',children:[titlebar,
+  {role:'group',children:[{role:'button',name:'关闭 计算器',ref_id:'@s123:e44'}]}]}),'@s123:e4');
+ assert.equal(closeButton({role:'window',children:[titlebar,titlebar]}),undefined);
+ assert.equal(closeButton({role:'window',children:[{role:'button',name:'清除全部',ref_id:'@s123:e10'}]}),undefined);
+});

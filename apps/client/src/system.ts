@@ -5,6 +5,12 @@ import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 const execFileAsync=promisify(execFile);
 
+/** Convert DeskBeacon public screen coordinates to Sharp's extraction coordinate keys. */
+export function sharpRegion(rect:{x:number;y:number;width:number;height:number}){
+ return {left:rect.x,top:rect.y,width:rect.width,height:rect.height};
+}
+
+
 async function windowsProcessOwners():Promise<Map<number,{name:string;user:string|null}>> {
  const map=new Map<number,{name:string;user:string|null}>();
  try{
@@ -106,7 +112,7 @@ export async function systemTool(name:string,i:I){
    if(i.monitor!==undefined&&!selected)throw Error('SCREEN_UNAVAILABLE: monitor not found');
    const buffer=await screen({format:'png',...(selected?{screen:selected.id}:{})});
    let image=sharp(buffer);
-   if(i.rect)image=image.extract(i.rect);
+   if(i.rect)image=image.extract(sharpRegion(i.rect));
    image=image.resize({width:i.maxWidth??1920,height:i.maxHeight??1080,fit:'inside',withoutEnlargement:true});
    const output=i.format==='png'?await image.png().toBuffer():await image.jpeg({quality:Math.round((i.quality??0.8)*100)}).toBuffer();
    const meta=await sharp(output).metadata();
