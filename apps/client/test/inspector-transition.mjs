@@ -36,20 +36,24 @@ test('I/O tab remains stable until the requested stream finishes and stale respo
  await running;
 });
 
-test('multiple source files preserve their independent line numbers, even with a truncated group',()=>{
+test('multiple source files preserve independent line numbers in separate preview blocks',()=>{
  const a=Array.from({length:80},(_,i)=>'A-'+i).join('\n');
  const b=Array.from({length:80},(_,i)=>'B-'+i).join('\n');
  const [group]=createDetailSections([
   {kind:'output',title:'a.ts',text:a,startLine:1},
   {kind:'output',title:'b.ts',text:b,startLine:1178}
  ],512);
- assert.ok(group.preview.truncated);
- const lines=numberedPreviewBlock(group.preview,undefined,null,group.lineMap);
+ assert.equal(group.parts.length,2);
+ assert.ok(group.parts.every(part=>part.preview.truncated));
+ const lines=group.parts.flatMap(part=>numberedPreviewBlock(
+  part.preview,undefined,part.startLine??null,undefined,part.sourceText,'o'
+ ));
  const numbers=lines.map(line=>line.sourceLine).filter(n=>typeof n==='number');
  assert.equal(numbers[0],1);
  assert.equal(numbers.at(-1),1257);
  assert.ok(numbers.includes(1178)||numbers.some(n=>n>1178),'the second file uses its own range');
- assert.ok(lines.some(line=>line.gutterLabel==='...'&&line.text.includes('已隐藏')));
+ assert.equal(lines.filter(line=>line.gutterLabel==='...').length,2,
+  'each file keeps its own single omission row');
 });
 test('full command output always numbers actual logical lines; no truncation marker when complete',()=>{
  const source=Array.from({length:1180},(_,i)=>'line'+(i+1)).join('\n');

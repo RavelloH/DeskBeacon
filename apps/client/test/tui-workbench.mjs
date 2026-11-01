@@ -227,8 +227,14 @@ try{
       'thin full-width rule must connect to the vertical detail border');
     assert.ok(!thinDivider.includes('┠'),'divider junction must be thin on both sides');
     const detailTitleLine=screenLines[detailWide.row]??'';
-    assert.ok(!detailTitleLine.includes(' / '),
-      'DETAIL should suppress the scroll indicator when the selected entry fits the viewport');
+    // New structured INPUT/OUTPUT sections may increase detail height. If the
+    // content no longer fits, the heading must report a valid zero-offset
+    // overflow rather than falsely claiming the entry fits.
+    const detailScroll=detailTitleLine.match(/\b(\d+) \/ (\d+)\b/);
+    if(detailScroll){
+      assert.equal(Number(detailScroll[1]),0,'initial DETAIL scroll must begin at the top');
+      assert.ok(Number(detailScroll[2])>0,'scroll indicator must describe actual overflow');
+    }
     assert.ok(!thinDivider.includes('ACTION'),'section titles must not appear inside the rule');
     assert.ok(!thinDivider.includes('━'),'section dividers must use light line glyphs');
     assert.ok(screenLines.some(row=>row.includes('│ TOOL')&&row.includes('│')),

@@ -2,9 +2,17 @@ import assert from 'node:assert/strict';
 import {PassThrough} from 'node:stream';
 import React from 'react';
 import {render} from 'ink';
-import {ClientDaemon} from '../dist/daemon.js';
-import {startIpc} from '../dist/ipc.js';
-import {App} from '../dist/tui.js';
+import {mkdtempSync,rmSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+const testDir=mkdtempSync(join(tmpdir(),'deskbeacon-tui-render-'));
+process.env.DESKBEACON_DATA_DIR=testDir;
+process.env.DESKBEACON_IPC_PATH=process.platform==='win32'
+ ?'\\\\.\\pipe\\deskbeacon-tui-test-'+process.pid
+ :join(testDir,'daemon.sock');
+const {ClientDaemon}=await import('../dist/daemon.js');
+const {startIpc}=await import('../dist/ipc.js');
+const {App}=await import('../dist/tui.js');
 const config={
  url:'http://127.0.0.1:65530',deviceId:'tui-test',clientId:'tui-test',
  accessToken:'isolated-test-token',deviceName:'TUI fixture'
@@ -55,4 +63,6 @@ try{
    new Promise(resolve=>setTimeout(resolve,1200))
  ]);
  daemon.stop();
+ await (await import('../dist/diagnostics.js')).closeLogs();
+ rmSync(testDir,{recursive:true,force:true,maxRetries:8,retryDelay:100});
 }

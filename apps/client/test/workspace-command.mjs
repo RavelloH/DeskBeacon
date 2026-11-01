@@ -49,5 +49,6 @@ try{
  console.log('PASS nested workspaceId for foreground program and shell, background, workspace_cd, explicit cwd override and grant isolation');
 }finally{
  await daemon.shutdown();
+ await (await import('../dist/diagnostics.js')).closeLogs();
  rmSync(root,{recursive:true,force:true,maxRetries:15,retryDelay:150});
 }

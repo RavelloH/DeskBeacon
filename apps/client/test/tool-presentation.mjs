@@ -111,7 +111,8 @@ assert.ok(!textOf(legacyRead).includes('[redacted]'),'legacy placeholders are no
 console.log('PASS scoped file reads display exactly returned content, never re-read or invent full-file text');
 const patch=detailPresentation(make('fs_edit',{path:'E:/demo/new.ts',mode:'replace',
  oldText:'const answer = 41;',newText:'const answer = 42;'},
- {replacements:1,addedLines:1,removedLines:1}),Date.now());
+ {replacements:1,addedLines:1,removedLines:1,
+  diff:'--- a/E:/demo/new.ts\n+++ b/E:/demo/new.ts\n@@ -1 +1 @@\n-const answer = 41;\n+const answer = 42;'}),Date.now());
 assert.ok(textOf(patch).includes('DIFF'));
 assert.ok(patch.some(row=>row.text.trimStart().startsWith('+const')&&row.tone==='success'));
 assert.ok(patch.some(row=>row.text.trimStart().startsWith('-const')&&row.tone==='danger'));

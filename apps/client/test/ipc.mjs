@@ -1,7 +1,15 @@
 import assert from 'node:assert/strict';
-import { ClientDaemon } from '../dist/daemon.js';
+import {mkdtempSync,rmSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 import si from 'systeminformation';
-import { startIpc, requestIpc } from '../dist/ipc.js';
+const testDir=mkdtempSync(join(tmpdir(),'deskbeacon-ipc-test-'));
+process.env.DESKBEACON_DATA_DIR=testDir;
+process.env.DESKBEACON_IPC_PATH=process.platform==='win32'
+ ?'\\\\.\\pipe\\deskbeacon-ipc-test-'+process.pid
+ :join(testDir,'daemon.sock');
+const {ClientDaemon}=await import('../dist/daemon.js');
+const {startIpc,requestIpc}=await import('../dist/ipc.js');
 const config={url:'http://localhost:8787',deviceId:'local-ipc-test',
  clientId:'local-ipc-test',accessToken:'test-only',deviceName:'Local IPC test'};
 const daemon=new ClientDaemon(config);
@@ -31,4 +39,6 @@ try{
  si.mem=actualMem;
  await new Promise(r=>listener.close(r));
  daemon.stop();
+ await (await import('../dist/diagnostics.js')).closeLogs();
+ rmSync(testDir,{recursive:true,force:true,maxRetries:8,retryDelay:100});
 }

@@ -1,5 +1,5 @@
 import {describe,it,expect} from 'vitest';
-import {createPreview,previewFromEdges} from '../src/output-preview.js';
+import {createPreview,previewFromEdges,splitOutputPreview} from '../src/output-preview.js';
 
 const bytes=(text:string)=>new TextEncoder().encode(text).length;
 describe('unified output previews',()=>{
@@ -24,6 +24,27 @@ describe('unified output previews',()=>{
   expect(bytes(l.text)).toBeLessThanOrEqual(4096);
   expect(l.omittedBytes+l.displayedBytes).toBe(l.originalBytes);
   expect(l.omittedBytes).toBeGreaterThan(40000);
+ });
+ it('exposes stable omission offsets, direction and exact hidden line counts',()=>{
+  const content=Array.from({length:1000},(_,index)=>'line '+(index+1)).join('\n');
+  const preview=createPreview(content,512);
+  expect(preview.omissionDirection).toBe('middle');
+  expect(preview.omissionStart).toBeTypeOf('number');
+  expect(preview.omissionEnd).toBeTypeOf('number');
+  const parts=splitOutputPreview(preview);
+  expect(parts).not.toBeNull();
+  expect(parts).toEqual({
+   head:preview.text.slice(0,preview.omissionStart),
+   tail:preview.text.slice(preview.omissionEnd),
+   direction:'middle'
+  });
+  expect(preview.omittedLines).toBe(preview.tailStartLine! - preview.headLines! - 1);
+  // Older saved receipts have the same marker but no offset metadata.
+  expect(splitOutputPreview({text:preview.text,truncated:true})).toEqual(parts);
+  const headOnly=previewFromEdges('',content.slice(-1024),bytes(content),512,{totalLines:1000});
+  expect(splitOutputPreview(headOnly)?.direction).toBe('head');
+  const tailOnly=previewFromEdges(content.slice(0,1024),'',bytes(content),512,{totalLines:1000});
+  expect(splitOutputPreview(tailOnly)?.direction).toBe('tail');
  });
  it('never splits emoji, UTF8 scalars, or misreports count',()=>{
   const content='首行🪐\n'+('测试🚀\n'.repeat(2500))+'收尾😃\n';

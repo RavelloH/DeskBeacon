@@ -23,5 +23,22 @@ if(process.platform==='win32'&&process.arch==='x64'&&platform==='win32-x64'){
  const test=spawnSync(exe,[command],{encoding:'utf8',cwd:process.cwd(),timeout:15000,windowsHide:true});
  assert.equal(test.status,0,'Windows helper execution failed: '+test.stderr);
  assert.match(test.stdout,/DESKBEACON_C_JOB_OK/);
+ // Standard input is forwarded by the native launcher, not by Node directly.
+ // The target must observe EOF even when there are no input bytes.
+ for(const [name,input,expected] of [
+  ['empty EOF','','NATIVE_STDIN_EOF='],
+  ['explicit stdin','native-test-input','NATIVE_STDIN_EOF=native-test-input']
+ ]){
+  const eofPayload=Buffer.from(JSON.stringify({
+   File:process.execPath,
+   Args:['-e',"let text='';process.stdin.on('data',chunk=>text+=chunk);process.stdin.on('end',()=>console.log('NATIVE_STDIN_EOF='+text));process.stdin.resume();"],
+   Cwd:process.cwd(),ParentPid:process.pid
+  }),'utf8').toString('base64');
+  const eof=spawnSync(exe,[eofPayload],{
+   input,encoding:'utf8',cwd:process.cwd(),timeout:4500,windowsHide:true
+  });
+  assert.equal(eof.status,0,'Windows helper did not forward '+name+': '+(eof.error?.message??eof.stderr));
+  assert.ok(eof.stdout.includes(expected),'Missing native stdin/EOF result for '+name+': '+eof.stdout);
+ }
 }
 console.log('C Win32 Job Object helper verified',platform,size,'bytes');

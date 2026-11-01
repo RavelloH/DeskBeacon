@@ -4,6 +4,7 @@
  */
 export type PreviewStrategy="full"|"balanced"|"result_priority";
 export type PreviewReason="none"|"preview_budget";
+export type PreviewOmissionDirection="head"|"middle"|"tail";
 export interface OutputPreview {
  text:string;
  truncated:boolean;
@@ -16,6 +17,34 @@ export interface OutputPreview {
  totalLines?:number;
  headLines?:number;
  tailStartLine?:number;
+ /** Character offsets for the internal marker; absent on legacy snapshots. */
+ omissionStart?:number;
+ omissionEnd?:number;
+ omissionDirection?:PreviewOmissionDirection;
+ /** Exact omitted logical line count when both edges and total line count are known. */
+ omittedLines?:number;
+}
+export interface OutputPreviewParts {
+ head:string;
+ tail:string;
+ direction:PreviewOmissionDirection;
+}
+const legacyMarker=/\n… \[中间省略 \d+ 字节(?: · 查看完整输出)?\] …\n/;;
+/** Split a preview using metadata first, with a compatibility parser for old receipts. */
+export function splitOutputPreview(
+ preview:Pick<OutputPreview,"text"|"truncated"|"omissionStart"|"omissionEnd"|"omissionDirection">
+):OutputPreviewParts|null{
+ if(!preview.truncated)return null;
+ const {text}=preview;
+ const start=preview.omissionStart,end=preview.omissionEnd;
+ if(Number.isInteger(start)&&Number.isInteger(end)&&start!>=0&&end!>=start!&&end!<=text.length){
+  const head=text.slice(0,start),tail=text.slice(end);
+  return{head,tail,direction:preview.omissionDirection??(!head?"head":!tail?"tail":"middle")};
+ }
+ const match=legacyMarker.exec(text);
+ if(!match)return null;
+ const head=text.slice(0,match.index),tail=text.slice(match.index+match[0].length);
+ return{head,tail,direction:!head?"head":!tail?"tail":"middle"};
 }
 const encoder=new TextEncoder();
 const decoder=new TextDecoder();
@@ -70,15 +99,22 @@ export function previewFromEdges(
  const headBudget=Math.floor(contentBudget*headRatio);
  const tailBudget=contentBudget-headBudget;
  let head=bytePrefix(headBytes,headBudget),tail=byteSuffix(tailBytes,tailBudget);
- let shown=byteLength(head)+byteLength(tail);
- let omitted=Math.max(0,originalBytes-shown);
- let text=head+marker(omitted)+tail;
+ const shown=byteLength(head)+byteLength(tail);
+ const omitted=Math.max(0,originalBytes-shown);
+ const omission=marker(omitted);
+ const text=head+omission+tail;
  if(byteLength(text)>budget)throw new Error("PREVIEW_EXCEEDS_BUDGET");
+ const omissionDirection:PreviewOmissionDirection=!head?"head":!tail?"tail":"middle";
+ const tailStartLine=options.totalLines===undefined?undefined:
+  Math.max(1,options.totalLines-countLines(tail)+1);
+ const omittedLines=omissionDirection==="middle"&&tailStartLine!==undefined
+  ?Math.max(0,tailStartLine-countLines(head)-1):undefined;
  return {text,truncated:true,reason:"preview_budget",strategy,originalBytes,
   displayedBytes:shown,omittedBytes:omitted,hasFullOutput,
-  headLines:countLines(head),
-  ...(options.totalLines===undefined?{}:{totalLines:options.totalLines,
-    tailStartLine:Math.max(1,options.totalLines-countLines(tail)+1)})};
+  headLines:countLines(head),omissionStart:head.length,
+  omissionEnd:head.length+omission.length,omissionDirection,
+  ...(options.totalLines===undefined?{}:{totalLines:options.totalLines,tailStartLine:tailStartLine!,
+    ...(omittedLines===undefined?{}:{omittedLines})})};
 }
 export function createPreview(
  text:string,budget:number,options:{hasFullOutput?:boolean;headRatio?:number;totalLines?:number}={}

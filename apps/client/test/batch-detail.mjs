@@ -51,7 +51,8 @@ assert.ok(!outJson.includes('Y'.repeat(600)),'Never retain unlimited stdout');
 const largeDetail=detailPresentation(entry(parsedInput,parsedOutput),Date.now());
 const largeText=largeDetail.map(row=>row.text).join('\n');
 assert.ok(largeText.includes('long-0')&&largeText.includes('long-15'));
-assert.ok(largeText.includes('以上为本地有界摘要'));
+assert.ok(largeText.includes('[历史结果摘要已压缩 · 按 o 查看完整结果]'));
+assert.ok(!largeText.includes('以上为本地有界摘要'));
 console.log('PASS large Batch previews retain all sub-operations rather than collapsing to a count');
 
 const legacy=detailPresentation(entry({description:'old',stages:[]},{summary:'historical truncated'}),Date.now());

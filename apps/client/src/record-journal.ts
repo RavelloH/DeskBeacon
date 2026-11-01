@@ -1,4 +1,4 @@
-import {createPreview,previewFromEdges} from '@deskbeacon/protocol';
+import {createPreview,previewFromEdges,splitOutputPreview} from '@deskbeacon/protocol';
 import {createHash} from 'node:crypto';
 import {mkdirSync,openSync,writeSync,readSync,closeSync,statSync,existsSync,fsyncSync} from 'node:fs';
 import {join,dirname,resolve,sep} from 'node:path';
@@ -164,12 +164,21 @@ export class RecordJournal{
       diffStored,diffBytes,diffTruncated}=object;
     let rendered:{diff:string;diffPreviewMeta:object}|undefined;
     if(typeof object.diff==='string'){
-     const old=object.diffPreviewMeta as {originalBytes?:number;totalLines?:number;truncated?:boolean}|undefined;
-     const match=/\n… \[中间省略 \d+ 字节(?: · 查看完整输出)?\] …\n/.exec(object.diff);
-     const next=match&&old?.truncated&&old.originalBytes!==undefined
-      ?previewFromEdges(object.diff.slice(0,match.index),
-        object.diff.slice(match.index+match[0].length),old.originalBytes,2048,
-        ...(old.totalLines===undefined?[{}]:[{totalLines:old.totalLines}]))
+     const old=object.diffPreviewMeta as {
+      originalBytes?:number;totalLines?:number;truncated?:boolean;hasFullOutput?:boolean;
+      omissionStart?:number;omissionEnd?:number;omissionDirection?:'head'|'middle'|'tail'
+     }|undefined;
+     const split=old&&typeof object.diff==='string'?splitOutputPreview({
+      text:object.diff,truncated:Boolean(old.truncated),
+      ...(old.omissionStart===undefined?{}:{omissionStart:old.omissionStart}),
+      ...(old.omissionEnd===undefined?{}:{omissionEnd:old.omissionEnd}),
+      ...(old.omissionDirection===undefined?{}:{omissionDirection:old.omissionDirection})
+     }):null;
+     const next=split&&old?.truncated&&old.originalBytes!==undefined
+      ?previewFromEdges(split.head,split.tail,old.originalBytes,2048,{
+        ...(old.hasFullOutput===undefined?{}:{hasFullOutput:old.hasFullOutput}),
+        ...(old.totalLines===undefined?{}:{totalLines:old.totalLines})
+       })
       :createPreview(object.diff,2048);
      const {text,...meta}=next;
      rendered={diff:text,diffPreviewMeta:meta};
@@ -180,8 +189,10 @@ export class RecordJournal{
    }
    if(tool==='fs_edit'&&kind==='input'){
     const {path,mode,expectedHash,dryRun}=object;
+    const preview=createPreview(raw,3072);
+    const {text,...previewInputMeta}=preview;
     return JSON.stringify({path,mode,expectedHash,dryRun,
-      previewInput:createPreview(raw,3072).text,previewLimited:true});
+      previewInput:text,previewInputMeta,previewLimited:true});
    }
    if(tool==='fs_write'&&kind==='input'){
     const {path,mode,encoding,overwrite,workspaceId}=object;

@@ -26,7 +26,9 @@ try{
  const oldInput=JSON.parse(fileWrite.preview.input);
  assert.equal(oldInput.previewLimited,true);
  assert.equal(oldInput.path,'E:/example/output.ts');
- assert.equal(oldInput.content,undefined,'activity list must not fetch huge text');
+ assert.ok(typeof oldInput.content==='string'&&Buffer.byteLength(oldInput.content)<=3072,
+  'activity list must retain only the bounded preview rather than complete source');
+ assert.equal(oldInput.contentPreviewMeta?.truncated,true);
  let calls=0;
  async function load(data){
   return loadSelectedFilePreview(data.entry,async req=>{
@@ -60,7 +62,9 @@ try{
  assert.equal(compactResult.successCount,7,'list must preserve real successCount not show 0');
  assert.equal(compactResult.failureCount,0);
  assert.equal(compactResult.previewLimited,true);
- assert.ok(compactResult.files.every(file=>!('content'in file)));
+ assert.ok(compactResult.files.every(file=>typeof file.content==='string'&&
+  Buffer.byteLength(file.content)<=512&&file.contentPreviewMeta?.truncated),
+  'multi-file activity list must retain bounded previews and per-file metadata');
  const fullMany=await load(many);
  assert.ok(fullMany?.available);
  const hydratedMany=withSelectedFilePreview(many.entry,fullMany);

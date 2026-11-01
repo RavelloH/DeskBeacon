@@ -30,7 +30,8 @@ test('auto-highlight JSON and JSONL outputs, including input JSON and diff',()=>
  assert.ok(result[0].syntax.length>1);
  assert.ok(new Set(result[0].syntax.map(s=>s.color)).size>1);
  const diff=numberedBlock('--- a.ts\n+++ b.ts\n@@ -1 +1 @@\n-old\n+new','diff');
- assert.ok(diff.some(row=>row.syntax.some(span=>span.color==='#9ED1A3')));
+ assert.ok(diff.some(row=>row.tone==='success'&&row.text.startsWith('+new')));
+ assert.ok(diff.some(row=>row.tone==='danger'&&row.text.startsWith('-old')));
  const input={command:{mode:'shell',script:'echo 123'},content:'{"ok": true}',mode:'rewrite',path:'hello.json'};
  const entry={id:'input',tool:'fs_write',description:'write',grant_id:'g',status:'completed',time:Date.now(),
   request_json:JSON.stringify(input),result:'{}'};
@@ -51,7 +52,7 @@ test('highlight full multiline source before preview cropping; tail retains real
  const sameComplete=complete.find(row=>row.text==='this is still in a comment');
  assert.ok(lastComment&&sameComplete);
  assert.deepEqual(lastComment.syntax,sameComplete.syntax);
- assert.ok(excerpt.some(row=>row.gutterLabel==='...'&&row.text.includes('已隐藏')&&row.text.includes('按 o 展开')));
+ assert.ok(excerpt.some(row=>row.gutterLabel==='...'&&row.text.startsWith('[已隐藏 ')&&row.text.includes('按 o 查看完整输出')));
  const gap=excerpt.find(row=>row.gutterLabel==='...');
  assert.equal(gap.sourceLine,null);
  assert.equal(gap.lineDigits,String(preview.totalLines).length);

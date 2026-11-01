@@ -54,20 +54,21 @@ assert.ok(inspectorOutput({text:'partial',totalBytes:7,available:true},'stderr',
  .some(x=>x.text.includes('缺失字符数无法确定')),
  'executor-level output truncation must be explicit even when the missing count is unknowable');
 const summary=numberedBlock(source,'powershell',1,20,1000);
-assert.ok(summary.at(-1).text.includes('(按 o 展开)'),'result preview should point to the actual o key');
-assert.ok(summary.at(-1).text.includes('行'),'preview must count omitted lines');
+assert.ok(summary.some(row=>row.text.includes('[已隐藏 ')&&row.text.includes('按 o 查看完整输出')),
+ 'result preview should point to the actual o key');
+assert.ok(summary.some(row=>row.text.includes('行')),'preview must count omitted lines');
 const lengthLimited=numberedBlock('z'.repeat(1200),undefined,1,10,400);
-assert.ok(lengthLimited.some(x=>x.text.includes('... +0 行, 800 字符 (按 o 展开)')));
-assert.ok(!numberedBlock('a\r\nb\r\n',undefined,1,10,1000).some(x=>x.text.includes('...剩余')),
- 'CRLF normalization must not invent truncation');
-const beyondCharCap=numberedBlock('first\nsecond\nthird\nfourth',undefined,1,20,8);
-assert.ok(beyondCharCap.at(-1).text.includes('2 行'),
- 'line remainder must include newlines beyond the character cap');
-const inputLimited=numberedBlock('x'.repeat(650),undefined,1,10,1000,'i');
-assert.ok(inputLimited.at(-1).text.includes('... +0 行, 150 字符 (按 i 展开)'));
-const lineLimited=numberedBlock('x'.repeat(650),undefined,1,10,1000);
-assert.equal(lineLimited.at(-1).text,'... +0 行, 150 字符 (按 o 展开)',
- 'per-line 500 character cut must be included in the total footer count');
+assert.ok(lengthLimited.some(row=>/^\[已隐藏 \d+ 字节 · 按 o 查看完整输出\]$/.test(row.text)));
+assert.ok(!numberedBlock('a\r\nb\r\n',undefined,1,10,1000).some(row=>row.text.includes('… [已省略')),
+ 'CRLF normalization must not invent field truncation');
+const manyLines=Array.from({length:40},(_,index)=>'line '+index).join('\n');
+const beyondCharCap=numberedBlock(manyLines,undefined,1,20,128);
+assert.ok(beyondCharCap.some(row=>row.text.includes('已隐藏')&&row.text.includes(' 行 · 按 o 查看完整输出')));
+const inputLimited=numberedBlock('x'.repeat(650),undefined,1,10,400,'i');
+assert.ok(inputLimited.some(row=>row.text.includes('已隐藏')&&row.text.includes('按 i 查看完整输入')));
+const lineLimited=numberedBlock('x'.repeat(650),undefined,1,10,400);
+assert.ok(lineLimited.some(row=>row.text.includes('已隐藏')&&row.text.includes('按 o 查看完整输出')));
+assert.ok(!lineLimited.some(row=>row.text.includes('按 i 查看完整输入')));
 const wraps=wrapDetail(fullNumberedBlock('12345678901234567890\nshort'),12);
 assert.ok(wraps.some(x=>x.continued),'long logical line must soft wrap');
 assert.equal(inspectorCopyText('input',entry,{text:'complete',totalBytes:8,available:true}),'complete');

@@ -37,7 +37,8 @@ test('fs_edit retains the real applied diff in OUTPUT and bounds Agent preview',
   assert.ok(!view.some(row=>row.section==='COMPLETE RESULT · JSON'));
   const d=detailPresentation(entry,Date.now());
   assert.ok(d.some(row=>row.section==='OUTPUT'));
-  assert.ok(d.some(row=>row.gutterLabel==='...'&&row.text.includes('已隐藏')&&row.text.includes('按 o 展开')));
+  assert.ok(d.some(row=>row.gutterLabel==='...'&&row.text.startsWith('[已隐藏 ')&&row.text.includes('按 o 查看完整输出')));
+  assert.equal(d.filter(row=>row.gutterLabel==='...').length,1,'the omission must stay inside one code block');
   assert.ok(!d.some(row=>row.text.startsWith('预览已省略')));
  }finally{rmSync(dir,{recursive:true,force:true});}
 });
@@ -50,18 +51,18 @@ test('4 KiB is shared across all DETAILS input/output, without list item limits'
   {kind:'output',title:'diff',text:output,preference:'balanced'}
  ]);
  assert.equal(groups.length,2);
- const bytes=groups.reduce((sum,g)=>sum+Buffer.byteLength(g.preview.text),0);
+ const bytes=groups.reduce((sum,g)=>sum+g.parts.reduce((partSum,part)=>partSum+Buffer.byteLength(part.preview.text),0),0);
  assert.ok(bytes<=4096,'preview bytes '+bytes);
- assert.ok(groups.every(g=>g.preview.truncated));
- assert.ok(groups[0].preview.text.includes('INPUT_BEGIN'));
- assert.ok(groups[1].preview.text.includes('OUTPUT_END'));
+ assert.ok(groups.every(g=>g.parts.every(part=>part.preview.truncated)));
+ assert.ok(groups[0].parts[0].preview.text.includes('INPUT_BEGIN'));
+ assert.ok(groups[1].parts[0].preview.text.includes('OUTPUT_END'));
  const tiny=createDetailSections([
   {kind:'input',title:'tiny',text:'a'},
   {kind:'output',title:'huge',text:'Z'.repeat(15000)}
  ]);
- assert.ok(tiny.reduce((v,g)=>v+Buffer.byteLength(g.preview.text),0)<=4096);
+ assert.ok(tiny.reduce((sum,g)=>sum+g.parts.reduce((partSum,part)=>partSum+Buffer.byteLength(part.preview.text),0),0)<=4096);
  const many=Array.from({length:180},(_,i)=>'match '+i).join('\n');
  const list=createDetailSections([{kind:'output',title:'entries',text:many,preference:'head'}]);
- assert.equal(list[0].preview.truncated,false);
- assert.ok(list[0].preview.text.includes('match 179'));
+ assert.equal(list[0].parts[0].preview.truncated,false);
+ assert.ok(list[0].parts[0].preview.text.includes('match 179'));
 });

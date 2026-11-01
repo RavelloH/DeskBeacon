@@ -1,5 +1,5 @@
-import {createPreview,type OutputPreview} from '@deskbeacon/protocol';
-import {createDetailSections,type DetailBlock,type PreviewPreference} from './detail-preview.js';
+import {createPreview,splitOutputPreview,type OutputPreview} from '@deskbeacon/protocol';
+import {createDetailSections,type DetailBlock,type PreviewEdgeOmission,type PreviewPreference} from './detail-preview.js';
 import {activityPresentation,type ActivityEntry} from './presenter.js';
 import {toolRow,type Tone,type Segment} from './tool-presentation.js';
 import {cellWidth,fit,wrapLines} from './tui-layout.js';
@@ -30,7 +30,7 @@ function clean(raw:string,max=300):string{
   .replace(/\b(sk-[a-z0-9_-]{12,}|gh[pousr]_[a-z0-9_]{12,})\b/gi,'[redacted]')
   .replace(/https?:\/\/[^\s]+/gi,match=>{try{const u=new URL(match);return u.origin+u.pathname;}catch{return match.split(/[?#]/)[0]??'';}})
   .replace(/\r/g,'');
- return scrubbed.length>max?scrubbed.slice(0,max)+' ...剩余 '+(scrubbed.length-max)+' 字符':scrubbed;
+ return scrubbed.length>max?scrubbed.slice(0,max)+' … [已省略 '+(scrubbed.length-max)+' 字符]':scrubbed;
 }
 /** Full inspector blocks do not impose the summary's 280-line/64K-character cap. */
 export function fullNumberedBlock(raw:unknown,language?:string,startLine:number|null=1):DetailLine[]{
@@ -43,7 +43,7 @@ export function numberedBlock(raw:unknown,language?:string,startLine:number|null
  // This preserves multi-line lexical state and original ANSI colors.
  const rendered=styleTerminalSource(raw,language??detectOutputLanguage(raw));
  const whole=rendered.lines.join('\n');
- const budget=maxLines===Infinity&&maxChars===Infinity?Infinity:Math.min(maxChars,4096);
+ const budget=maxLines===Infinity&&maxChars===Infinity?Infinity:Math.max(64,Math.min(maxChars,4096));
  if(Number.isFinite(budget)){
   const preview=createPreview(whole,budget);
   return numberedPreviewBlock(preview,language,startLine,undefined,raw,expand,rendered);
@@ -54,15 +54,28 @@ export function numberedBlock(raw:unknown,language?:string,startLine:number|null
   sourceLine:startLine===null||index===rendered.lines.length-1&&value==='' ?null:startLine+index,lineDigits:digitCount
  }));
 }
+/** Redact credential-like values in source excerpts without stripping ANSI colors. */
+function maskSourceSecrets(raw:string):string{
+ return raw
+  .replace(/\b(Bearer|Basic)\s+[^\s,;]+/gi,'$1 [redacted]')
+  .replace(/\b(password|passwd|authorization|secret|token|api[_-]?key|private[_-]?key|dataBase64)\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi,'$1=[redacted]')
+  .replace(/\b(sk-[a-z0-9_-]{12,}|gh[pousr]_[a-z0-9_]{12,})\b/gi,'[redacted]');
+}
 const loc=(x:Fields)=>x.path??x.name??x.sourcePath??x.filename??'';
 const cmd=(x:Fields)=>{const c=x.command;if(!c||typeof c!=='object')return '';return c.mode==='shell'?String(c.script??''):[c.program,...(Array.isArray(c.args)?c.args:[])].join(' ');};
 
-function batchLines(input:Fields,result:Fields,running:boolean):DetailLine[]{
+function compactField(raw:string,max:number,expand:'i'|'o'='o'):string{
+ const value=clean(raw,Infinity).replace(/\s+/g,' ');
+ if(value.length<=max)return value;
+ return value.slice(0,max)+' [已隐藏 '+(value.length-max)+' 字符 · 按 '+expand+
+  ' 查看完整'+(expand==='i'?'输入':'输出')+']';
+}
+function batchLines(input:Fields,result:Fields,running:boolean,resultLimited=false):DetailLine[]{
  const lines:DetailLine[]=[];
  const requests=Array.isArray(input.stages)?input.stages:[];
  const responses=Array.isArray(result.stages)?result.stages:[];
  if(!requests.length&&!responses.length){
-  lines.push(line('历史摘要未包含子操作；按 i 查看完整输入，按 o 查看完整结果。','warning'));
+  lines.push(line('[历史摘要未包含子操作 · 按 i 查看完整输入 / 按 o 查看完整结果]','warning'));
   return lines;
  }
  const count=Math.max(requests.length,responses.length);
@@ -83,17 +96,17 @@ function batchLines(input:Fields,result:Fields,running:boolean):DetailLine[]{
     received.ok===false?'失败':'成功';
    const tone:Tone=received?.ok===false?'danger':received?.ok===true?'success':'muted';
    lines.push(line((index+1)+'. '+clean(tool,60)+' · '+clean(call.id??received?.id??'',90)+'  '+state,tone,true));
-   if(params.description)lines.push(label('INTENT',params.description));
+   if(params.description)lines.push(label('INTENT',compactField(String(params.description),160,'i')));
    if(params.command){
     const command=cmd(params);
-    lines.push(label('COMMAND',clean(command,600)));
-    if(params.command.cwd)lines.push(label('CWD',params.command.cwd));
+    lines.push(label('COMMAND',compactField(command,240,'i')));
+    if(params.command.cwd)lines.push(label('CWD',clean(String(params.command.cwd),180)));
    }
    const target=params.path??params.sourcePath??params.targetPath??params.url??params.archivePath??
     (Array.isArray(params.paths)?params.paths.join(', '):undefined);
-   if(target)lines.push(label('TARGET',clean(String(target),400)));
+   if(target)lines.push(label('TARGET',clean(String(target),180)));
    const operation=[params.action,params.mode,params.method,params.pattern].filter(Boolean).join(' · ');
-   if(operation)lines.push(label('OPTIONS',clean(operation,240)));
+   if(operation)lines.push(label('OPTIONS',clean(operation,160)));
    if(received){
     const fields=[
      data.exitCode!==undefined?'退出码 '+data.exitCode:'',
@@ -101,16 +114,19 @@ function batchLines(input:Fields,result:Fields,running:boolean):DetailLine[]{
      data.readBytes!==undefined?'读取 '+data.readBytes+' B':'',
      data.writtenBytes!==undefined?'写入 '+data.writtenBytes+' B':'',
      data.timedOut?'超时':'',data.cancelled?'已取消':'',
-     received.truncated?'返回内容已截断':'',
+     received.truncated?'返回内容不完整':'',
      Number.isFinite(received.durationMs)?received.durationMs+' ms':''
     ].filter(Boolean).join(' · ');
     if(fields)lines.push(label('RESULT',fields));
-    if(error.code||error.message)lines.push(label('ERROR',clean([error.code,error.message].filter(Boolean).join(' · '),700),'danger'));
-    if(data.errorSummary)lines.push(label('ERROR',clean(data.errorSummary,380),'danger'));
-    for(const [name,value] of [['STDOUT',data.stdout??data.outputPreview],['STDERR',data.stderr]] as const)
-     if(typeof value==='string'&&value.length)
-      lines.push(label(name,clean(value.replace(/\s+/g,' '),480),name==='STDERR'?'warning':'muted'));
-    if(data.stdoutTruncated||data.stderrTruncated)lines.push(line('本条输出已截断，按 o 查看 Batch 完整结果。','warning'));
+    if(error.code||error.message)lines.push(label('ERROR',compactField([error.code,error.message].filter(Boolean).join(' · '),240,'o'),'danger'));
+    if(data.errorSummary)lines.push(label('ERROR',compactField(String(data.errorSummary),220,'o'),'danger'));
+    if(!resultLimited){
+     for(const [name,value] of [['STDOUT',data.stdout??data.outputPreview],['STDERR',data.stderr]] as const)
+      if(typeof value==='string'&&value.length)
+       lines.push(label(name,compactField(value,160,'o'),name==='STDERR'?'warning':'muted'));
+    }
+    if(!resultLimited&&(data.stdoutTruncated||data.stderrTruncated))
+     lines.push(line('[子操作输出不完整 · 按 o 查看已保存结果]','warning'));
    }
   }
  }
@@ -143,8 +159,8 @@ function selectedSpans(
 }
 export function numberedPreviewBlock(preview:OutputPreview,language?:string,startLine:number|null=1,
  lineMap?:Array<number|null>,originalSource?:string,expand:'i'|'o'='o',
- sourceStyled?:StyledSource):DetailLine[]{
- const split=/\n… \[中间省略 (\d+) 字节(?: · 查看完整输出)?\] …\n/.exec(preview.text);
+ sourceStyled?:StyledSource,edgeOmission?:PreviewEdgeOmission):DetailLine[]{
+ const split=splitOutputPreview(preview);
  const rendered=sourceStyled??(originalSource===undefined?undefined:
   styleTerminalSource(originalSource,language??detectOutputLanguage(originalSource)));
  const fromRows=(text:string,start:number|null,rawOffset:number,side:'head'|'tail')=>{
@@ -158,10 +174,12 @@ export function numberedPreviewBlock(preview:OutputPreview,language?:string,star
   for(let index=0;index<rows.length;index++){
    const text=rows[index]??'';
    const sourceIndex=lineMap?rawOffset+index:
-    start===null? -1: start-startLine!+index;
+    start===null?-1:start-startLine!+index;
    const lexical=selectedSpans(rendered,sourceIndex,text,side);
    const spans=lexical??normalized.spans[index];
-   const row:DetailLine={...line(text,'muted'),syntax:spans,lineDigits:digits};
+   const diffTone:Tone=language==='diff'&&text.startsWith('+')&&!text.startsWith('+++')?'success':
+    language==='diff'&&text.startsWith('-')&&!text.startsWith('---')?'danger':'muted';
+   const row:DetailLine={...line(text,diffTone),syntax:diffTone==='muted'?spans:undefined,lineDigits:digits};
    const n=lineMap?.[rawOffset+index]??(start===null?null:start+index);
    if(typeof n==='number')row.sourceLine=n;
    else if(start===null||lineMap)delete row.lineDigits;
@@ -169,49 +187,81 @@ export function numberedPreviewBlock(preview:OutputPreview,language?:string,star
   }
   return mapped;
  };
- if(!preview.truncated||!split)
-  return fromRows(preview.text,startLine,0,'head');
- const head=preview.text.slice(0,split.index);
- const tail=preview.text.slice(split.index+split[0].length);
- const headCount=styleTerminalSource(head).lines.length;
+ const edgeRow=():DetailLine=>line('…','muted');
+ const hiddenLines=preview.omittedLines??(
+  preview.totalLines!==undefined&&preview.headLines!==undefined&&preview.tailStartLine!==undefined
+   ?Math.max(0,preview.tailStartLine-preview.headLines-1):undefined
+ );
+ const hiddenAmount=hiddenLines!==undefined&&hiddenLines>0
+  ?hiddenLines+' 行':preview.omittedBytes>0?preview.omittedBytes+' 字节':'内容';
+ const subject=expand==='i'?'输入':'输出';
+ const notice=preview.hasFullOutput
+  ?'已隐藏 '+hiddenAmount+' · 按 '+expand+' 查看完整'+subject
+  :'已隐藏 '+hiddenAmount+' · 原始'+subject+'不完整 · 按 '+expand+' 查看已保存内容';
+ if(!split){
+  const rows=fromRows(preview.text,startLine,0,'head');
+  // Retain a terminal newline in complete source without inventing a numbered line.
+  if(!preview.truncated&&preview.text.endsWith('\n'))rows.push({...line('','muted'),syntax:[]});
+  if(edgeOmission){
+   return edgeOmission.direction==='head'?[edgeRow(),...rows]:[...rows,edgeRow()];
+  }
+  if(preview.truncated){
+   const fallback=preview.hasFullOutput
+    ?'[预览已截断 · 按 '+expand+' 查看完整'+subject+']'
+    :'[原始'+subject+'不完整 · 按 '+expand+' 查看已保存内容]';
+   return [...rows,line(fallback,'warning')];
+  }
+  if(!preview.hasFullOutput)
+   return [...rows,line('[原始'+subject+'不完整 · 按 '+expand+' 查看已保存内容]','warning')];
+  return rows;
+ }
+ const head=split.head,tail=split.tail;
  const tailStart=startLine!==null&&preview.tailStartLine!==undefined
   ?startLine+preview.tailStartLine-1:null;
- const hidden=preview.totalLines!==undefined&&preview.headLines!==undefined&&
-  preview.tailStartLine!==undefined
-   ?Math.max(0,preview.tailStartLine-preview.headLines-1):null;
- // Only a MIDDLE omission occupies a line-number gutter. Edge omissions retain
- // the previous unobtrusive ellipsis presentation.
- const middle=head.length>0&&tail.length>0;
- const ellipsis:DetailLine={
-  ...line(middle&&hidden!==null?
-   (hidden>0?'已隐藏 '+hidden+' 行，按 '+expand+' 展开':
-    '已隐藏 '+preview.omittedBytes+' 字节，按 '+expand+' 展开'):'…','muted'),
-  ...(middle?{sourceLine:null,gutterLabel:'...',lineDigits:String(Math.max(1,preview.totalLines??1)).length}:{})
- };
  const tailOffset=preview.tailStartLine===undefined?0:preview.tailStartLine-1;
- const result:DetailLine[]=[
-  ...fromRows(head,startLine,0,'head'),
-  ellipsis,
-  ...fromRows(tail,tailStart,tailOffset,'tail')
- ];
- if(middle){
-  // The literal "..." is THREE cells wide. With 1- or 2-digit source
-  // numbers, widen the entire clipped code block, not only the marker.
+ let result:DetailLine[];
+ if(split.direction==='middle'){
+  const omission:DetailLine={
+   ...line('['+notice+']','muted'),
+   sourceLine:null,gutterLabel:'...',
+   lineDigits:Math.max(3,String(Math.max(1,preview.totalLines??1)).length)
+  };
+  result=[
+   ...fromRows(head,startLine,0,'head'),
+   omission,
+   ...fromRows(tail,tailStart,tailOffset,'tail')
+  ];
   const digits=Math.max(3,...result.map(row=>row.lineDigits??0));
   for(const row of result)if(row.sourceLine!==undefined)row.lineDigits=digits;
+ }else if(split.direction==='head'){
+  result=[edgeRow(),...fromRows(tail,tailStart,tailOffset,'tail')];
+ }else{
+  result=[...fromRows(head,startLine,0,'head'),edgeRow()];
  }
+ if(edgeOmission&&edgeOmission.direction!==split.direction){
+  if(edgeOmission.direction==='head')result.unshift(edgeRow());
+  else result.push(edgeRow());
+ }
+ if(!preview.hasFullOutput&&split.direction!=='middle')
+  result.unshift(line('[原始'+subject+'不完整 · 按 '+expand+' 查看已保存内容]','warning'));
  return result;
 }
-function contentFor(a:ActivityEntry,i:Fields,r:Fields,liveLog=""):DetailLine[]{
+
+function contentFor(a:ActivityEntry,i:Fields,r:Fields,liveLog="",liveLogPreview?:OutputPreview):DetailLine[]{
  const out:DetailLine[]=[],blocks:DetailBlock[]=[];
+ let batchSummary:DetailLine[]|null=null;
  const meta=(fields:[string,unknown][])=>out.push(...fields.filter(([,v])=>v!==undefined&&v!==null&&v!=='')
   .map(([k,v])=>label(k,v)));
  const content=(title:string,value:unknown,kind:'input'|'output'='output',
   preference:PreviewPreference='balanced',language?:string,startLine:number|null=1,
-  sourcePreview?:OutputPreview)=>{
+  sourcePreview?:OutputPreview,edgeOmission?:PreviewEdgeOmission)=>{
   if(typeof value==='string'&&value&&value!=='[redacted]'){
-   blocks.push({kind,title,text:value,preference,startLine,
-    ...(sourcePreview?{sourcePreview}:{}),...(language?{language}:{})});
+   const safe=maskSourceSecrets(value);
+   // Source offsets become invalid if redaction changes the excerpt length.
+   const safePreview=safe===value?sourcePreview:undefined;
+   blocks.push({kind,title,text:safe,preference,startLine,
+    ...(safePreview?{sourcePreview:safePreview}:{}),...(language?{language}:{}),
+    ...(edgeOmission?{edgeOmission}:{})});
   }
  };
  const list=(title:string,value:unknown,format:(v:Fields,n:number)=>string)=>{
@@ -230,7 +280,8 @@ function contentFor(a:ActivityEntry,i:Fields,r:Fields,liveLog=""):DetailLine[]{
     i.mode==='replace'?JSON.stringify({oldText:i.oldText,newText:i.newText,
      expectedReplacements:i.expectedReplacements},null,2):
     i.mode==='replace_many'?JSON.stringify(i.replacements??[],null,2):'';
-   content('EDIT PARAMETERS',editInput,'input','balanced',i.mode==='patch'?'diff':'json');
+   content('EDIT PARAMETERS',editInput,'input','balanced',i.mode==='patch'?'diff':'json',
+    1,i.previewInputMeta?{...i.previewInputMeta,text:i.previewInput}:undefined);
    if(typeof r.diff==='string')content('DIFF',r.diff,'output','balanced','diff',1,
      r.diffPreviewMeta?{...r.diffPreviewMeta,text:r.diff}:undefined);
    // An unchanged edit has no diff; old receipts without a diff remain silent.
@@ -238,10 +289,14 @@ function contentFor(a:ActivityEntry,i:Fields,r:Fields,liveLog=""):DetailLine[]{
   case 'fs_write':
    meta([['PATH',i.path],['MODE',i.mode],['BYTES',r.writtenBytes],['SHA256',r.sha256]]);
    if(i.encoding==='base64')out.push(line('二进制/Base64 输入不作为源码显示','muted'));
-   else content(i.mode==='append'?'APPENDED CONTENT':'FILE CONTENT',i.content,
-    'input','balanced',languageForPath(i.path),1,
-    i.contentPreviewMeta?{...i.contentPreviewMeta,text:i.content}:undefined);
-   if(i.previewLimited&&!blocks.length)content('INPUT','当前摘要省略正文；按 i 读取完整输入','input');
+   else {
+    content(i.mode==='append'?'APPENDED CONTENT':'FILE CONTENT',i.content,
+     'input','balanced',languageForPath(i.path),1,
+     i.contentPreviewMeta?{...i.contentPreviewMeta,text:i.content}:undefined);
+    if((typeof i.content!=='string'||i.content==='[redacted]')&&!i.previewLimited)
+     out.push(line('未保存可预览的写入文本','muted'));
+   }
+   if(i.previewLimited&&!blocks.length)out.push(line('[历史输入摘要已压缩 · 按 i 查看完整输入]','warning'));
    break;
   case 'fs_read':
    meta([['PATH',i.path],['LINES',r.linesRead],['BYTES',r.readBytes],['MORE',r.truncated]]);
@@ -250,7 +305,9 @@ function contentFor(a:ActivityEntry,i:Fields,r:Fields,liveLog=""):DetailLine[]{
      Number(i.byteOffset??0)>0?null:1;
    content('FILE CONTENT',r.content,'output','balanced',languageForPath(i.path),start,
     r.contentPreviewMeta?{...r.contentPreviewMeta,text:r.content}:undefined);
-   if(r.previewLimited&&!blocks.length)content('OUTPUT','当前摘要省略正文；按 o 读取完整结果','output');
+   if(r.previewLimited&&!blocks.length)out.push(line('[历史结果摘要已压缩 · 按 o 查看完整结果]','warning'));
+   else if((typeof r.content!=='string'||r.content==='[redacted]')&&!r.previewLimited)
+    out.push(line('未保存此次读取的正文','muted'));
    break;
   case 'fs_read_many':
    meta([['SUCCESS',r.successCount],['FAILED',r.failureCount],['BYTES',r.bytesUsed]]);
@@ -263,7 +320,7 @@ function contentFor(a:ActivityEntry,i:Fields,r:Fields,liveLog=""):DetailLine[]{
       Number(i.files?.find((f:Fields)=>f.path===file.path)?.lineOffset??0)+1,
       file.contentPreviewMeta?{...file.contentPreviewMeta,text:file.content}:undefined);
    }
-   if(r.previewLimited&&!blocks.length)content('OUTPUT','历史摘要不包含文件正文；按 o 读取完整结果','output');
+   if(r.previewLimited&&!blocks.length)out.push(line('[历史结果摘要已压缩 · 按 o 查看完整结果]','warning'));
    break;
   case 'fs_grep':
    meta([['PATTERN',i.pattern],['PATH',i.path],['MATCHES',r.totalMatches??r.matches?.length],['MORE',r.truncated]]);
@@ -282,22 +339,23 @@ function contentFor(a:ActivityEntry,i:Fields,r:Fields,liveLog=""):DetailLine[]{
   case 'exec_foreground':case 'exec_background':
    meta([['CWD',i.command?.cwd??a.cwd],['EXIT',r.exitCode],['PID',r.pid],['TIMEOUT',r.timedOut]]);
    content('COMMAND',cmd(i),'input','balanced',languageForCommand(i.command));
+   const stdoutPreview=liveLog?liveLogPreview:
+    !liveLog&&r.outputPreviewKind==='head_tail'&&r.outputPreviewMeta?
+     {...r.outputPreviewMeta,text:r.outputPreview}:undefined;
+   const legacyTail=!liveLog&&r.outputPreviewKind==='tail'&&r.outputPreviewOmittedChars>0
+    ?{direction:'head' as const,omittedCount:Number(r.outputPreviewOmittedChars),unit:'characters' as const,fullSourceAvailable:true}
+    :undefined;
    content(liveLog?'LIVE STDOUT':'STDOUT',liveLog||r.stdout||r.outputPreview,'output','tail',undefined,
-     !liveLog&&typeof r.stdout==='string'||r.outputPreviewKind==='head_tail'?1:null,
-     !liveLog&&r.outputPreviewKind==='head_tail'&&r.outputPreviewMeta?
-      {...r.outputPreviewMeta,text:r.outputPreview}:undefined);
-   if(!liveLog&&r.outputPreviewKind==='tail'&&r.outputPreviewOmittedChars>0)
-    out.push(line('历史摘要仅保留末尾，前面已省略 '+r.outputPreviewOmittedChars+' 字符 · 按 o 查看完整日志','warning'));
+    !liveLog&&typeof r.stdout==='string'||r.outputPreviewKind==='head_tail'?1:null,
+    stdoutPreview,legacyTail);
    content('STDERR',r.stderr??'','output','tail');
-   if(r.outputPreviewMeta?.hasFullOutput===false)out.push(line('执行器已达到存储上限，部分输出不可恢复','danger'));
-
    break;
   case 'batch':
    meta([['STAGES',i.stages?.length],['DONE',r.completed],['FAILED',r.failed],['SKIPPED',r.skipped]]);
-   content('BATCH REQUEST',JSON.stringify(i,null,2),'input','balanced','json');
-   content('BATCH RESULTS',batchLines(i,r,a.status==='running'||a.status==='queued')
-    .map(x=>x.text).join('\n')+'\n\n'+JSON.stringify(r,null,2),'output','tail');
-   if(i.previewLimited||r.previewLimited)out.push(line('历史摘要不完整，可按 i / o 查看原始输入和结果','muted'));
+   if(i.previewLimited)out.push(line('[历史输入摘要已压缩 · 按 i 查看完整输入]','warning'));
+   else content('BATCH REQUEST',JSON.stringify(i,null,2),'input','balanced','json');
+   batchSummary=batchLines(i,r,a.status==='running'||a.status==='queued',Boolean(r.previewLimited));
+   if(r.previewLimited)out.push(line('[历史结果摘要已压缩 · 按 o 查看完整结果]','warning'));
    break;
   case 'http_request':
    meta([['METHOD',i.method],['URL',i.url],['HTTP',r.status??r.statusCode],['BYTES',r.bytes??r.readBytes]]);
@@ -335,17 +393,20 @@ function contentFor(a:ActivityEntry,i:Fields,r:Fields,liveLog=""):DetailLine[]{
  }
  for(const group of createDetailSections(blocks)){
   out.push(section(group.kind==='input'?'INPUT':'OUTPUT'));
-  if(group.title)out.push(line(group.title,'muted',true));
-  const preview=group.preview;
-  const sourceStart=group.startLine===undefined?null:group.startLine;
-  out.push(...numberedPreviewBlock(preview,group.language,sourceStart,group.lineMap,group.sourceText,
-    group.kind==='input'?'i':'o',group.sourceStyled));
-  // The inline omission marker already explains a real truncation; never
-  // add another redundant warning underneath it.
+  for(const part of group.parts){
+   if(part.title)out.push(section(part.title));
+   const sourceStart=part.startLine===undefined?null:part.startLine;
+   out.push(...numberedPreviewBlock(part.preview,part.language,sourceStart,undefined,part.sourceText,
+    group.kind==='input'?'i':'o',undefined,part.edgeOmission));
+  }
+ }
+ if(batchSummary?.length){
+  out.push(section('OUTPUT'));
+  out.push(...batchSummary);
  }
  return out;
 }
-export function detailPresentation(a:ActivityEntry,now:number,liveLog=""):DetailLine[]{
+export function detailPresentation(a:ActivityEntry,now:number,liveLog="",liveLogPreview?:OutputPreview):DetailLine[]{
  const model=activityPresentation(a,now),visual=toolRow(a);
  const i=parse(a.request_json),wrapped=parse(a.result);
  const r=wrapped.data&&typeof wrapped.data==='object'&&!Array.isArray(wrapped.data)?{...wrapped,...wrapped.data}:wrapped;
@@ -355,7 +416,7 @@ export function detailPresentation(a:ActivityEntry,now:number,liveLog=""):Detail
   label('DUR',model.elapsed),
   section('ACTION'),line(clean(combined(visual.action),400),'muted'),
   section('RESULT'),line(clean(combined(visual.result),400),visual.result[0]?.tone==='danger'?'danger':'muted'),
-  ...contentFor(a,i,r,liveLog),section('TRACE'),line('ID','default',true),line(clean(a.id,1000),'muted'),
+  ...contentFor(a,i,r,liveLog,liveLogPreview),section('TRACE'),line('ID','default',true),line(clean(a.id,1000),'muted'),
   ...(a.cwd?[line('CWD','default',true),line(clean(a.cwd,1000),'muted')]:[])];
 }
 const graphemes=new Intl.Segmenter(undefined,{granularity:'grapheme'});

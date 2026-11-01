@@ -1,99 +1,122 @@
-import {createPreview,previewFromEdges,type OutputPreview} from '@deskbeacon/protocol';
-import {styleTerminalSource,type StyledSource} from './terminal-highlight.js';
-import type {CodeSpan} from './syntax-highlight.js';
+import {createPreview,previewFromEdges,splitOutputPreview,type OutputPreview} from '@deskbeacon/protocol';
 
 export type DetailKind='input'|'output';
 export type PreviewPreference='balanced'|'head'|'tail';
-export type DetailBlock={kind:DetailKind;title:string;text:string;preference?:PreviewPreference;language?:string;startLine?:number|null;sourcePreview?:OutputPreview|undefined};
-export type DetailSection={kind:DetailKind;preview:OutputPreview;language?:string;title?:string;startLine?:number|null;lineMap?:Array<number|null>;sourceText?:string;sourceStyled?:StyledSource};
+export type PreviewEdgeOmission={
+ direction:'head'|'tail';
+ omittedCount?:number;
+ unit?:'characters'|'bytes'|'lines';
+ fullSourceAvailable?:boolean;
+};
+export type DetailBlock={
+ kind:DetailKind;
+ title:string;
+ text:string;
+ preference?:PreviewPreference;
+ language?:string;
+ startLine?:number|null;
+ sourcePreview?:OutputPreview|undefined;
+ edgeOmission?:PreviewEdgeOmission;
+};
+export type DetailSectionPart={
+ title?:string;
+ preview:OutputPreview;
+ language?:string;
+ startLine?:number|null;
+ sourceText?:string;
+ edgeOmission?:PreviewEdgeOmission;
+};
+export type DetailSection={kind:DetailKind;parts:DetailSectionPart[]};
 const bytes=(s:string)=>new TextEncoder().encode(s).byteLength;
+const sourceSize=(block:DetailBlock)=>Math.max(bytes(block.text),block.sourcePreview?.originalBytes??0);
 
-const marker=/\n… \[中间省略 \d+ 字节 · 查看完整输出\] …\n/;
-function sizedPreview(group:{text:string;mode:PreviewPreference;sourcePreview?:OutputPreview|undefined},budget:number){
- const ratioValue=ratio(group.mode),options=ratioValue===undefined?{}:{headRatio:ratioValue};
- if(group.sourcePreview?.truncated){
-  const source=group.sourcePreview,hit=marker.exec(source.text);
-  if(hit){
-   const head=source.text.slice(0,hit.index),tail=source.text.slice(hit.index+hit[0].length);
-   return previewFromEdges(head,tail,source.originalBytes,budget,
-    {...options,...(source.totalLines===undefined?{}:{totalLines:source.totalLines})});
-  }
- }
- return createPreview(group.text,budget,options);
-}
-/** One 4 KiB budget shared across all dynamic INPUT/OUTPUT content in DETAIL. */
-export function createDetailSections(blocks:readonly DetailBlock[],budget=4096):DetailSection[]{
- const groups=(['input','output'] as const).map(kind=>{
-  const members=blocks.filter(block=>block.kind===kind && block.text!=='');
-  if(!members.length)return null;
-  // Multiple file chunks share one budget, but each keeps its OWN source line
-  // numbers; artificial headings and omission markers never get a line number.
-  let lineMap:Array<number|null>|undefined,sourceStyled:StyledSource|undefined;
-  let text=members[0]!.text;
-  if(members.length>1){
-   const rows:string[]=[],numbers:Array<number|null>=[],styles:CodeSpan[][]=[];
-   for(const [index,member] of members.entries()){
-    if(index){rows.push('');numbers.push(null);styles.push([]);}
-    rows.push('['+member.title+']');numbers.push(null);
-    styles.push([{text:'['+member.title+']',color:'#ABC5E1'}]);
-    const highlighted=styleTerminalSource(member.text,member.language);
-    const lines=highlighted.lines;
-    const omissionIndex=lines.findIndex(v=>/… \[中间省略 \d+ 字节/.test(v));
-    for(const [n,line] of lines.entries()){
-     rows.push(line);styles.push(highlighted.spans[n]??[]);
-     const relative=omissionIndex>=0&&n>omissionIndex&&member.sourcePreview?.tailStartLine!==undefined
-      ?member.sourcePreview.tailStartLine+(n-omissionIndex-1):
-      n+1;
-     numbers.push(omissionIndex===n||member.startLine===null||member.startLine===undefined||
-      omissionIndex>=0&&n>omissionIndex&&member.sourcePreview?.tailStartLine===undefined
-      ?null:member.startLine+relative-1);
-    }
-   }
-   text=rows.join('\n');lineMap=numbers;
-   sourceStyled={lines:rows,spans:styles,hasNativeColor:members.some(x=>/\x1b\[[0-9;]*m/.test(x.text))};
-  }
-  const mode=members.every(block=>block.preference==='head')?'head':
-    members.every(block=>block.preference==='tail')?'tail':'balanced' as PreviewPreference;
-  const language=members.length===1?members[0]?.language:undefined;
-  const title=members.length===1?members[0]?.title:undefined;
-  const startLine=members.length===1?members[0]?.startLine:undefined;
-  const sourcePreview=members.length===1?members[0]?.sourcePreview:undefined;
-  return{kind,text,mode,language,title,startLine,sourcePreview,lineMap,sourceStyled,
-   sourceText:sourcePreview?.truncated?undefined:text,size:bytes(text)};
- }).filter((group):group is NonNullable<typeof group>=>group!==null);
- if(!groups.length)return[];
- if(groups.length===1){
-  const g=groups[0]!;
-  return[{kind:g.kind,preview:sizedPreview(g,budget),
-    ...(g.language?{language:g.language}:{}),
-   ...(g.title?{title:g.title}:{}),...(g.startLine!==undefined?{startLine:g.startLine}:{}),
-   ...(g.lineMap?{lineMap:g.lineMap}:{}),
-   ...(g.sourceText?{sourceText:g.sourceText}:{}),
-   ...(g.sourceStyled?{sourceStyled:g.sourceStyled}:{})}];
- }
- // Account for both groups' budgets and leave unused capacity for the longer
- // section. 128 B minimum leaves room for UTF-8 omissions and a visible label.
- const contentBudget=budget;
- const input=groups.find(g=>g.kind==='input')!,output=groups.find(g=>g.kind==='output')!;
- let inputBudget=Math.max(128,Math.min(input.size,Math.floor(contentBudget*.45)));
- let outputBudget=Math.max(128,Math.min(output.size,contentBudget-inputBudget));
- if(inputBudget+outputBudget<contentBudget){
-  inputBudget=Math.max(128,Math.min(input.size,contentBudget-outputBudget));
-  outputBudget=Math.max(128,Math.min(output.size,contentBudget-inputBudget));
- }
- // Tiny groups remain complete. A truncated group needs >=128 B for marker
- // and meaningful context; borrow from the other group without losing bytes.
- if(inputBudget<input.size&&inputBudget<128){inputBudget=128;outputBudget=contentBudget-inputBudget;}
- if(outputBudget<output.size&&outputBudget<128){outputBudget=128;inputBudget=contentBudget-outputBudget;}
- return groups.map(g=>({
-  kind:g.kind,preview:sizedPreview(g,g.kind==='input'?inputBudget:outputBudget),
-  ...(g.language?{language:g.language}:{}),
-  ...(g.title?{title:g.title}:{}),...(g.startLine!==undefined?{startLine:g.startLine}:{}),
-  ...(g.lineMap?{lineMap:g.lineMap}:{}),
-  ...(g.sourceText?{sourceText:g.sourceText}:{}),
-  ...(g.sourceStyled?{sourceStyled:g.sourceStyled}:{})
- }));
-}
 function ratio(mode:PreviewPreference):number|undefined{
  return mode==='head'?.8:mode==='tail'?.2:undefined;
+}
+function sizedPreview(block:DetailBlock,budget:number):OutputPreview{
+ const safeBudget=Math.max(64,budget);
+ const ratioValue=ratio(block.preference??'balanced');
+ const source=block.sourcePreview;
+ const options={
+  ...(ratioValue===undefined?{}:{headRatio:ratioValue}),
+  hasFullOutput:source?.hasFullOutput??block.edgeOmission?.fullSourceAvailable??true
+ };
+ if(source?.truncated){
+  const split=splitOutputPreview(source);
+  if(split)return previewFromEdges(split.head,split.tail,source.originalBytes,safeBudget,{
+   ...options,...(source.totalLines===undefined?{}:{totalLines:source.totalLines})
+  });
+ }
+ return createPreview(block.text,safeBudget,options);
+}
+/** Allocate one byte budget fairly across logical content blocks, redistributing unused bytes. */
+function allocateBudgets(sizes:number[],budget:number):number[]{
+ if(sizes.reduce((sum,size)=>sum+size,0)<=budget)return [...sizes];
+ const allocations=sizes.map(size=>Math.min(size,64));
+ let remaining=budget-allocations.reduce((sum,size)=>sum+size,0);
+ let active=sizes.map((_,index)=>index).filter(index=>sizes[index]!>allocations[index]!);
+ while(remaining>0&&active.length){
+  const share=Math.floor(remaining/active.length);
+  if(share<=0)break;
+  const completed=active.filter(index=>sizes[index]!-allocations[index]!<=share);
+  if(completed.length){
+   for(const index of completed){
+    const need=sizes[index]!-allocations[index]!;
+    allocations[index]=sizes[index]!;
+    remaining-=need;
+   }
+   const done=new Set(completed);
+   active=active.filter(index=>!done.has(index));
+   continue;
+  }
+  const base=Math.floor(remaining/active.length),extra=remaining%active.length;
+  active.forEach((index,position)=>{
+   allocations[index]=Math.min(sizes[index]!,allocations[index]!+base+(position<extra?1:0));
+  });
+  remaining=0;
+ }
+ return allocations;
+}
+/** One 4 KiB budget shared across every dynamic INPUT/OUTPUT content block in DETAIL. */
+export function createDetailSections(blocks:readonly DetailBlock[],budget=4096):DetailSection[]{
+ if(!Number.isSafeInteger(budget)||budget<64)throw new RangeError('INVALID_DETAIL_PREVIEW_BUDGET');
+ const visible=blocks.filter(block=>block.text!=='');
+ if(!visible.length)return[];
+ const sizes=visible.map(sourceSize);
+ // If an unusually large multi-file operation has more blocks than can receive
+ // a useful minimum preview, collapse each side into one explicitly titled preview.
+ if(sizes.reduce((sum,size)=>sum+size,0)>budget&&visible.length*64>budget){
+  const grouped=(['input','output'] as const).map(kind=>({
+   kind,members:visible.filter(block=>block.kind===kind)
+  })).filter(group=>group.members.length);
+  const groupSizes=grouped.map(group=>group.members.reduce((sum,block)=>sum+sourceSize(block),0));
+  const groupBudgets=allocateBudgets(groupSizes,budget);
+  return grouped.map((group,index)=>{
+   const text=group.members.map(block=>'['+block.title+']\n'+block.text).join('\n\n');
+   return{kind:group.kind,parts:[{
+    preview:createPreview(text,Math.max(64,groupBudgets[index]??64)),
+    startLine:null
+   }]};
+  });
+ }
+ const budgets=allocateBudgets(sizes,budget);
+ return (['input','output'] as const).map(kind=>{
+  const parts:DetailSectionPart[]=[];
+  visible.forEach((block,index)=>{
+   if(block.kind!==kind)return;
+   const preview=sizedPreview(block,budgets[index]??64);
+   const sourceSizeBytes=bytes(block.text);
+   const fullTextMatchesSource=!block.sourcePreview?.truncated||
+    sourceSizeBytes===(block.sourcePreview?.originalBytes??sourceSizeBytes);
+   parts.push({
+    preview,
+    ...(block.title?{title:block.title}:{}),
+    ...(block.language?{language:block.language}:{}),
+    ...(block.startLine!==undefined?{startLine:block.startLine}:{}),
+    ...(fullTextMatchesSource?{sourceText:block.text}:{}),
+    ...(block.edgeOmission?{edgeOmission:block.edgeOmission}:{})
+   });
+  });
+  return{kind,parts};
+ }).filter(group=>group.parts.length>0);
 }

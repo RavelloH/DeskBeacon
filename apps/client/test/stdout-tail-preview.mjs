@@ -34,13 +34,15 @@ test('journal tail preview labels truncated stdout without inventing first-line 
    request_json:journal.getPreview(path).input,result:JSON.stringify(preview)};
   const summary=detailPresentation(entry,entry.time);
   assert.ok(summary.some(v=>v.section==='OUTPUT'));
-  assert.ok(summary.some(v=>v.gutterLabel==='...'&&v.text.includes('已隐藏')&&v.text.includes('按 o 展开')), 'middle-clipped output needs an inline omission row');
+  const omission=summary.filter(v=>v.gutterLabel==='...'&&v.text.startsWith('[已隐藏 '));
+  assert.equal(omission.length,1,'middle-clipped output needs exactly one inline omission row');
+  assert.ok(omission[0].text.includes('按 o 查看完整输出'));
   const numbered=summary.filter(v=>typeof v.sourceLine==='number');
   assert.equal(numbered[0].sourceLine,1);
   assert.equal(numbered.at(-1).sourceLine,preview.outputPreviewMeta.totalLines);
   assert.ok(numbered.some((row,index)=>index>0&&row.sourceLine-numbered[index-1].sourceLine>1),
    'the omitted middle must not generate false line numbers');
-  assert.ok(!summary.some(v=>v.text.includes('预览已省略')||v.text.includes('按 o 查看完整')),
+  assert.ok(!summary.some(v=>v.text.includes('预览已省略')||v.text.includes('历史摘要仅保留末尾')),
    'the inline marker is the only truncation prompt');
  }finally{rmSync(dir,{force:true,recursive:true});}
 });

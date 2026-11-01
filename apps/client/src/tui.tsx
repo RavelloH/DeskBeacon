@@ -1,4 +1,5 @@
 import React, {useEffect, useMemo, useRef, useState, useSyncExternalStore} from 'react';
+import {previewFromEdges,type OutputPreview} from '@deskbeacon/protocol';
 import {render, Box, Text, useInput, useApp, useStdout} from 'ink';
 import {LiveIpcClient,type LiveEvent} from './ipc-live.js';
 import {backgroundWindow} from './background-window.js';
@@ -31,7 +32,7 @@ type Status={
 };
 type LocalTask={id:string;title:string;start:number;kind:string;entry:ActivityEntry|undefined;progress?:number};
 type TaskLog={id:string;line:string};
-type OutputPage={text:string;nextOffset:number;totalBytes:number;hasMore:boolean;stream:string};
+type OutputPage={text:string;nextOffset:number;totalBytes:number;hasMore:boolean;stream:string;totalLines?:number};
 type Focus='activity'|'detail'|'tasks';
 // The bottom bar is for app-wide navigation. Inspector-only controls live in DETAIL.
 const globalShortcuts=(width:number)=>width<64?
@@ -375,6 +376,7 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon',onInten
  const inspectorEntryRef=useRef<string|null>(null);
  const inspectorSessionRef=useRef(0);
  const [liveLog,setLiveLog]=useState('');
+ const [liveLogPreview,setLiveLogPreview]=useState<OutputPreview|null>(null);
  const [pageHasMore,setPageHasMore]=useState(false);
  const [pageLoading,setPageLoading]=useState(false);
  const [pageTotal,setPageTotal]=useState(0);
@@ -734,15 +736,21 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon',onInten
  },[demo,entry?.id,entry?.status,inspectorTab,focusedVersion,ipcSession,inspectorSource?.totalBytes]);
  useEffect(()=>{
   if(demo||inspectorTab!=='summary'||!entry||entry.status!=='running'||!['exec_foreground','exec_background'].includes(entry.tool)){
-   setLiveLog('');return;
+   setLiveLog('');setLiveLogPreview(null);return;
   }
   let alive=true;
   const stream='stdout';
   void requestLocal({action:'output-tail',operationId:entry.id,stream},2500)
    .then((page:OutputPage)=>{
     if(!alive)return;
-    const next=page.text?.slice(-3500)??'';
+    const next=page.text??'';
+    const availableBytes=Buffer.byteLength(next,'utf8');
+    const preview=previewFromEdges(
+     page.totalBytes<=availableBytes?next:'',next,page.totalBytes,4096,
+     {...(page.totalLines===undefined?{}:{totalLines:page.totalLines}),hasFullOutput:true}
+    );
     setLiveLog(previous=>previous===next?previous:next);
+    setLiveLogPreview(preview);
    }).catch(()=>{});
   return()=>{alive=false;};
  },[demo,entry?.id,entry?.status,entry?.tool,inspectorTab,focusedVersion,ipcSession]);
@@ -759,9 +767,9 @@ export function App({demoScenario,mouseEvents,terminalTitle='DeskBeacon',onInten
     inspectorOutput(inspectorSource,inspectorTab,undefined,storedOutputLimited(entry));
    return wrapDetail(lines,Math.max(1,dw-2));
   }
-  const lines=detailPresentation(entry,tick,entry.status==='running'?liveLog:'');
+  const lines=detailPresentation(entry,tick,entry.status==='running'?liveLog:'',entry.status==='running'?liveLogPreview??undefined:undefined);
   return wrapDetail(lines,Math.max(1,dw-2));
- },[entry?.id,entry?.status,entry?.result,entry?.request_json,model?.state,detailNow,liveLog,inspectorTab,inspectorSource,inspectorError,view,dw,status?.deviceName,status?.server,demo]);
+ },[entry?.id,entry?.status,entry?.result,entry?.request_json,model?.state,detailNow,liveLog,liveLogPreview,inspectorTab,inspectorSource,inspectorError,view,dw,status?.deviceName,status?.server,demo]);
  const scroll=Math.min(detailScroll,Math.max(0,detail.length-detailRows));
  const resetDetail=()=>{openInspectorTab('summary');setView('main');};
  const move=(delta:number,edge?:'first'|'last',target:Focus=focus)=>{
