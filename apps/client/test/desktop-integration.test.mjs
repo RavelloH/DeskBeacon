@@ -152,6 +152,10 @@ test('refs are bound to the OAuth grant and session, never just the native --age
   assert.throws(()=>registry.assertInputs({[key]:'@sOwn123:e1'},'agent-B','shared-session'),
    e=>e.code==='DESKTOP_REF_FORBIDDEN'&&e.partialResult?.disposition?.delivery==='not_delivered',key);
  }
+ // Grant-only preflight must reject foreign refs before starting a native cursor session.
+ assert.doesNotThrow(()=>registry.assertInputs({refId:'@sOwn123:e1'},'agent-A'));
+ assert.throws(()=>registry.assertInputs({refId:'@sOwn123:e1'},'agent-B'),
+  e=>e.code==='DESKTOP_REF_FORBIDDEN');
  assert.throws(()=>registry.assertInputs({refId:'@sOwn123:e1'},'agent-A','different-session'),
   e=>e.code==='DESKTOP_REF_FORBIDDEN');
  assert.throws(()=>registry.assertInputs({refId:'@sGuessed:e42'},'agent-A','shared-session'),
