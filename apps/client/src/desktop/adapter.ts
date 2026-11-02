@@ -314,6 +314,8 @@ export async function executeDesktopTool(
   tool:string,input:Input,grantId:string,signal?:AbortSignal,
 ):Promise<Record<string,unknown>>{
   requireDesktopPermission(tool,input);
+  // Reject foreign and unknown refs BEFORE creating a shared cursor native session.
+  refOwnership.assertInputs(input,grantId);
   const args:string[]=[];
   if(input.sessionId && ownedSessions.get(input.sessionId)!==grantId)
     throw nativeError('DESKTOP_SESSION_FORBIDDEN','Session is not owned by the current Agent');
