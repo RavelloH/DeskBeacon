@@ -47,7 +47,7 @@ export class DesktopRefOwnership {
   this.trim();
  }
  /** Reject unknown, expired, cross-agent or cross-session refs before native invocation. */
- assertInputs(input:Record<string,unknown>,grantId:string,sessionId:string):void{
+ assertInputs(input:Record<string,unknown>,grantId:string,sessionId?:string):void{
   this.trim();
   for(const key of ['refId','rootRef','fromRef','toRef'] as const){
    const ref=input[key];
