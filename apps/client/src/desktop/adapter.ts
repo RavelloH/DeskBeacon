@@ -2,10 +2,12 @@ import {spawn} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {desktopExecutable} from './executable.js';
 import {desktopPolicy,requireDesktopPermission} from './policy.js';
+import {DesktopRefOwnership} from './ref-ownership.js';
 
 type Input=Record<string,any>;
 // Explicit native sessions are owned by one OAuth grant and are never global MCP capabilities.
 const ownedSessions=new Map<string,string>();
+const refOwnership=new DesktopRefOwnership();
 let sharedCursorSession:string|null=null;
 let cursorStarting:Promise<string>|null=null;
 
@@ -26,13 +28,14 @@ export async function stopSharedCursor():Promise<void>{
  if(cursorStarting)await cursorStarting.catch(()=>{});
  const session=sharedCursorSession;
  sharedCursorSession=null;
- if(session)await runNative('session',['end',session],10000).catch(()=>{});
+ if(session){refOwnership.clearSession(session);await runNative('session',['end',session],10000).catch(()=>{});}
 }
 /** The native manifests are auxiliary runtime state, never the source of operation history. */
 export async function disposeDesktopSessions():Promise<void>{
  await stopSharedCursor();
  const sessions=[...ownedSessions.keys()];
  ownedSessions.clear();
+ refOwnership.clear();
  await Promise.allSettled(sessions.map(id=>runNative('session',['end',id],10000)));
 }
 
@@ -309,6 +312,8 @@ export async function executeDesktopTool(
   const visualId=policy.cursor&&tool!=='desktop_status'&&tool!=='desktop_session'&&!input.sessionId
     ?await sharedCursor():null;
   const sessionId=input.sessionId??visualId??namespace(grantId);
+  // Native --agent-id is NOT an authorization boundary. Validate before any native call.
+  refOwnership.assertInputs(input,grantId,sessionId);
   // Multi-agent visual sessions use an agent-specific refmap, not a shared ref namespace.
   if(tool!=='desktop_status'&&tool!=='desktop_session'){
     flag(args,'--session',sessionId);
@@ -418,6 +423,7 @@ export async function executeDesktopTool(
       const id=input.sessionId;
       const finished=await runNative('session',['end',id],Math.min(input.timeoutMs??15000,120000)+2500,160*1024,signal);
       ownedSessions.delete(id);
+      refOwnership.clearSession(id);
       return {...finished,desktop:{sessionId:id,engine:'agent-desktop'}};
     }
     case 'desktop_wait':
@@ -452,5 +458,6 @@ export async function executeDesktopTool(
   }else{
     result=await runNative(command,args,Math.min(input.timeoutMs??15000,120000)+2500,160*1024,signal);
   }
+  refOwnership.remember(result,grantId,sessionId);
   return {...result,desktop:{sessionId,engine:'agent-desktop',policy:desktopPolicy()}};
 }
