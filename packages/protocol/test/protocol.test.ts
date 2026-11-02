@@ -100,6 +100,24 @@ describe('protocol schemas', () => {
     ])expect(toolInputSchemas.fs_edit.safeParse({...base,...invalid}).success).toBe(false);
   });
 
+  it('exports desktop launch parameters through the public MCP JSON schema', () => {
+    const schema=z.toJSONSchema(toolInputSchemas.desktop_app) as {
+      type?:string;properties?:Record<string,unknown>;required?:string[];
+    };
+    expect(schema.type).toBe('object');
+    expect(schema.properties).toHaveProperty('launchArgs');
+    expect(schema.properties).toHaveProperty('workingDirectory');
+    expect(schema.properties).toHaveProperty('activate');
+    expect(toolInputSchemas.desktop_app.safeParse({
+      deviceId:'dev',action:'launch',app:'notepad',
+      launchArgs:['C:\\Temp\\report.txt'],workingDirectory:'C:\\Temp',
+    }).success).toBe(true);
+    expect(toolInputSchemas.desktop_app.safeParse({
+      deviceId:'dev',action:'close',app:'notepad',
+      launchArgs:['C:\\Temp\\report.txt'],
+    }).success).toBe(false);
+  });
+
   it('rejects additional fields and oversized inline transfer data', () => {
     expect(() => toolInputSchemas.device_info.parse({ deviceId: 'd', arbitrary: true })).toThrow();
     expect(() => toolInputSchemas.transfer_upload.parse({

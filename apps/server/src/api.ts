@@ -126,7 +126,7 @@ const descriptions: Record<string,string> = {
   desktop_control: "Set accessible element state, select, focus, or scroll using snapshot refs; prefer check/uncheck over toggle.",
   desktop_press: "Send a keyboard shortcut to a chosen app or window. Requires explicit headed mode and device permission.",
   desktop_pointer: "Physical hover, move, click, drag or mouse-wheel action. Requires headed permission; coordinate actions are invasive.",
-  desktop_app: "Launch or gracefully close a desktop application, or explicitly force termination.",
+  desktop_app: "Launch or gracefully close a desktop application. Launch accepts bounded launchArgs and workingDirectory for opening specific documents; process launched, window detected and foreground verified are distinct states.",
   desktop_window: "Focus, move, resize, minimize, maximize, or restore a desktop window. Specify app or windowId.",
   desktop_session: "Create, inspect, list or end agent-owned native desktop sessions. Session IDs are private to the Agent; cursor overlays need device opt-in.",
 
