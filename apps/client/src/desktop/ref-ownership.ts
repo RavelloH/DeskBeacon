@@ -56,7 +56,7 @@ export class DesktopRefOwnership {
    const match=REF.exec(ref);
    if(!match)throw this.forbidden('invalid reference');
    const owner=this.owners.get(match[1]!);
-   if(!owner||owner.grantId!==grantId||owner.sessionId!==sessionId)
+   if(!owner||owner.grantId!==grantId||(sessionId!==undefined&&owner.sessionId!==sessionId))
     throw this.forbidden('reference is unknown, expired or belongs to another Agent or session');
   }
  }
