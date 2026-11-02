@@ -92,7 +92,8 @@ export default {
     if(url.pathname==="/manage"||url.pathname==="/manage/token"||url.pathname.startsWith("/manage/api/"))
       return manageRoute(request,env,authorizationServer.getOAuthApi(env));
     if (url.pathname === "/health" && request.method === "GET") {
-      return Response.json({ status: "ok", service: "deskbeacon-server" });
+      return Response.json({ status: "ok", service: "deskbeacon-server",
+        toolSchema: { desktopAppLaunchArgs: true, desktopAppWorkingDirectory: true } });
     }
     if (url.pathname === "/activate" || url.pathname.startsWith("/pair/")) {
       return handlePairRequest(request, env, authorizationServer.getOAuthApi(env), origin);

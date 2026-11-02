@@ -21,6 +21,14 @@ describe('Server static contract',()=>{
   expect(TOOL_NAMES).toContain('net_probe');
   expect(TOOL_NAMES).toContain('screen_capture');
  });
+ it('includes desktop launch args in the server-visible tool schema',()=>{
+  // The Worker registers toolInputSchemas directly; these fields must survive public schema conversion.
+  const appSchema=toolInputSchemas.desktop_app;
+  expect(appSchema.safeParse({deviceId:'test',action:'launch',app:'notepad',
+    launchArgs:['example.txt'],workingDirectory:'C:\\Temp'}).success).toBe(true);
+  expect(appSchema.safeParse({deviceId:'test',action:'close',app:'notepad',
+    launchArgs:['example.txt']}).success).toBe(false);
+ });
  it('rejects invalid exec input before dispatch',()=>{
   expect(toolInputSchemas.exec_foreground.safeParse({deviceId:'dev',description:'test',
     command:{mode:'program',program:'node',args:[]}}).success).toBe(true);
