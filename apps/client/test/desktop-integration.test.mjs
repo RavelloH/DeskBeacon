@@ -139,3 +139,65 @@ test('packaged Windows app aliases and titlebar close-button selection are unamb
  assert.equal(closeButton({role:'window',children:[titlebar,titlebar]}),undefined);
  assert.equal(closeButton({role:'window',children:[{role:'button',name:'清除全部',ref_id:'@s123:e10'}]}),undefined);
 });
+
+
+test('refs are bound to the OAuth grant and session, never just the native --agent-id',async()=>{
+ const {DesktopRefOwnership}=await import('../dist/desktop/ref-ownership.js');
+ let timestamp=1000;
+ const registry=new DesktopRefOwnership(()=>timestamp);
+ const result={ok:true,data:{snapshot_id:'sOwn123',tree:{children:[{ref_id:'@sOwn123:e1',role:'button'}]}}};
+ registry.remember(result,'agent-A','shared-session');
+ assert.doesNotThrow(()=>registry.assertInputs({refId:'@sOwn123:e1'},'agent-A','shared-session'));
+ for(const key of ['refId','rootRef','fromRef','toRef']){
+  assert.throws(()=>registry.assertInputs({[key]:'@sOwn123:e1'},'agent-B','shared-session'),
+   e=>e.code==='DESKTOP_REF_FORBIDDEN'&&e.partialResult?.disposition?.delivery==='not_delivered',key);
+ }
+ assert.throws(()=>registry.assertInputs({refId:'@sOwn123:e1'},'agent-A','different-session'),
+  e=>e.code==='DESKTOP_REF_FORBIDDEN');
+ assert.throws(()=>registry.assertInputs({refId:'@sGuessed:e42'},'agent-A','shared-session'),
+  e=>e.code==='DESKTOP_REF_FORBIDDEN');
+ registry.remember(result,'agent-B','shared-session'); // collisions must not transfer ownership
+ assert.throws(()=>registry.assertInputs({refId:'@sOwn123:e1'},'agent-B','shared-session'),
+  e=>e.code==='DESKTOP_REF_FORBIDDEN');
+ timestamp+=2*60*60*1000+1;
+ assert.throws(()=>registry.assertInputs({refId:'@sOwn123:e1'},'agent-A','shared-session'),
+  e=>e.code==='DESKTOP_REF_FORBIDDEN');
+});
+
+test('find refs can be adopted safely but unverified/failed results cannot register refs',async()=>{
+ const {DesktopRefOwnership}=await import('../dist/desktop/ref-ownership.js');
+ const r=new DesktopRefOwnership();
+ r.remember({ok:true,data:{matches:[{ref_id:'@sFind123:e7'}]}},'agent-A','session-A');
+ assert.doesNotThrow(()=>r.assertInputs({refId:'@sFind123:e7'},'agent-A','session-A'));
+ r.remember({ok:false,data:{snapshot_id:'sFailure7',tree:{ref_id:'@sFailure7:e1'}}},'agent-A','session-A');
+ assert.throws(()=>r.assertInputs({refId:'@sFailure7:e1'},'agent-A','session-A'),
+  e=>e.code==='DESKTOP_REF_FORBIDDEN');
+ r.clearSession('session-A');
+ assert.throws(()=>r.assertInputs({refId:'@sFind123:e7'},'agent-A','session-A'),
+  e=>e.code==='DESKTOP_REF_FORBIDDEN');
+});
+
+test('text verification accepts only explicit Notepad EOL normalization, never inserted content',async()=>{
+ const {compareDesktopText}=await import('../dist/desktop/text-verification.js');
+ assert.deepEqual(compareDesktopText('hello','hello'),
+  {equivalent:true,exact:true,eolNormalized:false,trailingNewlineDropped:false});
+ assert.deepEqual(compareDesktopText('first\nsecond\n','first\rsecond'),
+  {equivalent:true,exact:false,eolNormalized:true,trailingNewlineDropped:true});
+ assert.equal(compareDesktopText('first\nsecond\n','first\rsecond\r').equivalent,true);
+ assert.equal(compareDesktopText('hello','MULLhello').equivalent,false);
+ assert.equal(compareDesktopText('first\nsecond\n','first\rseco').equivalent,false);
+ assert.equal(compareDesktopText('first\nsecond\n\n','first\rsecond').equivalent,false);
+ assert.equal(compareDesktopText('hello   ','hello').equivalent,false);
+});
+
+test('desktop app arguments accept bounded file paths and deny arguments on close',()=>{
+ const deviceId='device';
+ const valid=toolInputSchemas.desktop_app.safeParse({
+  deviceId,app:'notepad',action:'launch',
+  launchArgs:['C:\\Temp\\report.txt','--custom-value'],workingDirectory:'C:\\Temp'});
+ assert.equal(valid.success,true);
+ assert.equal(toolInputSchemas.desktop_app.safeParse({
+  deviceId,app:'notepad',action:'close',launchArgs:['C:\\Temp\\report.txt']}).success,false);
+ assert.equal(toolInputSchemas.desktop_app.safeParse({
+  deviceId,app:'notepad',action:'launch',launchArgs:Array(33).fill('x')}).success,false);
+});
