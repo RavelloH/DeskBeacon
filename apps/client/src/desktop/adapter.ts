@@ -3,6 +3,7 @@ import {createHash} from 'node:crypto';
 import {desktopExecutable} from './executable.js';
 import {desktopPolicy,requireDesktopPermission} from './policy.js';
 import {DesktopRefOwnership} from './ref-ownership.js';
+import {compareDesktopText} from './text-verification.js';
 
 type Input=Record<string,any>;
 // Explicit native sessions are owned by one OAuth grant and are never global MCP capabilities.
@@ -138,7 +139,16 @@ async function launchWithPostcondition(input:Input,args:string[],signal?:AbortSi
  try{before=await nativeWindows(signal);}catch{/* Preserve upstream result if window discovery is unavailable. */}
  const start=Date.now();
  try{
-  return await runNative('launch',[...args,'--timeout',String(nativeDeadline)],nativeDeadline+3500,160*1024,signal);
+  const launched=await runNative('launch',[...args,'--timeout',String(nativeDeadline)],nativeDeadline+3500,160*1024,signal);
+  // Process running is not the same as a focused GUI window.
+  let after:WindowInfo[]|null=null;
+  try{after=await nativeWindows(signal);}catch{}
+  const matched=after?.filter(row=>matchesApp(input.app,row.app_name))??[];
+  const focused=matched.some(row=>row.is_focused===true);
+  return {...launched,data:{...launched.data,launchState:{
+   processRunning:true,windowDetected:after===null?null:matched.length>0,
+   foregroundVerified:after===null?null:focused,
+   activationRequested:input.activate===true}}};
  }catch(error){
   const err=error as Error & {code?:string};
   if(signal?.aborted||before===null||!['DESKTOP_TIMEOUT','TIMEOUT','WINDOW_NOT_FOUND','ACTION_FAILED'].includes(err.code??''))throw error;
@@ -396,8 +406,11 @@ export async function executeDesktopTool(
       break;
     case 'desktop_app':
       command=input.action==='launch'?'launch':'close-app';args.push(input.app);
-      if(input.action==='launch')enabled(args,'--activate',input.activate);
-      else enabled(args,'--force',input.force);
+      if(input.action==='launch'){
+       enabled(args,'--activate',input.activate);
+       for(const value of input.launchArgs??[])args.push('--arg='+value);
+       flag(args,'--cwd',input.workingDirectory);
+      }else enabled(args,'--force',input.force);
       break;
     case 'desktop_window':
       command=({focus:'focus-window',move:'move-window',resize:'resize-window',
@@ -445,6 +458,30 @@ export async function executeDesktopTool(
   let result:Record<string,any>;
   if(tool==='desktop_app'&&input.action==='launch'){
     result=await launchWithPostcondition(input,args,signal);
+  }else if(tool==='desktop_input'&&input.action==='set_value'){
+    try{result=await runNative(command,args,Math.min(input.timeoutMs??15000,120000)+2500,160*1024,signal);}
+    catch(error){
+      const e=error as {code?:string;partialResult?:{disposition?:{delivery?:string};
+        details?:{kind?:string;post_state?:{value?:unknown};
+          after_action?:{steps?:Array<{label?:string;outcome?:string}>}}}};
+      const details=e.partialResult?.details;
+      const actual=details?.post_state?.value;
+      const delivered=details?.after_action?.steps?.some(step=>
+        step.label==='ValuePattern.SetValue'&&step.outcome==='succeeded');
+      if(e.code!=='ACTION_FAILED'||details?.kind!=='post_action_verification'||
+         !delivered||typeof actual!=='string'||typeof input.text!=='string')throw error;
+      const comparison=compareDesktopText(input.text,actual);
+      if(!comparison.equivalent)throw error;
+      result=nativePostState('set-value',{
+        action:'set-value',
+        disposition:{delivery:'delivered_verified',retry:'unsafe'},
+        post_state:{value:actual},
+        details:{verification_scope:'application_normalized_text',exactTextMatch:comparison.exact,
+          eolNormalized:comparison.eolNormalized,
+          trailingNewlineDropped:comparison.trailingNewlineDropped,
+          applicationCommit:'not_verified'}
+      });
+    }
   }else if(tool==='desktop_window'&&input.action==='focus'){
     result=await focusWindowWithPostcondition(input,args,signal);
   }else if(tool==='desktop_pointer'&&input.action==='hover'){
