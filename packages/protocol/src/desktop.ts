@@ -67,9 +67,15 @@ export const desktopToolInputSchemas={
    if(i.action==='hover'&&!i.refId){required('x');required('y');}
   }),
  desktop_app:z.object({...common,action:z.enum(['launch','close']),app,interactionMode:mode,
+  launchArgs:z.array(z.string().max(4096)).max(32).optional(),
+  workingDirectory:z.string().trim().min(1).max(8192).optional(),
   activate:z.boolean().default(false),force:z.boolean().default(false),idempotencyKey:id.optional()}).strict()
-  .superRefine((i,ctx)=>{if(i.activate&&i.interactionMode!=='headed')
-    ctx.addIssue({code:'custom',path:['interactionMode'],message:'activate requires headed mode'});}),
+  .superRefine((i,ctx)=>{
+   if(i.activate&&i.interactionMode!=='headed')
+    ctx.addIssue({code:'custom',path:['interactionMode'],message:'activate requires headed mode'});
+   if(i.action!=='launch'&&(i.launchArgs!==undefined||i.workingDirectory!==undefined))
+    ctx.addIssue({code:'custom',path:['launchArgs'],message:'launchArgs/workingDirectory are only valid for launch'});
+  }),
  desktop_window:z.object({...common,...target,action:z.enum(['focus','move','resize','minimize','maximize','restore']),interactionMode:mode,
   x:z.number().int().min(-32768).max(32768).optional(),y:z.number().int().min(-32768).max(32768).optional(),
   width:z.number().int().min(64).max(16384).optional(),height:z.number().int().min(64).max(16384).optional(),
