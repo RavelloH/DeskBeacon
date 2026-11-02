@@ -128,7 +128,7 @@ deskbeacon config desktop-cursor true
 deskbeacon config desktop-cursor false
 ```
 
-`observe_only` 只允许观察界面；`headless_only` 允许语义控件操作；`headed_allowed` 额外允许 Agent 显式请求真实键鼠输入。多 Agent Cursor Overlay 默认允许显示，但仍只在遇到实际 Desktop 调用时按需创建，不会随 DeskBeacon 启动；关闭后会回收运行中的共享可视化 Session。截图和无障碍快照可能包含敏感内容，请仅将设备授权给可信的 Agent。
+`observe_only` 只允许观察界面；`headless_only` 允许语义控件操作；`headed_allowed` 额外允许 Agent 显式请求真实键鼠输入。`desktop_app` 启动应用时可以通过 `launchArgs` 传入文档路径，并通过 `launchState` 分别确认进程启动、窗口出现和前台焦点；Ref 会绑定到当前 Agent 授权和会话，无法直接使用其他 Agent 的 Snapshot Ref。多 Agent Cursor Overlay 默认允许显示，但仍只在遇到实际 Desktop 调用时按需创建，不会随 DeskBeacon 启动；关闭后会回收运行中的共享可视化 Session。截图和无障碍快照可能包含敏感内容，请仅将设备授权给可信的 Agent。
 
 ## 更新与排查
 
