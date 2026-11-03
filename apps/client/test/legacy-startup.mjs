@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import {DatabaseSync} from 'node:sqlite';
-import {mkdtempSync,rmSync,mkdirSync,writeFileSync,existsSync} from 'node:fs';
+import {mkdtempSync,rmSync,mkdirSync,writeFileSync,existsSync,readFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
+const currentVersion=JSON.parse(readFileSync(new URL('../package.json',import.meta.url),'utf8')).version;
 const root=mkdtempSync(join(tmpdir(),'deskbeacon-startup-gate-'));
 process.env.DESKBEACON_DATA_DIR=root;
 process.env.DESKBEACON_IPC_PATH=process.platform==='win32'
@@ -31,7 +32,7 @@ try{
   assert.equal(existsSync(out),true);
  }finally{await new Promise(resolve=>listener.close(resolve));await daemon.shutdown();}
  const outcome=await runStorageMigrations({root});
- assert.equal(outcome.to,'0.2.0');assert.equal(outcome.removedOldOutput,true);
+ assert.equal(outcome.to,currentVersion);assert.equal(outcome.removedOldOutput,true);
  assert.equal(migrationRequired(root),false);
  const reopened=new ClientDaemon(config);
  try{

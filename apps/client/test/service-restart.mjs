@@ -8,6 +8,7 @@ import {setTimeout as pause} from 'node:timers/promises';
 const root=mkdtempSync(join(tmpdir(),'deskbeacon-restart-regression-'));
 const repo=resolve(dirname(fileURLToPath(import.meta.url)),'../../..');
 const entry=join(repo,'apps/client/dist/index.js');
+const currentVersion=JSON.parse(readFileSync(join(repo,'apps/client/package.json'),'utf8')).version;
 const pipe=process.platform==='win32'?'\\\\.\\pipe\\deskbeacon-restart-test-'+process.pid:join(root,'daemon.sock');
 const env={...process.env,DESKBEACON_DATA_DIR:root,DESKBEACON_IPC_PATH:pipe};
 process.env.DESKBEACON_DATA_DIR=root;
@@ -31,7 +32,7 @@ try{
  const {DatabaseSync}=await import('node:sqlite');
  const initialDb=new DatabaseSync(join(root,'state.sqlite'));
  const stored=initialDb.prepare("SELECT value FROM storage_metadata WHERE key='storage_version'").get();
- assert.equal(stored?.value,'0.2.0','fresh install must write the current storage version');
+ assert.equal(stored?.value,currentVersion,'fresh install must write the current storage version');
  initialDb.prepare('INSERT INTO background(id,operation_id,description,pid,status,start,exit_code) VALUES(?,?,?,?,?,?,?)')
   .run('previous-task','previous-task','finished historical background',1234,'exited',Date.now()-60000,0);
  initialDb.close();

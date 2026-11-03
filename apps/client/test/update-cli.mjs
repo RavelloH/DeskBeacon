@@ -1,21 +1,23 @@
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
-import {mkdtempSync,writeFileSync,rmSync} from 'node:fs';
+import {mkdtempSync,writeFileSync,rmSync,readFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {pathToFileURL,fileURLToPath} from 'node:url';
 
+const currentVersion=JSON.parse(readFileSync(new URL('../package.json',import.meta.url),'utf8')).version;
+const latestVersion='0.3.1';
 const dir=mkdtempSync(join(tmpdir(),'deskbeacon-update-cli-'));
 const entry=fileURLToPath(new URL('../dist/index.js',import.meta.url));
 const moduleUrl=new URL('../dist/index.js',import.meta.url).href;
 const preload=join(dir,'mock-fetch.mjs');
 writeFileSync(preload,`globalThis.fetch=async (url)=> {
  if(url!=='https://registry.npmjs.org/deskbeacon/latest')throw Error('Unexpected external network request');
- return new Response(JSON.stringify({version:process.env.UPDATE_TEST_LATEST??'0.3.0'}),{
+ return new Response(JSON.stringify({version:process.env.UPDATE_TEST_LATEST}),{
  status:Number(process.env.UPDATE_TEST_STATUS??200),headers:{'content-type':'application/json'}
  });
 };`);
-const env={...process.env,DESKBEACON_DATA_DIR:join(dir,'empty-data'),UPDATE_TEST_LATEST:'0.3.0'};
+const env={...process.env,DESKBEACON_DATA_DIR:join(dir,'empty-data'),UPDATE_TEST_LATEST:latestVersion};
 const call=(args,overrides={})=>spawnSync(process.execPath,args,{
  cwd:dir,env:{...env,...overrides},encoding:'utf8',timeout:16000,windowsHide:true
 });
@@ -24,13 +26,13 @@ try{
  const command=(overrides={})=>call(['--import',preloadUrl,entry,'update'],overrides);
  const available=command();
  assert.equal(available.status,0,available.stderr);
- assert.match(available.stdout,/发现新版本：0\.2\.0 → 0\.3\.0/);
+ assert.ok(available.stdout.includes('发现新版本：'+currentVersion+' → '+latestVersion),available.stdout);
  assert.match(available.stdout,/npm install -g deskbeacon@latest/);
  assert.match(available.stdout,/npx deskbeacon@latest/);
  assert.ok(!available.stdout.includes('(( · ))'),'noninteractive CLI must not draw full screen');
- const current=command({UPDATE_TEST_LATEST:'0.2.0'});
+ const current=command({UPDATE_TEST_LATEST:currentVersion});
  assert.equal(current.status,0,current.stderr);
- assert.match(current.stdout,/已是最新版本：0\.2\.0/);
+ assert.ok(current.stdout.includes('已是最新版本：'+currentVersion),current.stdout);
  assert.doesNotMatch(current.stdout,/npm install -g/);
  const ahead=command({UPDATE_TEST_LATEST:'0.1.0'});
  assert.equal(ahead.status,0,ahead.stderr);

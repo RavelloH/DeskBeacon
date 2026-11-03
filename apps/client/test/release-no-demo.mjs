@@ -5,6 +5,12 @@ import {fileURLToPath} from 'node:url';
 import {join} from 'node:path';
 const client=fileURLToPath(new URL('../',import.meta.url));
 const staged=join(client,'dist','npm');
+const sourcePackage=JSON.parse(readFileSync(join(client,'package.json'),'utf8'));
+const releasePackage=JSON.parse(readFileSync(join(staged,'package.json'),'utf8'));
+for(const [name,requested] of Object.entries(sourcePackage.optionalDependencies)){
+ const expected=requested==='workspace:*'?sourcePackage.version:requested;
+ assert.equal(releasePackage.optionalDependencies[name],expected,'Staged optional dependency version mismatch: '+name);
+}
 assert.ok(existsSync(join(staged,'cli.js')),'Run stage-npm.mjs before verifying the published bundle');
 const contents=readFileSync(join(staged,'cli.js'),'utf8');
 for(const content of ['demo-offline-device','DEMO · 场景','模拟迁移已完成，真实数据未改变','模拟设备授权已完成，真实配置未改变','模拟查询 npm 发布信息，不会访问网络或安装软件'])

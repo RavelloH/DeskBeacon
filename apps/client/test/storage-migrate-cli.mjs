@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import {DatabaseSync} from 'node:sqlite';
-import {mkdtempSync,rmSync,mkdirSync,writeFileSync,existsSync} from 'node:fs';
+import {mkdtempSync,rmSync,mkdirSync,writeFileSync,existsSync,readFileSync} from 'node:fs';
 import {spawnSync} from 'node:child_process';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
+const currentVersion=JSON.parse(readFileSync(new URL('../package.json',import.meta.url),'utf8')).version;
 const dir=mkdtempSync(join(tmpdir(),'deskbeacon-cli-migrate-')),out=join(dir,'output');
 mkdirSync(out);
 const db=new DatabaseSync(join(dir,'state.sqlite'));
@@ -21,10 +22,10 @@ try{
  const command=spawnSync(process.execPath,[bin,'migrate','--no-tui'],{env,encoding:'utf8',timeout:20000,windowsHide:true});
  assert.equal(command.status,0,command.stderr||command.stdout);
  assert.ok(command.stdout.includes('数据迁移')&&command.stdout.includes('%'),command.stdout);
- assert.ok(command.stdout.includes('0.1.0')&&command.stdout.includes('0.2.0'));
+ assert.ok(command.stdout.includes('0.1.0')&&command.stdout.includes(currentVersion));
  assert.equal(existsSync(out),false);
  const check=new DatabaseSync(join(dir,'state.sqlite'));
- assert.equal(check.prepare("SELECT value FROM storage_metadata WHERE key='storage_version'").get().value,'0.2.0');check.close();
+ assert.equal(check.prepare("SELECT value FROM storage_metadata WHERE key='storage_version'").get().value,currentVersion);check.close();
  const again=spawnSync(process.execPath,[bin,'migrate','--no-tui'],{env,encoding:'utf8',timeout:20000,windowsHide:true});
  assert.equal(again.status,0,again.stderr);
  assert.ok(again.stdout.includes('已经是最新版本'));

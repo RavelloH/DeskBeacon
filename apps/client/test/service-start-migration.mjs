@@ -6,6 +6,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
+const currentVersion=JSON.parse(readFileSync(new URL('../package.json',import.meta.url),'utf8')).version;
 const root=mkdtempSync(join(tmpdir(),'deskbeacon-required-migration-'));
 const entry=fileURLToPath(new URL('../dist/index.js',import.meta.url));
 const env={...process.env,DESKBEACON_DATA_DIR:root,
@@ -30,7 +31,7 @@ try{
  assert.doesNotMatch(start.stdout,/正在检查本地存储版本/,'generic check message was removed');
  assert.doesNotMatch(start.stderr,/SQLite is an experimental feature/);
  const migrated=new DatabaseSync(join(root,'state.sqlite'),{readOnly:true});
- assert.equal(migrated.prepare("SELECT value FROM storage_metadata WHERE key='storage_version'").get().value,'0.2.0');
+ assert.equal(migrated.prepare("SELECT value FROM storage_metadata WHERE key='storage_version'").get().value,currentVersion);
  const rec=migrated.prepare("SELECT record_path FROM activity WHERE id='old-operation'").get();
  assert.ok(rec?.record_path,'legacy activity must be migrated');
  migrated.close();
