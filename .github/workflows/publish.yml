@@ -1,0 +1,93 @@
+name: Publish DeskBeacon to npm
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Full cross-platform release validation
+    uses: ./.github/workflows/windows-native.yml
+    permissions:
+      contents: read
+
+  publish:
+    name: Publish verified npm tarballs with Trusted Publishing
+    needs: verify
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Use npm with GitHub OIDC Trusted Publishing support
+        run: npm install --global npm@11
+      - uses: actions/download-artifact@v4
+        with:
+          name: deskbeacon-npm
+          path: packed
+      - name: Confirm the tag and all package versions match
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./apps/client/package.json').version")"
+          test "$GITHUB_REF_NAME" = "v$version"
+          for package in "deskbeacon" "deskbeacon-win32-x64" "deskbeacon-win32-arm64"; do
+            test -s "packed/${package}-${version}.tgz"
+          done
+          for path in "packages/win32-x64/package.json" "packages/win32-arm64/package.json"; do
+            test "$(node -p "require('./${path}').version")" = "$version"
+          done
+          echo "Validated verified release artifacts for $version"
+      - name: Publish Windows optional dependencies, then the CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./apps/client/package.json').version")"
+          # Each npm package needs a Trusted Publisher pointing to this exact workflow.
+          # Scoped native packages MUST be released before the CLI that references them.
+          for name in '@deskbeacon/win32-x64' '@deskbeacon/win32-arm64' 'deskbeacon'; do
+            if npm view "${name}@${version}" version --registry=https://registry.npmjs.org/ >/dev/null 2>&1; then
+              echo "Already published: ${name}@${version}"
+              continue
+            fi
+            case "$name" in
+              '@deskbeacon/win32-x64') archive="packed/deskbeacon-win32-x64-${version}.tgz";;
+              '@deskbeacon/win32-arm64') archive="packed/deskbeacon-win32-arm64-${version}.tgz";;
+              'deskbeacon') archive="packed/deskbeacon-${version}.tgz";;
+            esac
+            npm publish "$archive" --access public --provenance --registry=https://registry.npmjs.org/
+          done
+      - name: Create Chinese GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "GitHub Release already exists"
+            exit 0
+          fi
+          cat > "$RUNNER_TEMP/release-notes.md" <<'EOF'
+          ## 主要更新
+
+          - 新增原生桌面自动化：控件树、查找、点击、输入、窗口管理、应用启动及多 Agent 会话隔离；桌面运行时按需加载。
+          - 新增无浏览器设备认证（`deskbeacon setup --device`），适用于 VPS 和 SSH 终端。
+          - 新增 OAuth Agent/Device 授权管理、CapJS 防护及权限撤销。
+          - 统一跨平台 HTTP/WebSocket 代理与 Termux 兼容处理。
+          - 集成 RLog 3.1、异常诊断、Flight Recorder，以及 TUI 输出预览、行号、颜色与 Diff 改进。
+          - 完善 MCP 工具可靠性和 Cloudflare 部署配置。
+
+          npm 安装：`npm install -g deskbeacon`。需要 Node.js 24 或更新版本。
+          EOF
+          gh release create "$GITHUB_REF_NAME" --title "DeskBeacon $GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/release-notes.md" --verify-tag

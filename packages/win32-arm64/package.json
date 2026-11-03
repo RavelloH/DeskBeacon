@@ -1,6 +1,6 @@
 {
   "name": "@deskbeacon/win32-arm64",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Windows arm64 native Job Object process supervisor for DeskBeacon",
   "os": [
     "win32"

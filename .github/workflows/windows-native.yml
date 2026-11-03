@@ -1,6 +1,7 @@
 name: DeskBeacon native C packages / Windows lifecycle
 
 on:
+  workflow_call:
   workflow_dispatch:
   push:
     paths:
@@ -79,12 +80,13 @@ jobs:
           smoke="$(mktemp -d)"
           trap 'rm -rf "$smoke"' EXIT
           printf '{"name":"deskbeacon-linux-smoke","version":"1.0.0","private":true}\n' > "$smoke/package.json"
-          npm install --prefix "$smoke" --no-audit --no-fund --no-save "$GITHUB_WORKSPACE/packed/deskbeacon-0.2.0.tgz"
-          test "$(node "$smoke/node_modules/deskbeacon/launcher.js" version)" = '0.2.0'
+          version="$(node -p "require('./apps/client/package.json').version")"
+          npm install --prefix "$smoke" --no-audit --no-fund --no-save "$GITHUB_WORKSPACE/packed/deskbeacon-${version}.tgz"
+          test "$(node "$smoke/node_modules/deskbeacon/launcher.js" version)" = "$version"
           node "$smoke/node_modules/deskbeacon/launcher.js" help
       - uses: actions/upload-artifact@v4
         with:
-          name: deskbeacon-npm-0.2.0
+          name: deskbeacon-npm
           path: packed/*.tgz
           retention-days: 7
       - uses: actions/upload-artifact@v4
@@ -116,7 +118,7 @@ jobs:
           path: packages
       - uses: actions/download-artifact@v4
         with:
-          name: deskbeacon-npm-0.2.0
+          name: deskbeacon-npm
           path: packed
       - name: Smoke test installed npm release tarballs (Windows x64)
         shell: pwsh
@@ -124,11 +126,12 @@ jobs:
           $smoke = Join-Path $env:RUNNER_TEMP "deskbeacon-npm-x64"
           New-Item -ItemType Directory -Force $smoke | Out-Null
           '{"name":"deskbeacon-npm-smoke","version":"1.0.0","private":true}' | Set-Content -Encoding utf8 (Join-Path $smoke 'package.json')
-          npm install --prefix $smoke --no-audit --no-fund --no-save (Join-Path $PWD 'packed/deskbeacon-0.2.0.tgz') (Join-Path $PWD 'packed/deskbeacon-win32-x64-0.2.0.tgz')
+          $version = (Get-Content apps/client/package.json | ConvertFrom-Json).version
+          npm install --prefix $smoke --no-audit --no-fund --no-save (Join-Path $PWD ("packed/deskbeacon-$version.tgz")) (Join-Path $PWD ("packed/deskbeacon-win32-x64-$version.tgz"))
           if ($LASTEXITCODE -ne 0) { throw "npm x64 tarball install failed" }
           $launcher = Join-Path $smoke 'node_modules/deskbeacon/launcher.js'
           $version = & node $launcher version
-          if ($LASTEXITCODE -ne 0 -or ($version.Trim()) -ne '0.2.0') { throw "Installed CLI version mismatch" }
+          if ($LASTEXITCODE -ne 0 -or ($version.Trim()) -ne ((Get-Content apps/client/package.json | ConvertFrom-Json).version)) { throw "Installed CLI version mismatch" }
           & node $launcher help
           if ($LASTEXITCODE -ne 0) { throw "Installed CLI help failed" }
           $native = Join-Path $smoke 'node_modules/@deskbeacon/win32-x64/deskbeacon-job.exe'
@@ -147,7 +150,7 @@ jobs:
       - name: Download exact npm tarballs built on Linux
         uses: actions/download-artifact@v4
         with:
-          name: deskbeacon-npm-0.2.0
+          name: deskbeacon-npm
           path: packed
       - name: Fresh install of main CLI and x64 native package from tarballs
         run: node scripts/test-release-install.mjs packed
@@ -173,7 +176,7 @@ jobs:
           path: packages
       - uses: actions/download-artifact@v4
         with:
-          name: deskbeacon-npm-0.2.0
+          name: deskbeacon-npm
           path: packed
       - name: Smoke test installed npm release tarballs (Windows ARM64)
         shell: pwsh
@@ -181,11 +184,12 @@ jobs:
           $smoke = Join-Path $env:RUNNER_TEMP "deskbeacon-npm-arm64"
           New-Item -ItemType Directory -Force $smoke | Out-Null
           '{"name":"deskbeacon-npm-smoke","version":"1.0.0","private":true}' | Set-Content -Encoding utf8 (Join-Path $smoke 'package.json')
-          npm install --prefix $smoke --no-audit --no-fund --no-save (Join-Path $PWD 'packed/deskbeacon-0.2.0.tgz') (Join-Path $PWD 'packed/deskbeacon-win32-arm64-0.2.0.tgz')
+          $version = (Get-Content apps/client/package.json | ConvertFrom-Json).version
+          npm install --prefix $smoke --no-audit --no-fund --no-save (Join-Path $PWD ("packed/deskbeacon-$version.tgz")) (Join-Path $PWD ("packed/deskbeacon-win32-arm64-$version.tgz"))
           if ($LASTEXITCODE -ne 0) { throw "npm ARM64 tarball install failed" }
           $launcher = Join-Path $smoke 'node_modules/deskbeacon/launcher.js'
           $version = & node $launcher version
-          if ($LASTEXITCODE -ne 0 -or ($version.Trim()) -ne '0.2.0') { throw "Installed CLI version mismatch" }
+          if ($LASTEXITCODE -ne 0 -or ($version.Trim()) -ne ((Get-Content apps/client/package.json | ConvertFrom-Json).version)) { throw "Installed CLI version mismatch" }
           & node $launcher help
           if ($LASTEXITCODE -ne 0) { throw "Installed CLI help failed" }
           $native = Join-Path $smoke 'node_modules/@deskbeacon/win32-arm64/deskbeacon-job.exe'
@@ -206,7 +210,7 @@ jobs:
       - name: Download exact npm tarballs built on Linux
         uses: actions/download-artifact@v4
         with:
-          name: deskbeacon-npm-0.2.0
+          name: deskbeacon-npm
           path: packed
       - name: Fresh install of main CLI and ARM64 native package from tarballs
         run: node scripts/test-release-install.mjs packed

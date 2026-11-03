@@ -12,7 +12,7 @@ for(const content of ['demo-offline-device','DEMO · 场景','模拟迁移已完
 const cli=join(staged,'launcher.js');
 const call=(...args)=>spawnSync(process.execPath,[cli,...args],{encoding:'utf8',timeout:20000,windowsHide:true});
 const version=call('version');assert.equal(version.status,0,version.stderr);
-assert.match(version.stdout,/^0\.2\.0\s*$/);
+assert.equal(version.stdout.trim(),JSON.parse(readFileSync(join(client,'package.json'),'utf8')).version);
 assert.doesNotMatch(version.stderr,/SQLite is an experimental feature/,'release CLI must not emit SQLite ExperimentalWarning');
 const help=call('help');assert.equal(help.status,0,help.stderr);assert.doesNotMatch(help.stdout,/demo \[scenario\]|demo migration/);
 assert.match(help.stdout,/用法：deskbeacon \[命令\] \[选项\]/);
