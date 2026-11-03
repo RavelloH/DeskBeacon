@@ -30,6 +30,7 @@ jobs:
         with:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
       - name: Use npm with GitHub OIDC Trusted Publishing support
         run: npm install --global npm@11
       - uses: actions/download-artifact@v4
@@ -62,9 +63,9 @@ jobs:
               continue
             fi
             case "$name" in
-              '@deskbeacon/win32-x64') archive="packed/deskbeacon-win32-x64-${version}.tgz";;
-              '@deskbeacon/win32-arm64') archive="packed/deskbeacon-win32-arm64-${version}.tgz";;
-              'deskbeacon') archive="packed/deskbeacon-${version}.tgz";;
+              '@deskbeacon/win32-x64') archive="./packed/deskbeacon-win32-x64-${version}.tgz";;
+              '@deskbeacon/win32-arm64') archive="./packed/deskbeacon-win32-arm64-${version}.tgz";;
+              'deskbeacon') archive="./packed/deskbeacon-${version}.tgz";;
             esac
             npm publish "$archive" --access public --provenance --registry=https://registry.npmjs.org/
           done
