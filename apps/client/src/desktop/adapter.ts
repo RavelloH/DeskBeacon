@@ -3,7 +3,6 @@ import {createHash} from 'node:crypto';
 import {desktopExecutable} from './executable.js';
 import {desktopPolicy,requireDesktopPermission} from './policy.js';
 import {DesktopRefOwnership} from './ref-ownership.js';
-import {compareDesktopText} from './text-verification.js';
 
 type Input=Record<string,any>;
 // Explicit native sessions are owned by one OAuth grant and are never global MCP capabilities.
@@ -310,6 +309,18 @@ async function closePackagedWindow(input:Input,args:string[],signal?:AbortSignal
   details:{verification_scope:'window_absent',native_app_discovery:'unavailable'}});
 }
 
+/** A native accessibility value is not proof that the app committed its edit. */
+export function unverifiedTextCommit(native:Record<string,any>):Record<string,any>{
+ const data=native.data&&typeof native.data==='object'&&!Array.isArray(native.data)?native.data:{};
+ const disposition=data.disposition??{};
+ return {...native,data:{...data,
+  disposition:{...disposition,delivery:'delivered_unverified',retry:'unsafe'},
+  details:{...(data.details??{}),applicationCommit:'not_verified',
+   verification_scope:'accessibility_value_only'},
+  warning:'Application content was not verified; inspect the document or a screenshot before relying on this edit.'
+ }};
+}
+
 export async function executeDesktopTool(
   tool:string,input:Input,grantId:string,signal?:AbortSignal,
 ):Promise<Record<string,unknown>>{
@@ -461,29 +472,11 @@ export async function executeDesktopTool(
   if(tool==='desktop_app'&&input.action==='launch'){
     result=await launchWithPostcondition(input,args,signal);
   }else if(tool==='desktop_input'&&input.action==='set_value'){
-    try{result=await runNative(command,args,Math.min(input.timeoutMs??15000,120000)+2500,160*1024,signal);}
-    catch(error){
-      const e=error as {code?:string;partialResult?:{disposition?:{delivery?:string};
-        details?:{kind?:string;post_state?:{value?:unknown};
-          after_action?:{steps?:Array<{label?:string;outcome?:string}>}}}};
-      const details=e.partialResult?.details;
-      const actual=details?.post_state?.value;
-      const delivered=details?.after_action?.steps?.some(step=>
-        step.label==='ValuePattern.SetValue'&&step.outcome==='succeeded');
-      if(e.code!=='ACTION_FAILED'||details?.kind!=='post_action_verification'||
-         !delivered||typeof actual!=='string'||typeof input.text!=='string')throw error;
-      const comparison=compareDesktopText(input.text,actual);
-      if(!comparison.equivalent)throw error;
-      result=nativePostState('set-value',{
-        action:'set-value',
-        disposition:{delivery:'delivered_verified',retry:'unsafe'},
-        post_state:{value:actual},
-        details:{verification_scope:'application_normalized_text',exactTextMatch:comparison.exact,
-          eolNormalized:comparison.eolNormalized,
-          trailingNewlineDropped:comparison.trailingNewlineDropped,
-          applicationCommit:'not_verified'}
-      });
-    }
+    // ValuePattern.SetValue and post_state.value can reflect the accessibility
+    // provider's cache without changing the application's document. Never turn
+    // a native verification failure into a claimed successful edit.
+    const native=await runNative(command,args,Math.min(input.timeoutMs??15000,120000)+2500,160*1024,signal);
+    result=unverifiedTextCommit(native);
   }else if(tool==='desktop_window'&&input.action==='focus'){
     result=await focusWindowWithPostcondition(input,args,signal);
   }else if(tool==='desktop_pointer'&&input.action==='hover'){

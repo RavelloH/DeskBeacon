@@ -205,3 +205,47 @@ test('desktop app arguments accept bounded file paths and deny arguments on clos
  assert.equal(toolInputSchemas.desktop_app.safeParse({
   deviceId,app:'notepad',action:'launch',launchArgs:Array(33).fill('x')}).success,false);
 });
+
+test('native executable resolves both nested npm releases and development layout',async()=>{
+ const {resolveDesktopBinary}=await import('../dist/desktop/executable.js');
+ const {mkdtempSync,mkdirSync,writeFileSync,rmSync}=await import('node:fs');
+ const {tmpdir}=await import('node:os');
+ const {join}=await import('node:path');
+ const {pathToFileURL}=await import('node:url');
+ const root=mkdtempSync(join(tmpdir(),'deskbeacon-native-layout-'));
+ const binary='agent-desktop-win32-x64.exe';
+ try{
+  const installed=join(root,'node_modules','deskbeacon');
+  const nested=join(installed,'node_modules','agent-desktop','bin',binary);
+  const globalSibling=join(root,'node_modules','agent-desktop','bin',binary);
+  mkdirSync(join(installed,'node_modules','agent-desktop','bin'),{recursive:true});
+  mkdirSync(join(root,'node_modules','agent-desktop','bin'),{recursive:true});
+  writeFileSync(nested,'nested');writeFileSync(globalSibling,'global');
+  assert.equal(resolveDesktopBinary(binary,pathToFileURL(join(installed,'cli.js')).href),nested,
+    'bundled cli.js must prefer deskbeacon/node_modules, not the npm global parent');
+  const dev=join(root,'workspace','apps','client');
+  const devNative=join(dev,'node_modules','agent-desktop','bin',binary);
+  mkdirSync(join(dev,'node_modules','agent-desktop','bin'),{recursive:true});
+  writeFileSync(devNative,'development');
+  assert.equal(resolveDesktopBinary(binary,pathToFileURL(join(dev,'dist','desktop','executable.js')).href),devNative);
+  assert.throws(()=>resolveDesktopBinary('agent-desktop-missing.exe',pathToFileURL(join(installed,'cli.js')).href),
+    /DESKTOP_EXECUTABLE_UNAVAILABLE/);
+ }finally{rmSync(root,{recursive:true,force:true});}
+});
+
+test('set_value never treats a native accessibility value as verified application content',async()=>{
+ const {unverifiedTextCommit}=await import('../dist/desktop/adapter.js');
+ const native={ok:true,command:'set-value',data:{
+  disposition:{delivery:'delivered_verified',retry:'safe'},
+  post_state:{value:'looks saved'},
+  details:{applicationCommit:'not_verified'}
+ }};
+ const result=unverifiedTextCommit(native);
+ assert.equal(result.ok,true);
+ assert.equal(result.data.post_state.value,'looks saved');
+ assert.equal(result.data.disposition.delivery,'delivered_unverified');
+ assert.equal(result.data.disposition.retry,'unsafe');
+ assert.equal(result.data.details.applicationCommit,'not_verified');
+ assert.match(result.data.warning,/not verified/);
+ assert.equal(native.data.disposition.delivery,'delivered_verified','upstream result must remain immutable');
+});

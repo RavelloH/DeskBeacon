@@ -75,8 +75,12 @@ function searchDirectoryGlob(path:string,root:string,glob:string):boolean{
  const regex=new RegExp('^'+expression+'$');
  return regex.test(candidate)||(!part.includes('/')&&regex.test(basename(path)));
 }
+function isNameGlobPattern(pattern:string):boolean{return /[*?\[\]{}]/.test(pattern);}
 function includeSearchDirectory(path:string,root:string,input:Input):boolean{
- if(input.pattern&&!basename(path).includes(String(input.pattern)))return false;
+ if(input.pattern){
+  const pattern=String(input.pattern);
+  if(isNameGlobPattern(pattern)?!searchDirectoryGlob(path,root,pattern):!basename(path).includes(pattern))return false;
+ }
  const globs:(string[])=input.glob??[];
  const positive=globs.filter(g=>!g.startsWith('!'));
  if(positive.length&&!positive.some(g=>searchDirectoryGlob(path,root,g)))return false;
@@ -117,8 +121,10 @@ async function search(name:string,input:Input,path:string){
  if(name==='fs_find'){
    args.push('--files');
    if(input.pattern){
-     const literal=String(input.pattern).replace(/[?*\[\]{}\\]/g, '\\$&');
-     args.push('-g','*'+literal+'*');
+     const pattern=String(input.pattern);
+     // Plain words remain substring searches; wildcard patterns use ripgrep globs.
+     const glob=isNameGlobPattern(pattern)?pattern:'*'+pattern.replace(/[?*\[\]{}\\]/g, '\\$&')+'*';
+     args.push('-g',glob);
    }
  }
  else args.push('--json','--line-number','--color','never',...(input.literal?['--fixed-strings']:[]),...(input.caseSensitive?[]:['--ignore-case']),

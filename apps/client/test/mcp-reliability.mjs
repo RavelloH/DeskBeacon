@@ -44,6 +44,12 @@ try {
  assert.ok(!filtered.paths.includes(hiddenDir),'hidden folder should be excluded');
  const noDirs=await fileTool('fs_find',{path:root,includeDirectories:false,respectIgnore:false,maxResults:30});
  assert.ok(!noDirs.paths.includes(emptyDir),'includeDirectories=false must preserve file-only behavior');
+ const wildcard=await fileTool('fs_find',{path:root,pattern:'*.txt',respectIgnore:false,maxResults:30});
+ assert.ok(wildcard.paths.includes(nested),'*.txt must find nested text files');
+ const partial=await fileTool('fs_find',{path:root,pattern:'sample',respectIgnore:false,maxResults:30});
+ assert.ok(partial.paths.includes(nested),'plain pattern remains a filename substring');
+ const noMatch=await fileTool('fs_find',{path:root,pattern:'*.json',respectIgnore:false,maxResults:30});
+ assert.equal(noMatch.paths.length,0,'glob suffix must not match other extensions');
  const globbed=await fileTool('fs_find',{path:root,includeDirectories:true,respectIgnore:false,includeHidden:true,glob:['**/leaf'],maxResults:30});
  assert.ok(globbed.entries.some(x=>x.path===emptyDir),'directory path glob must work');
 
