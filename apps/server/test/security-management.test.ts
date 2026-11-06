@@ -1,7 +1,7 @@
 import {describe,it,expect} from "vitest";
 import {createHash} from "node:crypto";
 import {generateChallenge} from "capjs-core";
-import {capRoute,checkSecret,checkProof,issueManagementToken,isManager,rateLimit} from "../src/security.js";
+import {capRoute,checkSecret,checkProof,issueManagementToken,isManager,rateLimit,strictOrigin} from "../src/security.js";
 import {manageRoute} from "../src/manage.js";
 import type {Env} from "../src/env.js";
 import type {OAuthHelpers} from "@cloudflare/workers-oauth-provider";
@@ -66,6 +66,13 @@ async function getSolvedTicket(env:Env){
  return{ticket:decoded.token,post};
 }
 describe("CapJS and state-free admin protection",()=>{
+ it("retains strict Origin rejection for null and cross-site requests",()=>{
+  const form=(value?:string)=>new Request(origin+"/authorize",{method:"POST",headers:value?{"origin":value}:{}});
+  expect(strictOrigin(form(origin))).toBe(true);
+  expect(strictOrigin(form())).toBe(true);
+  expect(strictOrigin(form("null"))).toBe(false);
+  expect(strictOrigin(form("https://attacker.test"))).toBe(false);
+ });
  it("rate limiter uses only Workers binding and does not write OAuth KV",async()=>{
   const {env,rateKeys,kvWrites}=fixture();
   expect(await rateLimit(new Request(origin+"/manage/token"),env,"admin-secret")).toBeNull();

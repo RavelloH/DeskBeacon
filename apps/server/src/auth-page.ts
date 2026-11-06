@@ -12,6 +12,6 @@ export function page(title:string,body:string,status=200):Response{
   "cache-control":"no-store",
   "x-content-type-options":"nosniff",
   "content-security-policy":"default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; worker-src blob:; form-action 'self' https: http://127.0.0.1:*; base-uri 'none'; frame-ancestors 'none'",
-  "referrer-policy":"no-referrer"
+  "referrer-policy":"same-origin"
  }});
 }
