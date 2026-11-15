@@ -6,7 +6,9 @@ import {tmpdir} from 'node:os';
 import {pathToFileURL,fileURLToPath} from 'node:url';
 
 const currentVersion=JSON.parse(readFileSync(new URL('../package.json',import.meta.url),'utf8')).version;
-const latestVersion='0.3.1';
+const [major,minor,patch]=currentVersion.split('.').map(Number);
+assert.ok([major,minor,patch].every(Number.isSafeInteger),'Package version must be plain semver');
+const latestVersion=[major,minor,patch+1].join('.');
 const dir=mkdtempSync(join(tmpdir(),'deskbeacon-update-cli-'));
 const entry=fileURLToPath(new URL('../dist/index.js',import.meta.url));
 const moduleUrl=new URL('../dist/index.js',import.meta.url).href;
