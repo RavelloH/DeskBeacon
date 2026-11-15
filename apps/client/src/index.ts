@@ -60,8 +60,12 @@ async function setup(base?:string,requested:'auto'|'browser'|'device'='auto'):Pr
 const pkg={version:codeVersion()};
 const entry=fileURLToPath(import.meta.url);
 async function configured(){
-  if(!existsSync(configPath)){await setup();return;}
-  const cfg=loadConfig();
+  let cfg:ReturnType<typeof loadConfig>;
+  try{cfg=loadConfig();}
+  catch(error){
+    if(error instanceof Error&&error.message.startsWith('DEVICE_NOT_CONFIGURED:')){await setup();return;}
+    throw error;
+  }
   if(cfg.pendingUrl&&!await currentRuntime(700)){
     if(!process.stdin.isTTY)
       throw Error('需要重新授权服务器，请运行 deskbeacon setup --url '+cfg.pendingUrl);

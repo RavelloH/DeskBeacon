@@ -1,5 +1,6 @@
 import {spawn} from 'node:child_process';
-import {closeSync,existsSync,mkdirSync,openSync,readFileSync,rmSync,writeFileSync} from 'node:fs';
+import {closeSync,existsSync,mkdirSync,openSync,readFileSync,rmSync,statSync,writeFileSync} from 'node:fs';
+import {lockOwnerAlive,ownLockRecord} from './process-identity.js';
 import {join} from 'node:path';
 import {dataDir} from './daemon.js';
 import {logEvent,installDiagnostics,flushLogs,closeLogs,discardLegacyLog} from './diagnostics.js';
@@ -10,15 +11,14 @@ const stopMarker=join(dataDir,'supervisor.stop');
 const maxRestarts=8;
 const restartWindowMs=60_000;
 
-function pidAlive(pid:number):boolean{
- if(!Number.isSafeInteger(pid)||pid<=0)return false;
- try{process.kill(pid,0);return true;}catch(e){return (e as NodeJS.ErrnoException).code==='EPERM';}
-}
 export function supervisorRunning():boolean{
  try{
-  const {pid}=JSON.parse(readFileSync(supervisorLock,'utf8')) as {pid:number};
-  return pidAlive(pid);
- }catch{return false;}
+  const record=JSON.parse(readFileSync(supervisorLock,'utf8')) as unknown;
+  return lockOwnerAlive(record,'supervisor');
+ }catch{
+  // An incomplete, freshly created lock may belong to a starting process.
+  try{return Date.now()-statSync(supervisorLock).mtimeMs<3000;}catch{return false;}
+ }
 }
 export function requestSupervisorStop(force=false):boolean{
  if(!supervisorRunning())return false;
@@ -30,8 +30,9 @@ function acquireLock():number|null{
  for(let i=0;i<3;i++){
   try{
    const fd=openSync(supervisorLock,'wx',0o600);
-   const startedAt=Date.now();
-   try{writeFileSync(fd,JSON.stringify({pid:process.pid,startedAt}));}
+   const record=ownLockRecord('supervisor');
+   const startedAt=record.startedAt!;
+   try{writeFileSync(fd,JSON.stringify(record));}
    finally{closeSync(fd);}
    return startedAt;
   }catch(e){
@@ -148,8 +149,8 @@ export async function superviseService(options:SupervisorOptions):Promise<void>{
   await flushLogs();await closeLogs();
   process.off('SIGTERM',onSignal);process.off('SIGINT',onSignal);
   try{
-   const current=JSON.parse(readFileSync(supervisorLock,'utf8')) as {pid:number};
-   if(current.pid===process.pid)rmSync(supervisorLock,{force:true});
+   const current=JSON.parse(readFileSync(supervisorLock,'utf8')) as {pid:number;processStartedAt?:number};
+   if(current.pid===process.pid&&(!current.processStartedAt||Math.abs(current.processStartedAt-(Date.now()-process.uptime()*1000))<5000))rmSync(supervisorLock,{force:true});
   }catch{}
   rmSync(stopMarker,{force:true});
  }

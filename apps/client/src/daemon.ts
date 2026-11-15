@@ -1,6 +1,9 @@
 import { DatabaseSync } from 'node:sqlite';
 import { EventEmitter } from 'node:events';
-import { mkdirSync, existsSync, readFileSync, writeFileSync, chmodSync, promises as fs } from 'node:fs';
+import { mkdirSync, existsSync, promises as fs } from 'node:fs';
+import {saveConfig,loadConfig,configPath,dataDir,type Config} from './config-store.js';
+export {saveConfig,loadConfig,configPath,dataDir} from './config-store.js';
+export type {Config} from './config-store.js';
 import { join, resolve, dirname } from 'node:path';
 import { hostname, homedir, platform, arch, totalmem, freemem } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
@@ -24,27 +27,6 @@ import {normalizeDesktopMode,normalizeDesktopCursor} from './desktop/defaults.js
 
 
 
-export type Config={url:string;deviceId:string;accessToken:string;refreshToken?:string;accessTokenExpiresAt?:number;clientId:string;deviceName:string;pendingUrl?:string|undefined;proxyAuto?:boolean|undefined;proxyUrl?:string|null|undefined;desktopMode?:'observe_only'|'headless_only'|'headed_allowed';desktopCursor?:boolean};
-export const dataDir=process.env.DESKBEACON_DATA_DIR ?? join(homedir(),'.deskbeacon');
-export const configPath=join(dataDir,'config.json');
-/** Persist the two proxy settings with stable JSON types, including for legacy configs. */
-export function saveConfig(config:Config){
- const stored={...config,proxyAuto:config.proxyAuto===true,
-  proxyUrl:typeof config.proxyUrl==='string'&&config.proxyUrl.trim()?config.proxyUrl:null,
-  desktopMode:normalizeDesktopMode(config.desktopMode),
-  desktopCursor:normalizeDesktopCursor(config.desktopCursor)};
- mkdirSync(dataDir,{recursive:true});
- writeFileSync(configPath,JSON.stringify(stored,null,2),{mode:0o600});
- if(process.platform!=='win32')chmodSync(configPath,0o600);
-}
-export function loadConfig():Config{
- if(!existsSync(configPath))throw Error('DEVICE_NOT_CONFIGURED: run deskbeacon setup --url https://your-worker.example');
- const config=JSON.parse(readFileSync(configPath,'utf8')) as Config;
- return {...config,proxyAuto:config.proxyAuto===true,
-  proxyUrl:typeof config.proxyUrl==='string'&&config.proxyUrl.trim()?config.proxyUrl:null,
-  desktopMode:normalizeDesktopMode(config.desktopMode),
-  desktopCursor:normalizeDesktopCursor(config.desktopCursor)};
-}
 const now=()=>new Date().toISOString();
 const sha=(value:string)=>createHash('sha256').update(value).digest('hex');
 const err=(e:unknown)=>e instanceof Error?e.message:String(e);
@@ -65,6 +47,7 @@ export class ClientDaemon extends EventEmitter {
   private workspaces=new Map<string,{cwd:string;version:number;shellProfile:string}>();
   private stopped=false;
   private forceRefresh=false;
+  private credentialsNeedSaving=false;
   private resultAckIds=new Map<string,string>();
   private replayInProgress=false;
   // Memory-only execution guard: a repeated dispatch with the same ID must never restart work.
@@ -110,18 +93,29 @@ export class ClientDaemon extends EventEmitter {
     }
     return this.systemMemory;
   }
+  private persistRotatedCredentials(){
+    const saved=loadConfig();
+    if(saved.clientId!==this.config.clientId)throw Error('DEVICE_CONFIG_CHANGED_DURING_TOKEN_REFRESH');
+    saveConfig({...saved,...this.config,configRevision:saved.configRevision,pendingUrl:saved.pendingUrl,proxyAuto:saved.proxyAuto,proxyUrl:saved.proxyUrl,
+      desktopMode:normalizeDesktopMode(saved.desktopMode),desktopCursor:normalizeDesktopCursor(saved.desktopCursor)});
+    this.credentialsNeedSaving=false;
+  }
   private async refreshAccessToken(){
+    // OAuth refresh tokens may be rotated by the server. Retain the new credentials
+    // in memory and retry *local persistence* before making another token request.
+    if(this.credentialsNeedSaving){this.persistRotatedCredentials();return;}
     if(!this.config.refreshToken)return;
     if(!this.forceRefresh&&this.config.accessTokenExpiresAt&&Date.now()<this.config.accessTokenExpiresAt-60_000)return;
     const response=await networkFetch(this.config.url+"/oauth/token",{method:"POST",headers:{"content-type":"application/x-www-form-urlencoded"},body:new URLSearchParams({grant_type:"refresh_token",refresh_token:this.config.refreshToken,client_id:this.config.clientId}),signal:AbortSignal.timeout(10_000)});
     if(!response.ok)throw Error("DEVICE_TOKEN_REFRESH_FAILED "+response.status);
     const token=await response.json() as {access_token:string;refresh_token?:string;expires_in?:number};
+    if(!token.access_token)throw Error('DEVICE_TOKEN_REFRESH_INVALID_RESPONSE');
     this.config.accessToken=token.access_token;
     if(token.refresh_token)this.config.refreshToken=token.refresh_token;
     if(token.expires_in)this.config.accessTokenExpiresAt=Date.now()+token.expires_in*1000;
+    this.credentialsNeedSaving=true;
+    this.persistRotatedCredentials();
     this.forceRefresh=false;
-    if(existsSync(configPath))try{const saved=loadConfig();if(saved.clientId===this.config.clientId)saveConfig({...saved,...this.config,pendingUrl:saved.pendingUrl,proxyAuto:saved.proxyAuto,proxyUrl:saved.proxyUrl,
-      desktopMode:normalizeDesktopMode(saved.desktopMode),desktopCursor:normalizeDesktopCursor(saved.desktopCursor)});}catch{}
   }
 
   private transfers=new Map<string,{status:string;bytes:number;path:string}>();

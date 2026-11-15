@@ -56,7 +56,14 @@ export async function exchangeSetupCode(server:string,clientId:string,redirect:s
 }
 export function saveSetupCredentials(server:string,clientId:string,credentials:{access_token:string;refresh_token?:string;expires_in?:number},signal?:AbortSignal){
  signal?.throwIfAborted();
- const prior=existsSync(configPath)?loadConfig():null;
+ let prior:ReturnType<typeof loadConfig>|null=null;
+ if(existsSync(configPath)||existsSync(configPath+'.bak')){
+  try{prior=loadConfig();}
+  catch(error){
+   // A corrupted config without a valid backup must not block re-pairing.
+   if(!(error instanceof Error)||!error.message.startsWith('CONFIG_CORRUPTED:'))throw error;
+  }
+ }
  saveConfig({...(prior?{proxyAuto:prior.proxyAuto,proxyUrl:prior.proxyUrl}:{}),
   url:server,clientId,deviceId:clientId,accessToken:credentials.access_token,
   ...(credentials.refresh_token?{refreshToken:credentials.refresh_token}:{}),

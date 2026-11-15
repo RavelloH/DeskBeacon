@@ -80,15 +80,19 @@ jobs:
             exit 0
           fi
           cat > "$RUNNER_TEMP/release-notes.md" <<'EOF'
-          ## 主要更新
+          ## 0.3.1 稳定性与故障恢复更新
 
-          - 新增原生桌面自动化：控件树、查找、点击、输入、窗口管理、应用启动及多 Agent 会话隔离；桌面运行时按需加载。
-          - 新增无浏览器设备认证（`deskbeacon setup --device`），适用于 VPS 和 SSH 终端。
-          - 新增 OAuth Agent/Device 授权管理、CapJS 防护及权限撤销。
-          - 统一跨平台 HTTP/WebSocket 代理与 Termux 兼容处理。
-          - 集成 RLog 3.1、异常诊断、Flight Recorder，以及 TUI 输出预览、行号、颜色与 Diff 改进。
-          - 完善 MCP 工具可靠性和 Cloudflare 部署配置。
+          - 修复 Windows 异常重启时可能造成 `config.json` 丢失或损坏的问题：配置通过临时文件、刷新磁盘与原子替换保存，并保留可恢复的 `config.json.bak`。
+          - 自动识别无效、全零或缺失的配置文件；从有效备份恢复设备身份，保留损坏文件供排查。新增配置版本号，避免使用较旧的 OAuth 令牌快照。
+          - 修复 OAuth 刷新令牌保存失败被静默忽略的问题；优先重试本地落盘，避免重复刷新令牌。
+          - 修复 Runtime 和 Supervisor 锁文件中仅凭 PID 判断运行状态的问题，减少 PID 被复用导致的误判。
+          - 修复 Desktop 原生程序在 npm 安装目录中的路径定位；`set_value` 不再将无障碍接口返回值误报为已经写入应用文档。
+          - 修复 `fs_find` 通配符匹配，增强 MCP 工具说明及桌面会话操作指引。
+          - 修复 OAuth 同源表单提交在严格来源校验下的兼容性问题。
+          - 新增配置故障恢复、令牌持久化及运行锁的回归测试。
 
-          npm 安装：`npm install -g deskbeacon`。需要 Node.js 24 或更新版本。
+          **升级：** `npm install -g deskbeacon@0.3.1`（需要 Node.js 24+）。升级保留现有设备配置；此前已经损坏且无有效备份的配置仍需要重新配对。
+
+          **部署提示：** 客户端修复需要安装新版 npm 包；服务端 OAuth 修复需要单独更新自己的 Cloudflare Worker 部署。
           EOF
           gh release create "$GITHUB_REF_NAME" --title "DeskBeacon $GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/release-notes.md" --verify-tag
